@@ -11,9 +11,11 @@ export interface CachedCompactionConfig {
 	compactAtPercent: number;
 	/** Compact once the context holds this many tokens, whatever the model's window, 0 = off. */
 	compactAtTokens: number;
+	/** Keep the prompt cache warm for this many minutes after Pi goes idle, 0 = off. */
+	keepWarmMinutes: number;
 }
 
-const DEFAULTS: CachedCompactionConfig = { cacheRetention: "long", compactBeforeExpiry: true, minContextTokens: 140_000, compactAtPercent: 90, compactAtTokens: 0 };
+const DEFAULTS: CachedCompactionConfig = { cacheRetention: "long", compactBeforeExpiry: true, minContextTokens: 140_000, compactAtPercent: 90, compactAtTokens: 0, keepWarmMinutes: 0 };
 
 /** The values `/cached-compaction settings` offers for compactAtPercent; 0 is "off". */
 export const COMPACT_AT_PERCENTS = [0, 50, 60, 70, 75, 80, 85, 90, 95];
@@ -21,6 +23,8 @@ export const COMPACT_AT_PERCENTS = [0, 50, 60, 70, 75, 80, 85, 90, 95];
 export const COMPACT_AT_TOKEN_CHOICES = [0, 150_000, 200_000, 300_000, 400_000, 500_000, 600_000, 800_000];
 /** The values `/cached-compaction settings` offers for minContextTokens. */
 export const MIN_CONTEXT_CHOICES = [50_000, 100_000, 140_000, 200_000, 300_000, 500_000];
+/** The values `/cached-compaction settings` offers for keepWarmMinutes; 0 is "off". */
+export const KEEP_WARM_CHOICES = [0, 30, 60, 120, 180, 240, 480];
 /** A cached summary request needs at least this many output tokens; with less room, Pi's compaction runs instead. */
 export const MIN_SUMMARY_TOKENS = 16_000;
 /** Room kept free for the summary instruction and token-count drift between Pi's estimate and the provider's count. */
@@ -47,6 +51,7 @@ export function loadConfig(): CachedCompactionConfig {
 		minContextTokens = DEFAULTS.minContextTokens,
 		compactAtPercent = DEFAULTS.compactAtPercent,
 		compactAtTokens = DEFAULTS.compactAtTokens,
+		keepWarmMinutes = DEFAULTS.keepWarmMinutes,
 	} = raw;
 	if (cacheRetention !== "short" && cacheRetention !== "long") throw new Error(`cachedCompaction.cacheRetention in ${path} must be "short" or "long"`);
 	if (typeof compactBeforeExpiry !== "boolean") throw new Error(`cachedCompaction.compactBeforeExpiry in ${path} must be true or false`);
@@ -59,7 +64,10 @@ export function loadConfig(): CachedCompactionConfig {
 	if (typeof compactAtTokens !== "number" || !Number.isInteger(compactAtTokens) || compactAtTokens < 0) {
 		throw new Error(`cachedCompaction.compactAtTokens in ${path} must be a whole number of tokens, or 0 for off`);
 	}
-	return { cacheRetention, compactBeforeExpiry, minContextTokens, compactAtPercent, compactAtTokens };
+	if (typeof keepWarmMinutes !== "number" || !Number.isInteger(keepWarmMinutes) || keepWarmMinutes < 0 || keepWarmMinutes > 1440) {
+		throw new Error(`cachedCompaction.keepWarmMinutes in ${path} must be a whole number of minutes from 0 (off) to 1440`);
+	}
+	return { cacheRetention, compactBeforeExpiry, minContextTokens, compactAtPercent, compactAtTokens, keepWarmMinutes };
 }
 
 /** Writes the given keys into `cachedCompaction` in the global settings file, keeping every other setting, and returns the new config. */
