@@ -7,8 +7,8 @@ import test, { mock } from "node:test";
 // The trace path and settings are read from the agent directory, so it is set before the extension loads.
 const dir = mkdtempSync(join(tmpdir(), "pcc-warm-"));
 process.env.PI_CODING_AGENT_DIR = dir;
-writeFileSync(join(dir, "settings.json"), JSON.stringify({ cachedCompaction: { keepWarmMinutes: 120, minContextTokens: 100_000 } }));
-const { default: cachedCompaction } = await import("../index.ts");
+writeFileSync(join(dir, "settings.json"), JSON.stringify({ cacheKeeper: { keepWarmMinutes: 120, minContextTokens: 100_000 } }));
+const { default: cacheKeeper } = await import("../index.ts");
 
 const HOUR = 3_600_000;
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -22,7 +22,7 @@ function harness() {
 		appendEntry: () => {},
 		getThinkingLevel: () => "high",
 	};
-	cachedCompaction(pi as never);
+	cacheKeeper(pi as never);
 
 	const model = { provider: "cliproxyapi", id: "sub/claude", api: "anthropic-messages", promptCache: { short: 3600, long: 3600 }, contextWindow: 1_000_000, maxTokens: 64_000 };
 	const user = { role: "user", content: [{ type: "text", text: "hi" }], timestamp: 0 };
@@ -69,7 +69,7 @@ function harness() {
 }
 
 const traces = () =>
-	readFileSync(join(dir, "cached-compaction.jsonl"), "utf8")
+	readFileSync(join(dir, "cache-keeper.jsonl"), "utf8")
 		.trim()
 		.split("\n")
 		.filter(Boolean)
@@ -111,7 +111,7 @@ test("a 1-hour cache is refreshed twice inside a 2-hour idle window, then compac
 test("a new message aborts a refresh in flight, and nothing is recorded for it", async (t) => {
 	mock.timers.enable({ apis: ["setInterval", "Date"], now: 1_000 });
 	t.after(() => mock.timers.reset());
-	writeFileSync(join(dir, "cached-compaction.jsonl"), "");
+	writeFileSync(join(dir, "cache-keeper.jsonl"), "");
 	const { emit, warms, state } = harness();
 	state.hold = true;
 	emit("agent_settled");

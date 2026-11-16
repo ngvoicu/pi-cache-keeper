@@ -1,18 +1,26 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.0] - 2026-11-16
+
+First release of pi-cache-keeper. Needs Pi 0.87.0 or newer.
+
+pi-cache-keeper is based on [pi-cached-compaction](https://github.com/nicobailon/pi-cached-compaction) by Nico Bailon (MIT), starting from its 0.2.0 release; his releases of pi-cached-compaction are kept below as he wrote them. Compaction from the warm cache, the compaction card, the cache countdown, compacting before the cache expires and the longer cache are his work. Added here since then: compacting when the context is full (`compactAtPercent`) or at a token cap (`compactAtTokens`), a summary sized to the model's window, a settings menu, a cache countdown that says what it means for cost, and keeping the cache warm while Pi is idle (`keepWarmMinutes`, off unless you set it). This is a separate project; it is not maintained by Nico Bailon.
+
+### Changed
+- **New name** — The package is `pi-cache-keeper`, installed with `pi install git:github.com/ngvoicu/pi-cache-keeper`. The commands are `/cache-keeper` and `/cache-keeper-settings` (were `/cached-compaction` and `/cached-compaction-settings`), the settings key is `cacheKeeper` (was `cachedCompaction`), and the log is `~/.pi/agent/cache-keeper.jsonl` (was `cached-compaction.jsonl`).
+- **Settings carry over** — While `settings.json` has no `cacheKeeper` key, the `cachedCompaction` key is read as it is. The settings menu saves to `cacheKeeper`, starting from what it read, and leaves `cachedCompaction` alone. Compaction cards written by pi-cached-compaction still show in old sessions.
+- **Labeled cache countdown** — The footer reads `cache warm · 59m left`, then `cache cold · next message full price`, instead of `⏱ 59m`, so it says what the countdown means for cost and is not mistaken for elapsed time or a countdown to compaction. During a request it reads `cache in use` instead of disappearing, so the footer no longer changes shape between turns.
 
 ### Added
 - **Compact when the context is full** — After a turn, once the context fills `compactAtPercent` of the model's window (90% by default), the session compacts from the warm cache while a summary still fits beside the conversation. Before, a 1M-token session reached Pi's own threshold with about 16k tokens left, the cached summary hit its output limit, and Pi's compaction ran at full price ($4.20 instead of about $0.45 on a 984k-token Opus session).
 - **Token cap for compacting when full** — `compactAtTokens` (off by default) compacts once the context holds that many tokens, on any model, at the cap or `compactAtPercent`, whichever comes first. A percentage is a different size on every window; a cap keeps the context, and so the price of each request's cache read, under one size everywhere.
 - **Keep the cache warm when idle** — `keepWarmMinutes` (off by default) keeps the prompt cache warm for that long after Pi goes idle: shortly before it expires, the last request is re-sent exactly as sent with a one-token answer, as Pi's own warming does. Pi's warming stops 30 minutes after the last request and never refreshes a 1-hour cache while idle. A refresh that fails or misses the cache stops warming until the next message. When the window ends, compacting before expiry takes over.
-- **`/cached-compaction-settings`** (also `/cached-compaction settings`) — A menu for every setting (compact when full, compact before expiry and from what size, cache retention). Changes are saved to `cachedCompaction` in `~/.pi/agent/settings.json` and apply right away. `/cached-compaction` shows the "when full" mark for the current model.
+- **`/cache-keeper-settings`** (also `/cache-keeper settings`) — A menu for every setting (compact when full and at what token cap, compact before expiry and from what size, keep the cache warm, cache retention). Changes are saved to `cacheKeeper` in `~/.pi/agent/settings.json` and apply right away. `/cache-keeper` shows the "when full" mark for the current model and the keep-warm state.
 
 ### Fixed
 - **Summary length** — The cached summary may use the model's output limit, reduced so the conversation and the summary fit the window, like Pi's own compaction. It was capped at 80% of `compaction.reserveTokens` (about 13k tokens), too short for large sessions. With less than 16k tokens of room, the cached path is skipped instead of attempted.
 
-### Changed
-- **Labeled cache countdown** — The footer reads `cache warm · 59m left`, then `cache cold · next message full price`, instead of `⏱ 59m`, so it says what the countdown means for cost and is not mistaken for elapsed time or a countdown to compaction. During a request it reads `cache in use` instead of disappearing, so the footer no longer changes shape between turns.
+# pi-cached-compaction (Nico Bailon)
 
 ## [0.2.0] - 2026-10-23
 

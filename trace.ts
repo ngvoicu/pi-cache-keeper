@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-const TRACE_PATH = join(getAgentDir(), "cached-compaction.jsonl");
+const TRACE_PATH = join(getAgentDir(), "cache-keeper.jsonl");
 export const TRACE_PATH_LABEL = TRACE_PATH.startsWith(homedir()) ? `~${TRACE_PATH.slice(homedir().length)}` : TRACE_PATH;
 const MAX_TRACE_BYTES = 5_000_000;
 

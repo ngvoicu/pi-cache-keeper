@@ -65,7 +65,7 @@ figure{margin:0 0 40px;width:960px}
 <div class="kicker">One 40 KB test run, as the summarizer sees it</div>
 <div class="row"><span class="lab">Pi's compaction</span><span class="track"><b class="pi"></b></span><span class="v bad" style="margin-left:22px">the first 2,000 chars</span></div>
 <div class="under">the failures are down here ↑</div>
-<div class="row" style="margin-top:22px"><span class="lab">pi-cached-compaction</span><span class="track"><b class="us"></b></span><span class="v good" style="margin-left:22px">all of it, from the cache</span></div>
+<div class="row" style="margin-top:22px"><span class="lab">pi-cache-keeper</span><span class="track"><b class="us"></b></span><span class="v good" style="margin-left:22px">all of it, from the cache</span></div>
 </div>
 </figure>
 
@@ -74,7 +74,7 @@ figure{margin:0 0 40px;width:960px}
 <div class="kicker">What each compaction sends</div>
 <div class="row"><span class="lab">Pi's compaction</span><span class="seg f">[summarizer prompt]</span><span class="seg f">[older messages as text, tool output cut]</span></div>
 <div class="res"><span class="v bad">nothing</span> from cache</div>
-<div class="row" style="margin-top:30px"><span class="lab">pi-cached-compaction</span><span class="grp"><span class="seg c">[tools]</span><span class="seg c">[system prompt]</span><span class="seg c">[msg 1 … msg N]</span><em>same bytes as your last turn</em></span><span class="grp"><span class="seg n">[summarize this]</span><em>new</em></span></div>
+<div class="row" style="margin-top:30px"><span class="lab">pi-cache-keeper</span><span class="grp"><span class="seg c">[tools]</span><span class="seg c">[system prompt]</span><span class="seg c">[msg 1 … msg N]</span><em>same bytes as your last turn</em></span><span class="grp"><span class="seg n">[summarize this]</span><em>new</em></span></div>
 <div class="res" style="margin-top:6px"><span class="v good">~99%</span> from cache</div>
 </div>
 </figure>
@@ -89,16 +89,16 @@ figure{margin:0 0 40px;width:960px}
           last request had: {"effort":"high","summary":"auto"}
           summary request had: {"effort":"low","summary":"auto"}</span>
  13:48:59   Pi's compaction saved: 0% of 923 from cache, 384 out, $0.0003, summary 1243 chars
-<span class="dim"> log: ~/.pi/agent/cached-compaction.jsonl</span></pre></div>
+<span class="dim"> log: ~/.pi/agent/cache-keeper.jsonl</span></pre></div>
 </figure>
 
 <figure id="status-command">
 <div class="term"><div class="bar"><i></i><i></i><i></i><span>pi</span></div>
-<pre class="dim"> pi-cached-compaction · opencode-go/gpt-6-luna
+<pre class="dim"> pi-cache-keeper · opencode-go/gpt-6-luna
  cache: ⏱ 29m left (lifetime 30 min, OpenAI's minimum)
  next compaction: cached path; last request 4 s ago with 186 messages, 1 since. The request prefix is checked when it runs.
  before expiry: on, from 50k tokens of context · retention long
- log: ~/.pi/agent/cached-compaction.jsonl
+ log: ~/.pi/agent/cache-keeper.jsonl
 
  This session:
  23:43:49 /compact: cached, 99% of 50k from cache, 2k out, 11.3s, summary 3263 chars

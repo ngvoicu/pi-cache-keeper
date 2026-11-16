@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { autoCompactionEnabled, fullThreshold, loadConfig, saveConfig, summaryBudget } from "../config.ts";
+import { autoCompactionEnabled, fullThreshold, loadConfig, saveConfig, settingsKeyInUse, summaryBudget } from "../config.ts";
 
 test("settings: compacting before expiry is on by default, a byte-order mark is allowed, unknown keys fail, and Pi's compaction switch is read project over global", () => {
 	const dir = mkdtempSync(join(tmpdir(), "pcc-config-"));
@@ -12,10 +12,10 @@ test("settings: compacting before expiry is on by default, a byte-order mark is 
 	process.env.PI_CODING_AGENT_DIR = dir;
 	try {
 		assert.equal(loadConfig().compactBeforeExpiry, true);
-		writeFileSync(settings, String.fromCharCode(0xfeff) + JSON.stringify({ cachedCompaction: { compactBeforeExpiry: false }, compaction: { enabled: false } }));
+		writeFileSync(settings, String.fromCharCode(0xfeff) + JSON.stringify({ cacheKeeper: { compactBeforeExpiry: false }, compaction: { enabled: false } }));
 		assert.equal(loadConfig().compactBeforeExpiry, false);
 		assert.equal(autoCompactionEnabled(undefined), false);
-		writeFileSync(settings, JSON.stringify({ cachedCompaction: { compactBeforeExpiryy: true } }));
+		writeFileSync(settings, JSON.stringify({ cacheKeeper: { compactBeforeExpiryy: true } }));
 		assert.throws(loadConfig, /unknown keys: compactBeforeExpiryy/);
 		assert.equal(autoCompactionEnabled(undefined), true);
 		mkdirSync(join(project, ".pi"), { recursive: true });
@@ -37,16 +37,16 @@ test("settings: compacting when full is on at 90% by default, takes a whole perc
 	try {
 		assert.equal(loadConfig().compactAtPercent, 90);
 		for (const bad of [100, -1, 85.5, "90"]) {
-			writeFileSync(settings, JSON.stringify({ cachedCompaction: { compactAtPercent: bad } }));
+			writeFileSync(settings, JSON.stringify({ cacheKeeper: { compactAtPercent: bad } }));
 			assert.throws(loadConfig, /compactAtPercent .* whole percentage/);
 		}
-		writeFileSync(settings, JSON.stringify({ theme: "dark", compaction: { enabled: true }, cachedCompaction: { minContextTokens: 200_000 } }));
+		writeFileSync(settings, JSON.stringify({ theme: "dark", compaction: { enabled: true }, cacheKeeper: { minContextTokens: 200_000 } }));
 		const saved = saveConfig({ compactAtPercent: 80, cacheRetention: "short" });
 		assert.deepEqual(saved, { cacheRetention: "short", compactBeforeExpiry: true, minContextTokens: 200_000, compactAtPercent: 80, compactAtTokens: 0, keepWarmMinutes: 0 });
 		assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")), {
 			theme: "dark",
 			compaction: { enabled: true },
-			cachedCompaction: { minContextTokens: 200_000, compactAtPercent: 80, cacheRetention: "short" },
+			cacheKeeper: { minContextTokens: 200_000, compactAtPercent: 80, cacheRetention: "short" },
 		});
 		assert.equal(saveConfig({ compactAtPercent: 0 }).compactAtPercent, 0);
 	} finally {
@@ -84,14 +84,14 @@ test("settings: the token cap is off by default, takes a whole number of tokens,
 	try {
 		assert.equal(loadConfig().compactAtTokens, 0);
 		for (const bad of [-1, 400_000.5, "400000", true]) {
-			writeFileSync(settings, JSON.stringify({ cachedCompaction: { compactAtTokens: bad } }));
+			writeFileSync(settings, JSON.stringify({ cacheKeeper: { compactAtTokens: bad } }));
 			assert.throws(loadConfig, /compactAtTokens .* whole number of tokens/);
 		}
-		writeFileSync(settings, JSON.stringify({ cachedCompaction: { compactAtPercent: 70 } }));
+		writeFileSync(settings, JSON.stringify({ cacheKeeper: { compactAtPercent: 70 } }));
 		const saved = saveConfig({ compactAtTokens: 400_000 });
 		assert.equal(saved.compactAtTokens, 400_000);
 		assert.equal(saved.compactAtPercent, 70);
-		assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")).cachedCompaction, { compactAtPercent: 70, compactAtTokens: 400_000 });
+		assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")).cacheKeeper, { compactAtPercent: 70, compactAtTokens: 400_000 });
 	} finally {
 		delete process.env.PI_CODING_AGENT_DIR;
 		rmSync(dir, { recursive: true });
@@ -104,15 +104,40 @@ test("settings: keeping the cache warm is off by default and takes whole minutes
 	process.env.PI_CODING_AGENT_DIR = dir;
 	try {
 		assert.equal(loadConfig().keepWarmMinutes, 0);
-		writeFileSync(settings, JSON.stringify({ cachedCompaction: { keepWarmMinutes: 120 } }));
+		writeFileSync(settings, JSON.stringify({ cacheKeeper: { keepWarmMinutes: 120 } }));
 		assert.equal(loadConfig().keepWarmMinutes, 120);
 		for (const bad of [-1, 1441, 1.5, "60", true]) {
-			writeFileSync(settings, JSON.stringify({ cachedCompaction: { keepWarmMinutes: bad } }));
+			writeFileSync(settings, JSON.stringify({ cacheKeeper: { keepWarmMinutes: bad } }));
 			assert.throws(loadConfig, /keepWarmMinutes .* whole number of minutes/);
 		}
-		writeFileSync(settings, JSON.stringify({ cachedCompaction: { minContextTokens: 200_000 } }));
+		writeFileSync(settings, JSON.stringify({ cacheKeeper: { minContextTokens: 200_000 } }));
 		assert.equal(saveConfig({ keepWarmMinutes: 60 }).keepWarmMinutes, 60);
-		assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")).cachedCompaction, { minContextTokens: 200_000, keepWarmMinutes: 60 });
+		assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")).cacheKeeper, { minContextTokens: 200_000, keepWarmMinutes: 60 });
+	} finally {
+		delete process.env.PI_CODING_AGENT_DIR;
+		rmSync(dir, { recursive: true });
+	}
+});
+
+test("settings: without cacheKeeper, pi-cached-compaction's cachedCompaction is read; the menu saves to cacheKeeper and leaves the old key alone", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pck-config-"));
+	const settings = join(dir, "settings.json");
+	process.env.PI_CODING_AGENT_DIR = dir;
+	try {
+		const old = { cacheRetention: "short", minContextTokens: 140_000, compactAtPercent: 70, compactAtTokens: 400_000 };
+		writeFileSync(settings, JSON.stringify({ theme: "dark", cachedCompaction: old }));
+		assert.equal(settingsKeyInUse(), "cachedCompaction");
+		assert.deepEqual(loadConfig(), { ...old, compactBeforeExpiry: true, keepWarmMinutes: 0 });
+		writeFileSync(settings, JSON.stringify({ cachedCompaction: { compactAtPercent: 101 } }));
+		assert.throws(loadConfig, /^Error: cachedCompaction\.compactAtPercent/, "errors name the key the value came from");
+		writeFileSync(settings, JSON.stringify({ theme: "dark", cachedCompaction: old }));
+		const saved = saveConfig({ keepWarmMinutes: 60 });
+		assert.deepEqual(saved, { ...old, compactBeforeExpiry: true, keepWarmMinutes: 60 });
+		assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")), { theme: "dark", cachedCompaction: old, cacheKeeper: { ...old, keepWarmMinutes: 60 } });
+		assert.equal(settingsKeyInUse(), "cacheKeeper");
+		// Once cacheKeeper is present, the old key is ignored.
+		writeFileSync(settings, JSON.stringify({ cachedCompaction: old, cacheKeeper: { compactAtPercent: 80 } }));
+		assert.deepEqual(loadConfig(), { cacheRetention: "long", compactBeforeExpiry: true, minContextTokens: 140_000, compactAtPercent: 80, compactAtTokens: 0, keepWarmMinutes: 0 });
 	} finally {
 		delete process.env.PI_CODING_AGENT_DIR;
 		rmSync(dir, { recursive: true });

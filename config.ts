@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { isPlainObject } from "./cached-request.ts";
 
-export interface CachedCompactionConfig {
+export interface CacheKeeperConfig {
 	cacheRetention: "short" | "long";
 	compactBeforeExpiry: boolean;
 	minContextTokens: number;
@@ -15,15 +15,15 @@ export interface CachedCompactionConfig {
 	keepWarmMinutes: number;
 }
 
-const DEFAULTS: CachedCompactionConfig = { cacheRetention: "long", compactBeforeExpiry: true, minContextTokens: 140_000, compactAtPercent: 90, compactAtTokens: 0, keepWarmMinutes: 0 };
+const DEFAULTS: CacheKeeperConfig = { cacheRetention: "long", compactBeforeExpiry: true, minContextTokens: 140_000, compactAtPercent: 90, compactAtTokens: 0, keepWarmMinutes: 0 };
 
-/** The values `/cached-compaction settings` offers for compactAtPercent; 0 is "off". */
+/** The values `/cache-keeper-settings` offers for compactAtPercent; 0 is "off". */
 export const COMPACT_AT_PERCENTS = [0, 50, 60, 70, 75, 80, 85, 90, 95];
-/** The values `/cached-compaction settings` offers for compactAtTokens; 0 is "off". */
+/** The values `/cache-keeper-settings` offers for compactAtTokens; 0 is "off". */
 export const COMPACT_AT_TOKEN_CHOICES = [0, 150_000, 200_000, 300_000, 400_000, 500_000, 600_000, 800_000];
-/** The values `/cached-compaction settings` offers for minContextTokens. */
+/** The values `/cache-keeper-settings` offers for minContextTokens. */
 export const MIN_CONTEXT_CHOICES = [50_000, 100_000, 140_000, 200_000, 300_000, 500_000];
-/** The values `/cached-compaction settings` offers for keepWarmMinutes; 0 is "off". */
+/** The values `/cache-keeper-settings` offers for keepWarmMinutes; 0 is "off". */
 export const KEEP_WARM_CHOICES = [0, 30, 60, 120, 180, 240, 480];
 /** A cached summary request needs at least this many output tokens; with less room, Pi's compaction runs instead. */
 export const MIN_SUMMARY_TOKENS = 16_000;
@@ -38,13 +38,25 @@ function readSettings(path: string): Record<string, unknown> {
 	return JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
 }
 
-export function loadConfig(): CachedCompactionConfig {
+/** The key in pi's settings.json this extension reads and writes. */
+export const SETTINGS_KEY = "cacheKeeper";
+/** pi-cached-compaction's key: read when `cacheKeeper` is absent, so settings made for it keep working. Never written. */
+export const LEGACY_SETTINGS_KEY = "cachedCompaction";
+
+/** Which key the settings come from: `cacheKeeper`, else `cachedCompaction` when only that one is present. */
+export function settingsKeyInUse(settings: Record<string, unknown> = readSettings(settingsPath())): string {
+	return settings[SETTINGS_KEY] === undefined && settings[LEGACY_SETTINGS_KEY] !== undefined ? LEGACY_SETTINGS_KEY : SETTINGS_KEY;
+}
+
+export function loadConfig(): CacheKeeperConfig {
 	const path = settingsPath();
-	const raw: unknown = readSettings(path).cachedCompaction;
+	const settings = readSettings(path);
+	const key = settingsKeyInUse(settings);
+	const raw: unknown = settings[key];
 	if (raw === undefined) return DEFAULTS;
-	if (!isPlainObject(raw)) throw new Error(`cachedCompaction in ${path} must be an object`);
-	const unknown = Object.keys(raw).filter((key) => !(key in DEFAULTS));
-	if (unknown.length > 0) throw new Error(`cachedCompaction in ${path} has unknown keys: ${unknown.join(", ")}`);
+	if (!isPlainObject(raw)) throw new Error(`${key} in ${path} must be an object`);
+	const unknown = Object.keys(raw).filter((name) => !(name in DEFAULTS));
+	if (unknown.length > 0) throw new Error(`${key} in ${path} has unknown keys: ${unknown.join(", ")}`);
 	const {
 		cacheRetention = DEFAULTS.cacheRetention,
 		compactBeforeExpiry = DEFAULTS.compactBeforeExpiry,
@@ -53,29 +65,33 @@ export function loadConfig(): CachedCompactionConfig {
 		compactAtTokens = DEFAULTS.compactAtTokens,
 		keepWarmMinutes = DEFAULTS.keepWarmMinutes,
 	} = raw;
-	if (cacheRetention !== "short" && cacheRetention !== "long") throw new Error(`cachedCompaction.cacheRetention in ${path} must be "short" or "long"`);
-	if (typeof compactBeforeExpiry !== "boolean") throw new Error(`cachedCompaction.compactBeforeExpiry in ${path} must be true or false`);
+	if (cacheRetention !== "short" && cacheRetention !== "long") throw new Error(`${key}.cacheRetention in ${path} must be "short" or "long"`);
+	if (typeof compactBeforeExpiry !== "boolean") throw new Error(`${key}.compactBeforeExpiry in ${path} must be true or false`);
 	if (typeof minContextTokens !== "number" || !Number.isInteger(minContextTokens) || minContextTokens < 0) {
-		throw new Error(`cachedCompaction.minContextTokens in ${path} must be a whole number of tokens`);
+		throw new Error(`${key}.minContextTokens in ${path} must be a whole number of tokens`);
 	}
 	if (typeof compactAtPercent !== "number" || !Number.isInteger(compactAtPercent) || compactAtPercent < 0 || compactAtPercent > 99) {
-		throw new Error(`cachedCompaction.compactAtPercent in ${path} must be a whole percentage from 1 to 99, or 0 for off`);
+		throw new Error(`${key}.compactAtPercent in ${path} must be a whole percentage from 1 to 99, or 0 for off`);
 	}
 	if (typeof compactAtTokens !== "number" || !Number.isInteger(compactAtTokens) || compactAtTokens < 0) {
-		throw new Error(`cachedCompaction.compactAtTokens in ${path} must be a whole number of tokens, or 0 for off`);
+		throw new Error(`${key}.compactAtTokens in ${path} must be a whole number of tokens, or 0 for off`);
 	}
 	if (typeof keepWarmMinutes !== "number" || !Number.isInteger(keepWarmMinutes) || keepWarmMinutes < 0 || keepWarmMinutes > 1440) {
-		throw new Error(`cachedCompaction.keepWarmMinutes in ${path} must be a whole number of minutes from 0 (off) to 1440`);
+		throw new Error(`${key}.keepWarmMinutes in ${path} must be a whole number of minutes from 0 (off) to 1440`);
 	}
 	return { cacheRetention, compactBeforeExpiry, minContextTokens, compactAtPercent, compactAtTokens, keepWarmMinutes };
 }
 
-/** Writes the given keys into `cachedCompaction` in the global settings file, keeping every other setting, and returns the new config. */
-export function saveConfig(patch: Partial<CachedCompactionConfig>): CachedCompactionConfig {
+/**
+ * Writes the given keys into `cacheKeeper` in the global settings file, keeping every other setting, and returns the
+ * new config. The first save copies the settings it was reading from `cachedCompaction`, which is left as it is.
+ */
+export function saveConfig(patch: Partial<CacheKeeperConfig>): CacheKeeperConfig {
 	const path = settingsPath();
 	const settings = readSettings(path);
-	const current = isPlainObject(settings.cachedCompaction) ? settings.cachedCompaction : {};
-	settings.cachedCompaction = { ...current, ...patch };
+	const source = settings[settingsKeyInUse(settings)];
+	const current = isPlainObject(source) ? source : {};
+	settings[SETTINGS_KEY] = { ...current, ...patch };
 	mkdirSync(dirname(path), { recursive: true });
 	writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`);
 	return loadConfig();

@@ -33,7 +33,7 @@ test("the log describes compacting when full", () => {
 	assert.equal(describeTrace({ ...base, contextTokens: 412_000, threshold: 400_000, tokens: 400_000, action: "compact" }), `${time} context at 412k, past the 400k-token cap: compacting`);
 });
 
-test("the footer labels the countdown as the cache's, and the /cached-compaction line keeps the bare time", () => {
+test("the footer labels the countdown as the cache's, and the /cache-keeper line keeps the bare time", () => {
 	assert.equal(formatCacheStatus(59 * 60_000), "cache warm · 59m left");
 	assert.equal(formatCacheStatus(120_000), "cache warm · 2m left");
 	assert.equal(formatCacheStatus(25_000), "cache warm · 0:25 left");

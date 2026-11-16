@@ -42,8 +42,10 @@ import {
 	MIN_CONTEXT_CHOICES,
 	MIN_SUMMARY_TOKENS,
 	saveConfig,
+	SETTINGS_KEY,
+	settingsKeyInUse,
 	summaryBudget,
-	type CachedCompactionConfig,
+	type CacheKeeperConfig,
 } from "./config.ts";
 import {
 	appendTrace,
@@ -78,15 +80,17 @@ interface CachedPath {
 	cache: CacheState;
 }
 
-const STATUS_KEY = "cached-compaction";
-const CARD_TYPE = "cached-compaction";
-const PREFIX_MISMATCH = "pi-cached-compaction: request prefix differs from the cached request";
+const STATUS_KEY = "cache-keeper";
+const CARD_TYPE = "cache-keeper";
+/** The card type pi-cached-compaction wrote; still rendered so cards in older sessions show. */
+const LEGACY_CARD_TYPE = "cached-compaction";
+const PREFIX_MISMATCH = "pi-cache-keeper: request prefix differs from the cached request";
 const BRIDGE_API = "claude-bridge";
 const FORK_REQUEST_HEADER = "x-claude-bridge-fork";
 const EXPIRY_LEAD_MS = 20_000;
 const WARNING_MS = 30_000;
-const RETENTION_MARKER = "PI_CACHED_COMPACTION_RETENTION";
-const INTERACTIVE_OWNER = Symbol.for("pi-cached-compaction.interactive-long-retention");
+const RETENTION_MARKER = "PI_CACHE_KEEPER_RETENTION";
+const INTERACTIVE_OWNER = Symbol.for("pi-cache-keeper.interactive-long-retention");
 
 // Only OpenAI keeps tool_choice out of the cached prefix; elsewhere changing it costs cache.
 function isOpenAiResponses(model: Model<Api>): boolean {
@@ -116,7 +120,7 @@ function applyRetention(preferLong: boolean, interactive: boolean): void {
 	}
 }
 
-export default function cachedCompaction(pi: ExtensionAPI) {
+export default function cacheKeeper(pi: ExtensionAPI) {
 	let config = loadConfig();
 
 	let pendingTranscript: AgentMessage[] | undefined;
@@ -150,13 +154,13 @@ export default function cachedCompaction(pi: ExtensionAPI) {
 			appendTrace(record);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			if (ctx.hasUI && message !== traceError) ctx.ui.notify(`pi-cached-compaction could not write ${TRACE_PATH_LABEL}: ${message}`, "warning");
+			if (ctx.hasUI && message !== traceError) ctx.ui.notify(`pi-cache-keeper could not write ${TRACE_PATH_LABEL}: ${message}`, "warning");
 			traceError = message;
 		}
 		return record;
 	};
 
-	pi.registerEntryRenderer<{ records: TraceRecord[] }>(CARD_TYPE, (entry, { expanded }, theme) => {
+	const renderCard: Parameters<typeof pi.registerEntryRenderer<{ records: TraceRecord[] }>>[1] = (entry, { expanded }, theme) => {
 		const records = entry.data?.records;
 		if (!records?.length) return undefined;
 		const lines = [`${theme.fg("accent", "cached compaction")}${expanded ? "" : `  ${theme.fg("muted", "(")}${keyHint("app.tools.expand", "for details")}${theme.fg("muted", ")")}`}`];
@@ -173,7 +177,9 @@ export default function cachedCompaction(pi: ExtensionAPI) {
 		}
 		if (expanded) lines.push(theme.fg("dim", `log: ${TRACE_PATH_LABEL}`));
 		return new Text(lines.join("\n"), 1, 0);
-	});
+	};
+	pi.registerEntryRenderer(CARD_TYPE, renderCard);
+	pi.registerEntryRenderer(LEGACY_CARD_TYPE, renderCard);
 	const showCard = (records: TraceRecord[]) => pi.appendEntry<{ records: TraceRecord[] }>(CARD_TYPE, { records });
 
 	const stopTimer = (ctx: ExtensionContext) => {
@@ -358,7 +364,7 @@ export default function cachedCompaction(pi: ExtensionAPI) {
 				if (!response || response.stopReason === "error") {
 					warmStopped = "the last refresh failed";
 					trace(ctx, { ...record, action: "failed", seconds, reason: error ?? response?.errorMessage ?? "the request failed" });
-					if (ctx.hasUI) ctx.ui.notify(`pi-cached-compaction could not keep the cache warm: ${error ?? response?.errorMessage ?? "the request failed"}`, "warning");
+					if (ctx.hasUI) ctx.ui.notify(`pi-cache-keeper could not keep the cache warm: ${error ?? response?.errorMessage ?? "the request failed"}`, "warning");
 				} else {
 					// Either way the provider refreshed (or wrote) the entry when it received the request.
 					warmedAt = started;
@@ -665,7 +671,7 @@ export default function cachedCompaction(pi: ExtensionAPI) {
 		if (ctx.mode !== "tui") {
 			ctx.ui.notify(
 				[
-					"pi-cached-compaction settings (cachedCompaction in ~/.pi/agent/settings.json; /cached-compaction-settings in the TUI changes them)",
+					`pi-cache-keeper settings (${settingsKeyInUse()} in ~/.pi/agent/settings.json; /cache-keeper-settings in the TUI changes them and saves them to ${SETTINGS_KEY})`,
 					`compactAtPercent: ${config.compactAtPercent} · compactAtTokens: ${config.compactAtTokens} (${fullNote(ctx.model)})`,
 					`compactBeforeExpiry: ${config.compactBeforeExpiry} · minContextTokens: ${config.minContextTokens}`,
 					`keepWarmMinutes: ${config.keepWarmMinutes} (${keepWarmNote()})`,
@@ -736,7 +742,7 @@ export default function cachedCompaction(pi: ExtensionAPI) {
 				items.length + 2,
 				getSettingsListTheme(),
 				(id, value) => {
-					let patch: Partial<CachedCompactionConfig>;
+					let patch: Partial<CacheKeeperConfig>;
 					if (id === "compactAtPercent") patch = { compactAtPercent: percents.find((p) => percentLabel(p) === value) ?? config.compactAtPercent };
 					else if (id === "compactAtTokens") patch = { compactAtTokens: caps.find((n) => capLabel(n) === value) ?? config.compactAtTokens };
 					else if (id === "compactBeforeExpiry") patch = { compactBeforeExpiry: value === "on" };
@@ -746,7 +752,7 @@ export default function cachedCompaction(pi: ExtensionAPI) {
 					try {
 						config = saveConfig(patch);
 					} catch (error) {
-						ctx.ui.notify(`pi-cached-compaction could not save the setting: ${error instanceof Error ? error.message : String(error)}`, "error");
+						ctx.ui.notify(`pi-cache-keeper could not save the setting: ${error instanceof Error ? error.message : String(error)}`, "error");
 						return;
 					}
 					if (id === "cacheRetention") applyRetention(config.cacheRetention === "long", ctx.hasUI);
@@ -760,7 +766,7 @@ export default function cachedCompaction(pi: ExtensionAPI) {
 				() => done(),
 			);
 			const container = new Container();
-			container.addChild(new Text(`${theme.fg("accent", theme.bold("pi-cached-compaction"))} ${theme.fg("dim", "saved to cachedCompaction in ~/.pi/agent/settings.json")}`, 0, 0));
+			container.addChild(new Text(`${theme.fg("accent", theme.bold("pi-cache-keeper"))} ${theme.fg("dim", `saved to ${SETTINGS_KEY} in ~/.pi/agent/settings.json`)}`, 0, 0));
 			container.addChild(new Text("", 0, 0));
 			container.addChild(list);
 			return {
@@ -775,12 +781,12 @@ export default function cachedCompaction(pi: ExtensionAPI) {
 		});
 	};
 
-	pi.registerCommand("cached-compaction-settings", {
-		description: "Change pi-cached-compaction's settings: compact when full, compact before expiry, keep the cache warm, cache retention",
+	pi.registerCommand("cache-keeper-settings", {
+		description: "Change pi-cache-keeper's settings: compact when full, compact before expiry, keep the cache warm, cache retention",
 		handler: async (_args, ctx) => openSettings(ctx),
 	});
 
-	pi.registerCommand("cached-compaction", {
+	pi.registerCommand("cache-keeper", {
 		description:
 			"Show the prompt cache state and this session's compaction log; `settings` changes this extension's settings; `cache-flag` turns on OpenAI's cache options for GPT on opencode-go",
 		getArgumentCompletions: (prefix) => {
@@ -814,7 +820,7 @@ export default function cachedCompaction(pi: ExtensionAPI) {
 			const model = ctx.model;
 			const state = model && stateOf(model, entries);
 			let cache = "lifetime unknown, so no countdown";
-			if (model?.provider === "opencode-go" && flagless.includes(model.id)) cache += "; run /cached-compaction cache-flag to get one";
+			if (model?.provider === "opencode-go" && flagless.includes(model.id)) cache += "; run /cache-keeper cache-flag to get one";
 			if (state?.lifetime) {
 				let left = state.replied ? "the last request did not use the prompt cache" : "no request since the session started or compacted";
 				if (state.expiresAt !== undefined) left = state.expiresAt > Date.now() ? `${formatRemaining(state.expiresAt - Date.now())} left` : "expired";
@@ -837,13 +843,13 @@ export default function cachedCompaction(pi: ExtensionAPI) {
 			}
 			ctx.ui.notify(
 				[
-					`pi-cached-compaction · ${model ? `${model.provider}/${model.id}` : "no model"}`,
+					`pi-cache-keeper · ${model ? `${model.provider}/${model.id}` : "no model"}`,
 					`cache: ${cache}`,
 					`next compaction: ${next}`,
 					`when full: ${fullNote(model)}`,
 					`keep warm: ${keepWarmNote()}`,
 					`before expiry: ${expiryNote()} · retention ${model?.api === BRIDGE_API ? "set by Claude Code" : (process.env.PI_CACHE_RETENTION ?? "short")}`,
-					"settings: /cached-compaction-settings",
+					"settings: /cache-keeper-settings",
 					`log: ${TRACE_PATH_LABEL}`,
 					"",
 					...log,

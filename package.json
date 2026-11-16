@@ -1,7 +1,8 @@
 {
-  "name": "pi-cached-compaction",
-  "version": "0.2.0",
-  "description": "Pi compaction that reads the conversation's prompt cache instead of paying full input price",
+  "name": "pi-cache-keeper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Keeps pi's prompt cache paying off: compaction from the warm cache, compacting when the context is full, keeping the cache warm while idle. Based on pi-cached-compaction by Nico Bailon",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -11,16 +12,24 @@
     "prompt-cache",
     "extension"
   ],
-  "author": "Nico Bailon",
+  "author": "Gabriel Voicu <gabrielvoicujpi@gmail.com>",
+  "contributors": [
+    "Nico Bailon (original pi-cached-compaction, https://github.com/nicobailon/pi-cached-compaction)"
+  ],
   "license": "MIT",
+  "homepage": "https://github.com/ngvoicu/pi-cache-keeper#readme",
+  "bugs": {
+    "url": "https://github.com/ngvoicu/pi-cache-keeper/issues"
+  },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nicobailon/pi-cached-compaction.git"
+    "url": "git+https://github.com/ngvoicu/pi-cache-keeper.git"
   },
   "files": [
     "*.ts",
     "README.md",
     "CHANGELOG.md",
+    "LICENSE",
     "docs/"
   ],
   "scripts": {
