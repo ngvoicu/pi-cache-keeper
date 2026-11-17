@@ -93,7 +93,7 @@ jq -c 'select(.event == "compact") | {at, trigger, outcome, reason, cacheRead: .
 | Compact before expiry only on bigger sessions | raise `minContextTokens` |
 | Keep the cache warm through a long break | "Keep the cache warm when idle" (`keepWarmMinutes`), see [Keeping the cache warm](#keeping-the-cache-warm) |
 | Keep Pi's 5-minute cache and its 1.25× writes on Anthropic | `"cacheRetention": "short"` |
-| See what is known about the current model | the footer: `window ✓ · cache short ✓ · long ✗ · price ✓` (see [Model data](#model-data-from-providersdev)) |
+| See what is known about the current model | the footer: `· window ✓ · cache short ✓ · long ✗ · price ✓` (see [Model data](#model-data-from-providersdev)) |
 | Fetch the model data again now | `/cache-keeper-refresh` |
 | Get the countdown on a model providers.dev has no lifetime for | declare one with Pi's `modelOverrides.promptCache` |
 | Look through past decisions | the `jq` line under [What you'll see](#what-youll-see) |
@@ -181,7 +181,7 @@ Pi's model catalog doesn't say how long most providers keep a prompt cache, and 
 | Cache lifetimes (`promptCache.short`, `promptCache.long`) | only for a tier Pi has no lifetime for. "No safe lifetime" is never declared |
 | Prices (`cost`, with a tier per context size) and output limit (`maxTokens`) | only where Pi has none |
 
-**The footer** shows what was found for the current model: `window ✓ · cache short ✓ · long ✗ · price ✓`. `✓` is found, `✗` is not in the data, `?` is found but not used because it depends on how the model is reached (below). `/cache-keeper` names the entry and the values.
+**The footer** shows what was found for the current model: `· window ✓ · cache short ✓ · long ✗ · price ✓`. `✓` is found, `✗` is not in the data, `?` is found but not used because it depends on how the model is reached (below). `/cache-keeper` names the entry and the values.
 
 **What you should know before it changes how Pi behaves:**
 

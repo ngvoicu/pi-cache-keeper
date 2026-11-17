@@ -307,11 +307,11 @@ export function fieldStates(found: Found): Record<Field, "found" | "unsure" | "m
 const FIELD_LABELS: Record<Field, string> = { window: "window", short: "cache short", long: "long", price: "price" };
 const MARKS = { found: "✓", unsure: "?", missing: "✗" } as const;
 
-/** The footer text: "window ✓ · cache short ✓ · long ✗ · price ✓". `paint` colors one mark. */
+/** The footer text: "· window ✓ · cache short ✓ · long ✗ · price ✓", led by a dot that sets it apart from what the footer shows before it. `paint` colors one mark. */
 export function formatFieldStates(found: Found, paint: (mark: string, state: "found" | "unsure" | "missing") => string = (mark) => mark): string {
-	if (found.refs.length === 0) return "providers.dev: no data for this model";
+	if (found.refs.length === 0) return "· providers.dev: no data for this model";
 	const states = fieldStates(found);
-	return FIELDS.map((field) => `${FIELD_LABELS[field]} ${paint(MARKS[states[field]], states[field])}`).join(" · ");
+	return `· ${FIELDS.map((field) => `${FIELD_LABELS[field]} ${paint(MARKS[states[field]], states[field])}`).join(" · ")}`;
 }
 
 /** The fields of a pi model this extension looks at. */

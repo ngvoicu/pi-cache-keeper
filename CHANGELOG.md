@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.1] - 2026-11-17
+
+### Changed
+- The footer's model data starts with a dot (`· window ✓ · cache short ✓ · long ✗ · price ✓`), which sets it apart from what the footer shows before it.
+
 ## [0.2.0] - 2026-11-17
 
 ### Added

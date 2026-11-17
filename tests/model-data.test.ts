@@ -146,13 +146,13 @@ test("when two entries can describe a model, only what both say is kept, and the
 
 test("the footer says what was found: a lifetime evaluations found unsafe counts as not found", () => {
 	const exact = (provider: string, model: string) => findFacts([{ provider, model }], providers);
-	assert.equal(formatFieldStates(exact("openai-codex", "gpt-6.1-sol")), "window ✓ · cache short ✓ · long ✗ · price ✓");
-	assert.equal(formatFieldStates(exact("devin", "swe-2")), "window ✓ · cache short ✗ · long ✗ · price ✗");
-	assert.equal(formatFieldStates(exact("openai-codex", "gpt-6.1-terra")), "window ✓ · cache short ✗ · long ✗ · price ✓");
-	assert.equal(formatFieldStates(exact("antigravity", "gemini-3.8-flash-high")).startsWith("window ✗ · cache short ✓"), true);
+	assert.equal(formatFieldStates(exact("openai-codex", "gpt-6.1-sol")), "· window ✓ · cache short ✓ · long ✗ · price ✓");
+	assert.equal(formatFieldStates(exact("devin", "swe-2")), "· window ✓ · cache short ✗ · long ✗ · price ✗");
+	assert.equal(formatFieldStates(exact("openai-codex", "gpt-6.1-terra")), "· window ✓ · cache short ✗ · long ✗ · price ✓");
+	assert.equal(formatFieldStates(exact("antigravity", "gemini-3.8-flash-high")).startsWith("· window ✗ · cache short ✓"), true);
 	const unsure = findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, { proxy: true, ownedBy: "anthropic" }), providers);
-	assert.equal(formatFieldStates(unsure, (mark, state) => `<${state}:${mark}>`), "window <found:✓> · cache short <unsure:?> · long <found:✓> · price <found:✓>");
-	assert.equal(formatFieldStates(exact("openai", "nope")), "providers.dev: no data for this model");
+	assert.equal(formatFieldStates(unsure, (mark, state) => `<${state}:${mark}>`), "· window <found:✓> · cache short <unsure:?> · long <found:✓> · price <found:✓>");
+	assert.equal(formatFieldStates(exact("openai", "nope")), "· providers.dev: no data for this model");
 	assert.equal(describeFound(exact("openai-codex", "gpt-6.1-sol")), "openai-codex/gpt-6.1-sol: window 922,000, short cache 5 min, price $2/$10 per million");
 	assert.equal(describeFound(exact("devin", "swe-2")), "devin/swe-2: window at least 300,499, no safe short cache lifetime");
 	assert.match(describeFound(unsure), /^claude-subscription\/claude-opus-5-5 or anthropic\/claude-opus-5-5: window 1,000,000, long cache 1 h, price \$4\/\$20 per million; not used: cache short \(it depends on whether a subscription login or an API key serves the model/);

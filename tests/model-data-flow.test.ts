@@ -176,7 +176,7 @@ test("a session start fetches the data, fills models.json, reloads the models an
 	// The session's model is selected again, so it carries the new window.
 	assert.deepEqual(h.selected, ["cliproxyapi/gpt-6.1-sol"]);
 	assert.equal(h.model()?.contextWindow, 922_000);
-	assert.equal(h.statuses.get("cache-keeper-data"), "window ✓ · cache short ? · long ? · price ✓");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ? · long ? · price ✓");
 	assert.match(h.notices.join("\n"), /Model data from https:\/\/providers\.dev: 5 models updated/);
 	const saved = JSON.parse(readFileSync(storePath, "utf8"));
 	assert.equal(saved.datasetVersion, "d1");
@@ -189,11 +189,11 @@ test("the next session start asks nothing while the data is fresh; changing the 
 	h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
 	await h.settle();
 	assert.deepEqual(h.requests, []);
-	assert.equal(h.statuses.get("cache-keeper-data"), "window ✓ · cache short ? · long ? · price ✓", "the saved data is shown at once");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ? · long ? · price ✓", "the saved data is shown at once");
 	h.handlers.get("model_select")!({}, { ...h.ctx, model: h.ctx.modelRegistry.find("openai-codex", "gpt-6.1-sol") });
-	assert.equal(h.statuses.get("cache-keeper-data"), "window ✓ · cache short ✓ · long ✗ · price ✓");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ✓ · long ✗ · price ✓");
 	h.handlers.get("model_select")!({}, { ...h.ctx, model: { provider: "openai-codex", id: "unknown-model", cost: priced, contextWindow: 1, maxTokens: 1 } });
-	assert.equal(h.statuses.get("cache-keeper-data"), "providers.dev: no data for this model");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· providers.dev: no data for this model");
 });
 
 test("/cache-keeper-refresh fetches again, keeps a value the user set, and a failed refresh keeps models.json", async () => {
@@ -215,7 +215,7 @@ test("/cache-keeper-refresh fetches again, keeps a value the user set, and a fai
 	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
 	assert.match(h.notices.at(-1)!, /could not refresh the model data: offline\. The saved data stays in use\./);
 	assert.equal(readFileSync(modelsPath, "utf8"), before);
-	assert.equal(h.statuses.get("cache-keeper-data"), "window ✓ · cache short ? · long ? · price ✓");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ? · long ? · price ✓");
 });
 
 test("with modelData set to false, the values this extension wrote are taken out and the user's stay", async () => {
