@@ -70,6 +70,7 @@ import {
 	fetchDataset,
 	fetchProxyModels,
 	findFacts,
+	accessVia,
 	formatFieldStates,
 	isProxyProvider,
 	usableLifetime,
@@ -267,6 +268,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const first = data.accounts[model.provider]?.[model.id]?.[0];
 		return first && first.kind !== served.kind ? served.kind : undefined;
 	};
+	// The kind that answered the last request to this model, even when it is the one the proxy tries first.
+	const servedOf = (model: Model<Api>): string | undefined => (served && served.provider === model.provider && served.id === model.id ? served.kind : undefined);
 	const servedModel = (model: Model<Api>): Model<Api> => {
 		const kind = servedKindFor(model);
 		if (!kind) return model;
@@ -289,7 +292,13 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const color = (state: string) => (state === "found" ? "success" : state === "missing" ? "dim" : "warning");
 		// Claude Code picks the tier for the bridge model.
 		const tier = model.api === BRIDGE_API ? undefined : cacheTier(ctx.sessionManager.getBranch());
-		ctx.ui.setStatus(DATA_STATUS_KEY, formatFieldStates(foundFor(ctx, model), (text, state) => theme.fg(color(state), text), servedKindFor(model), tier));
+		const access = accessReader(ctx)(model);
+		const served = servedKindFor(model);
+		const via = model.api === BRIDGE_API ? undefined : accessVia(model, { ...access, servedKind: served ?? servedOf(model) });
+		ctx.ui.setStatus(
+			DATA_STATUS_KEY,
+			formatFieldStates(findFacts(lookupsFor(model, access), data.providers), (text, state) => theme.fg(color(state), text), { served, tier, via }),
+		);
 	};
 
 	// Brings models.json in line with the saved data (or, with the setting off, takes this extension's values out).

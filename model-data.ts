@@ -315,6 +315,18 @@ export function lookupsFor(model: { provider: string; id: string }, access: Acce
 	return (PROXY_OWNERS[access.ownedBy] ?? [access.ownedBy]).map((provider) => ({ provider, model: model.id }));
 }
 
+/** How a model is reached: a subscription login ("sub"), an API key ("api"), or either (a proxy that does not say). */
+export type Via = "sub" | "api" | "sub or api";
+
+/** For a proxy model, the credential that answered, else the one the proxy tries first. */
+export function accessVia(model: { provider: string; id: string }, access: Access = {}): Via {
+	if (!access.proxy) return access.subscription ? "sub" : "api";
+	const kind = access.servedKind ?? access.accounts?.[0]?.kind;
+	if (kind) return kind === "apikey" ? "api" : "sub";
+	if (model.id.startsWith("devin/")) return "sub";
+	return model.id.indexOf("/") > 0 ? "api" : "sub or api";
+}
+
 export const isProxyProvider = (providerId: string, displayName?: string): boolean => providerId === PROXY_PROVIDER_ID || displayName === PROXY_PROVIDER_NAME;
 
 export interface Found {
@@ -360,6 +372,8 @@ const MARKS: Record<FieldState, string> = { found: "✓", assumed: "⚠", unsure
 
 /** Painted in the warning color, at the end of the footer, when the footer shows a guess. */
 export const UNKNOWN_ACCESS_WARNING = "⚠ login or API key unknown: shorter values";
+/** The same, when the login is known but providers.dev has no entry of its own for it (Pi's ChatGPT login on OpenAI). */
+export const NO_LOGIN_ENTRY_WARNING = "⚠ no entry for this login: shorter values";
 const servedWarning = (kind: string) => `⚠ answered by ${kind === "apikey" ? "an API key" : "a login"}`;
 
 /**
@@ -370,15 +384,15 @@ const servedWarning = (kind: string) => `⚠ answered by ${kind === "apikey" ? "
 export function formatFieldStates(
 	found: Found,
 	paint: (text: string, state: FieldState) => string = (text) => text,
-	served?: string,
-	tier?: "short" | "long",
+	{ served, tier, via }: { served?: string; tier?: "short" | "long"; via?: Via } = {},
 ): string {
 	const warnings = served ? [paint(servedWarning(served), "assumed")] : [];
-	if (found.refs.length === 0) return ["· providers.dev: no data for this model", ...(tier ? [`cache in use: ${tier}`] : []), ...warnings].join(" · ");
+	const lead = via ? [via] : [];
+	if (found.refs.length === 0) return `· ${[...lead, "providers.dev: no data for this model", ...(tier ? [`cache in use: ${tier}`] : []), ...warnings].join(" · ")}`;
 	const states = fieldStates(found);
-	if (Object.values(states).includes("assumed")) warnings.push(paint(UNKNOWN_ACCESS_WARNING, "assumed"));
+	if (Object.values(states).includes("assumed")) warnings.push(paint(via === "sub" || via === "api" ? NO_LOGIN_ENTRY_WARNING : UNKNOWN_ACCESS_WARNING, "assumed"));
 	const inUse = (field: Field) => (field === tier ? " (in use)" : "");
-	return `· ${[...FIELDS.map((field) => `${FIELD_LABELS[field]} ${paint(MARKS[states[field]], states[field])}${inUse(field)}`), ...warnings].join(" · ")}`;
+	return `· ${[...lead, ...FIELDS.map((field) => `${FIELD_LABELS[field]} ${paint(MARKS[states[field]], states[field])}${inUse(field)}`), ...warnings].join(" · ")}`;
 }
 
 /** The fields of a pi model this extension looks at. */

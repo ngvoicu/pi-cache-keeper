@@ -189,7 +189,7 @@ test("a session start fetches the data, fills models.json, reloads the models an
 	// The session's model is selected again, so it carries the new window.
 	assert.deepEqual(h.selected, ["cliproxyapi/gpt-6.1-sol"]);
 	assert.equal(h.model()?.contextWindow, 922_000);
-	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ⚠ · long ? (in use) · price ✓ · ⚠ login or API key unknown: shorter values");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· sub or api · window ✓ · cache short ⚠ · long ? (in use) · price ✓ · ⚠ login or API key unknown: shorter values");
 	assert.match(h.notices.join("\n"), /Model data from https:\/\/providers\.dev: 5 models updated/);
 	const saved = JSON.parse(readFileSync(storePath, "utf8"));
 	assert.equal(saved.datasetVersion, "d1");
@@ -202,11 +202,11 @@ test("the next session start asks nothing while the data is fresh; changing the 
 	h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
 	await h.settle();
 	assert.deepEqual(h.requests, []);
-	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ⚠ · long ? (in use) · price ✓ · ⚠ login or API key unknown: shorter values", "the saved data is shown at once");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· sub or api · window ✓ · cache short ⚠ · long ? (in use) · price ✓ · ⚠ login or API key unknown: shorter values", "the saved data is shown at once");
 	h.handlers.get("model_select")!({}, { ...h.ctx, model: h.ctx.modelRegistry.find("openai-codex", "gpt-6.1-sol") });
-	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ✓ · long ✗ (in use) · price ✓");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✗ (in use) · price ✓");
 	h.handlers.get("model_select")!({}, { ...h.ctx, model: { provider: "openai-codex", id: "unknown-model", cost: priced, contextWindow: 1, maxTokens: 1 } });
-	assert.equal(h.statuses.get("cache-keeper-data"), "· providers.dev: no data for this model · cache in use: long");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · providers.dev: no data for this model · cache in use: long");
 });
 
 test("/cache-keeper-refresh fetches again, keeps a value the user set, and a failed refresh keeps models.json", async () => {
@@ -228,7 +228,7 @@ test("/cache-keeper-refresh fetches again, keeps a value the user set, and a fai
 	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
 	assert.match(h.notices.at(-1)!, /could not refresh the model data: offline\. The saved data stays in use\./);
 	assert.equal(readFileSync(modelsPath, "utf8"), before);
-	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ⚠ · long ? (in use) · price ✓ · ⚠ login or API key unknown: shorter values");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· sub or api · window ✓ · cache short ⚠ · long ? (in use) · price ✓ · ⚠ login or API key unknown: shorter values");
 });
 
 test("with modelData set to false, the values this extension wrote are taken out and the user's stay", async () => {
@@ -257,7 +257,7 @@ test("a CLIProxyAPI that lists its credentials: the values of the one it tries f
 	// The Claude login keeps the cache for an hour, both tiers; the Codex login has a 5-minute short lifetime.
 	assert.deepEqual(proxy["claude-opus-5-5"], { promptCache: { short: 3600, long: 3600 } });
 	assert.deepEqual(proxy["gpt-6.1-sol"], { contextWindow: 922_000, promptCache: { short: 300 } });
-	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ✓ · long ✗ (in use) · price ✓", "no guess, so no warning");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✗ (in use) · price ✓", "no guess, so no warning");
 	assert.ok(
 		h.requests.some((request) => request.url.includes("/entries?provider=anthropic")),
 		"the API key's values are fetched too, for when a key answers",
@@ -267,13 +267,13 @@ test("a CLIProxyAPI that lists its credentials: the values of the one it tries f
 	const opus = h.ctx.modelRegistry.find("cliproxyapi", "claude-opus-5-5")!;
 	h.handlers.get("model_select")!({}, { ...h.ctx, model: opus });
 	const onOpus = { ...h.ctx, model: opus };
-	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ✓ · long ✓ (in use) · price ✓");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✓ (in use) · price ✓");
 	// An answer from the login changes nothing; one from an API key (the login failed or is cooling down) is warned
 	// about, and the countdown follows the key's 5 minutes.
 	h.handlers.get("after_provider_response")!({ status: 200, headers: { "x-cpa-auth-kind": "oauth" } }, onOpus);
-	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ✓ · long ✓ (in use) · price ✓");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✓ (in use) · price ✓");
 	h.handlers.get("after_provider_response")!({ status: 200, headers: { "x-cpa-auth-kind": "apikey" } }, onOpus);
-	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ✓ · long ✓ (in use) · price ✓ · ⚠ answered by an API key");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· api · window ✓ · cache short ✓ · long ✓ (in use) · price ✓ · ⚠ answered by an API key");
 	// With Pi's short retention the key's cache lasts 5 minutes, the login's an hour.
 	const retention = process.env.PI_CACHE_RETENTION;
 	process.env.PI_CACHE_RETENTION = "short";
@@ -287,7 +287,7 @@ test("a CLIProxyAPI that lists its credentials: the values of the one it tries f
 		else process.env.PI_CACHE_RETENTION = retention;
 	}
 	h.handlers.get("after_provider_response")!({ status: 200, headers: { "X-CPA-Auth-Kind": "oauth" } }, onOpus);
-	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ✓ · long ✓ (in use) · price ✓");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✓ (in use) · price ✓");
 	// Pi asks for the long tier (the default setting); Anthropic says it wrote the short one: the footer follows.
 	h.branch.push({
 		type: "message",
@@ -297,12 +297,12 @@ test("a CLIProxyAPI that lists its credentials: the values of the one it tries f
 		message: { role: "assistant", content: [], timestamp: 1, stopReason: "stop", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 500, cacheWrite1h: 0 } },
 	});
 	h.handlers.get("agent_settled")!({}, onOpus);
-	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ✓ (in use) · long ✓ · price ✓");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ (in use) · long ✓ · price ✓");
 	h.branch.length = 0;
 	h.handlers.get("agent_settled")!({}, onOpus);
 	// A model of another provider is not affected.
 	h.handlers.get("after_provider_response")!({ status: 200, headers: { "x-cpa-auth-kind": "apikey" } }, { ...h.ctx, model: h.ctx.modelRegistry.find("anthropic", "claude-opus-5-5") });
-	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ✓ · long ✓ (in use) · price ✓");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✓ (in use) · price ✓");
 });
 
 test("nothing is fetched on its own in PI_OFFLINE mode or without a UI, and models.json with comments is left alone", async () => {

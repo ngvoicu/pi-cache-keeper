@@ -14,6 +14,7 @@ import {
 	fetchProxyModels,
 	fieldStates,
 	findFacts,
+	accessVia,
 	formatFieldStates,
 	isProxyProvider,
 	loadStore,
@@ -381,12 +382,38 @@ test("with the proxy's credential list, a plain name is looked up under the cred
 	assert.deepEqual({ short: exact.facts.short, long: exact.facts.long, assumed: exact.assumed, unsure: exact.unsure }, { short: 3600, long: 3600, assumed: [], unsure: [] });
 	assert.equal(formatFieldStates(exact), "· window ✓ · cache short ✓ · long ✓ · price ✓");
 	// The answer came from an API key while the values are the login's: said at the end of the footer.
-	assert.equal(formatFieldStates(exact, undefined, "apikey"), "· window ✓ · cache short ✓ · long ✓ · price ✓ · ⚠ answered by an API key");
-	assert.equal(formatFieldStates(findFacts([], providers), undefined, "apikey"), "· providers.dev: no data for this model · ⚠ answered by an API key");
+	assert.equal(formatFieldStates(exact, undefined, { served: "apikey" }), "· window ✓ · cache short ✓ · long ✓ · price ✓ · ⚠ answered by an API key");
+	assert.equal(formatFieldStates(findFacts([], providers), undefined, { served: "apikey" }), "· providers.dev: no data for this model · ⚠ answered by an API key");
 	// The tier in use is named after its mark, or on its own when there is no data.
-	assert.equal(formatFieldStates(exact, undefined, undefined, "short"), "· window ✓ · cache short ✓ (in use) · long ✓ · price ✓");
-	assert.equal(formatFieldStates(exact, (text, state) => `<${state}:${text}>`, undefined, "long"), "· window <found:✓> · cache short <found:✓> · long <found:✓> (in use) · price <found:✓>");
-	assert.equal(formatFieldStates(findFacts([], providers), undefined, undefined, "long"), "· providers.dev: no data for this model · cache in use: long");
+	assert.equal(formatFieldStates(exact, undefined, { tier: "short" }), "· window ✓ · cache short ✓ (in use) · long ✓ · price ✓");
+	assert.equal(formatFieldStates(exact, (text, state) => `<${state}:${text}>`, { tier: "long" }), "· window <found:✓> · cache short <found:✓> · long <found:✓> (in use) · price <found:✓>");
+	assert.equal(formatFieldStates(findFacts([], providers), undefined, { tier: "long" }), "· providers.dev: no data for this model · cache in use: long");
+	// Whether a subscription login or an API key serves the model leads the footer.
+	assert.equal(formatFieldStates(exact, undefined, { via: "sub", tier: "short" }), "· sub · window ✓ · cache short ✓ (in use) · long ✓ · price ✓");
+	assert.equal(formatFieldStates(findFacts([], providers), undefined, { via: "api" }), "· api · providers.dev: no data for this model");
+	assert.equal(
+		formatFieldStates(findFacts(proxy("claude-opus-5-5", { accounts: undefined }), providers), undefined, { via: "sub or api" }),
+		"· sub or api · window ✓ · cache short ⚠ · long ✓ · price ✓ · ⚠ login or API key unknown: shorter values",
+	);
+	// Pi knows it is the ChatGPT login, but providers.dev has no entry for that login on the OpenAI API.
+	assert.equal(
+		formatFieldStates(findFacts(lookupsFor({ provider: "openai", id: "gpt-6.1-sol" }, { subscription: true }), providers), undefined, { via: "sub" }),
+		"· sub · window ✓ · cache short ⚠ · long ? · price ✓ · ⚠ no entry for this login: shorter values",
+	);
+});
+
+test("a model is served by a subscription login or an API key: pi's own sign-in, or the credential the proxy answers with", () => {
+	assert.equal(accessVia({ provider: "anthropic", id: "claude-opus-5-5" }, { subscription: true }), "sub");
+	assert.equal(accessVia({ provider: "anthropic", id: "claude-opus-5-5" }, {}), "api");
+	const login = { provider: "claude", kind: "oauth", priority: -15 };
+	const key = { provider: "claude", kind: "apikey", priority: -25 };
+	const proxy = (id: string, extra: Partial<Access> = {}) => accessVia({ provider: "cliproxyapi", id }, { proxy: true, ...extra });
+	assert.equal(proxy("claude-opus-5-5", { accounts: [login, key] }), "sub", "the one the proxy tries first");
+	assert.equal(proxy("claude-opus-5-5", { accounts: [login, key], servedKind: "apikey" }), "api", "the one that answered");
+	assert.equal(proxy("claude-opus-5-5", { accounts: [key] }), "api");
+	assert.equal(proxy("claude-opus-5-5"), "sub or api", "a proxy that does not list its credentials");
+	assert.equal(proxy("devin/swe-2"), "sub", "Devin is a login");
+	assert.equal(proxy("anthropic/claude-opus-5-5"), "api", "OpenRouter is a key");
 });
 
 test("the facts of the fixture cover every field the extension reads", () => {

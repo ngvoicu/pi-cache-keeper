@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.2] - 2026-11-17
+
+### Added
+- **Subscription or API key, in the footer** — The footer starts with `sub`, `api`, or `sub or api` (a proxy that doesn't say). Through CLIProxyAPI it is the credential that answered last, else the one it tries first.
+
+### Changed
+- **Pi's ChatGPT login on `openai`** — The guess warning says `⚠ no entry for this login: shorter values`: the login is known, providers.dev has no entry of its own for it.
+
 ## [0.3.1] - 2026-11-17
 
 ### Added
