@@ -371,12 +371,14 @@ export function formatFieldStates(
 	found: Found,
 	paint: (text: string, state: FieldState) => string = (text) => text,
 	served?: string,
+	tier?: "short" | "long",
 ): string {
 	const warnings = served ? [paint(servedWarning(served), "assumed")] : [];
-	if (found.refs.length === 0) return ["· providers.dev: no data for this model", ...warnings].join(" · ");
+	if (found.refs.length === 0) return ["· providers.dev: no data for this model", ...(tier ? [`cache in use: ${tier}`] : []), ...warnings].join(" · ");
 	const states = fieldStates(found);
 	if (Object.values(states).includes("assumed")) warnings.push(paint(UNKNOWN_ACCESS_WARNING, "assumed"));
-	return `· ${[...FIELDS.map((field) => `${FIELD_LABELS[field]} ${paint(MARKS[states[field]], states[field])}`), ...warnings].join(" · ")}`;
+	const inUse = (field: Field) => (field === tier ? " (in use)" : "");
+	return `· ${[...FIELDS.map((field) => `${FIELD_LABELS[field]} ${paint(MARKS[states[field]], states[field])}${inUse(field)}`), ...warnings].join(" · ")}`;
 }
 
 /** The fields of a pi model this extension looks at. */

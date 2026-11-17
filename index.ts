@@ -13,7 +13,7 @@ import {
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { Container, SettingsList, Text, type SettingItem } from "@earendil-works/pi-tui";
-import { cacheState, hasExplicitPromptCache, isKimiOnMoonshot, type CacheState } from "./cache-state.ts";
+import { cacheState, cacheTier, hasExplicitPromptCache, isKimiOnMoonshot, type CacheState } from "./cache-state.ts";
 import {
 	checkpointSummary,
 	isPlainObject,
@@ -287,7 +287,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (!config.modelData || !model || data.checkedAt === undefined) return ctx.ui.setStatus(DATA_STATUS_KEY, undefined);
 		const { theme } = ctx.ui;
 		const color = (state: string) => (state === "found" ? "success" : state === "missing" ? "dim" : "warning");
-		ctx.ui.setStatus(DATA_STATUS_KEY, formatFieldStates(foundFor(ctx, model), (text, state) => theme.fg(color(state), text), servedKindFor(model)));
+		// Claude Code picks the tier for the bridge model.
+		const tier = model.api === BRIDGE_API ? undefined : cacheTier(ctx.sessionManager.getBranch());
+		ctx.ui.setStatus(DATA_STATUS_KEY, formatFieldStates(foundFor(ctx, model), (text, state) => theme.fg(color(state), text), servedKindFor(model), tier));
 	};
 
 	// Brings models.json in line with the saved data (or, with the setting off, takes this extension's values out).
@@ -668,6 +670,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	});
 	pi.on("agent_settled", (_event, ctx) => {
 		idleSince = Date.now();
+		// The latest answer may say which cache tier it wrote.
+		showData(ctx);
 		if (!compactWhenFull(ctx)) startTimer(ctx);
 	});
 	pi.on("session_compact", (event, ctx) => {
@@ -687,6 +691,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		decision = undefined;
 		compactionTrigger = undefined;
 		forget(ctx);
+		showData(ctx);
 	});
 	pi.on("session_compact_failed", (event, ctx) => {
 		const failed = trace(ctx, { event: "failed", trigger: compactionTrigger ?? event.reason, aborted: event.aborted, error: event.errorMessage });
@@ -998,7 +1003,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 						ctx.ui.notify(`pi-cache-keeper could not save the setting: ${error instanceof Error ? error.message : String(error)}`, "error");
 						return;
 					}
-					if (id === "cacheRetention") applyRetention(config.cacheRetention === "long", ctx.hasUI);
+					if (id === "cacheRetention") {
+						applyRetention(config.cacheRetention === "long", ctx.hasUI);
+						showData(ctx);
+					}
 					if (id === "modelData") {
 						// On: fetch and apply. Off: take this extension's values out of models.json again.
 						if (config.modelData) void refreshAndReport(ctx, false, true);

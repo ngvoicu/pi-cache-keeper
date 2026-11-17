@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import { cacheState } from "../cache-state.ts";
+import { cacheState, cacheTier } from "../cache-state.ts";
 
 const claude = { provider: "anthropic", id: "claude", api: "anthropic-messages" } as Model<Api>;
 const reply = (id: string, timestamp: number, usage: { cacheRead?: number; cacheWrite?: number; cacheWrite1h?: number }, stopReason = "stop") =>
@@ -41,6 +41,26 @@ test("the lifetime is the tier the latest write reported, the model's figure for
 	assert.deepEqual(lifetime(declared, [long]), { ms: 7_200_000, source: "declared by the model" });
 	const gpt = { provider: "openai", id: "gpt-6-luna", api: "openai-responses", compat: { supportsExplicitPromptCacheMode: true } } as Model<Api>;
 	assert.deepEqual(lifetime(gpt, [reply("a", 1, { cacheRead: 500 })]), { ms: 1_800_000, source: "OpenAI's minimum" });
+});
+
+test("the cache tier in use is the one the latest write reported, else the one Pi asks for", () => {
+	const before = process.env.PI_CACHE_RETENTION;
+	try {
+		delete process.env.PI_CACHE_RETENTION;
+		assert.equal(cacheTier([]), "short");
+		process.env.PI_CACHE_RETENTION = "long";
+		assert.equal(cacheTier([]), "long");
+		// Anthropic says which tier it wrote: that is the one in use, whatever was asked.
+		assert.equal(cacheTier([reply("a", 1, { cacheWrite: 500, cacheWrite1h: 0 })]), "short");
+		delete process.env.PI_CACHE_RETENTION;
+		assert.equal(cacheTier([reply("a", 1, { cacheWrite: 500, cacheWrite1h: 500 })]), "long");
+		// A read writes nothing and says nothing; a compaction starts over.
+		assert.equal(cacheTier([reply("a", 1, { cacheWrite: 500, cacheWrite1h: 500 }), reply("b", 2, { cacheRead: 500, cacheWrite1h: 0 })]), "long");
+		assert.equal(cacheTier([reply("a", 1, { cacheWrite: 500, cacheWrite1h: 500 }), compaction]), "short");
+	} finally {
+		if (before === undefined) delete process.env.PI_CACHE_RETENTION;
+		else process.env.PI_CACHE_RETENTION = before;
+	}
 });
 
 test("Kimi K3 on Moonshot's API caches for 5 minutes, or 1 hour when Pi asks for the longer cache", () => {

@@ -383,6 +383,10 @@ test("with the proxy's credential list, a plain name is looked up under the cred
 	// The answer came from an API key while the values are the login's: said at the end of the footer.
 	assert.equal(formatFieldStates(exact, undefined, "apikey"), "· window ✓ · cache short ✓ · long ✓ · price ✓ · ⚠ answered by an API key");
 	assert.equal(formatFieldStates(findFacts([], providers), undefined, "apikey"), "· providers.dev: no data for this model · ⚠ answered by an API key");
+	// The tier in use is named after its mark, or on its own when there is no data.
+	assert.equal(formatFieldStates(exact, undefined, undefined, "short"), "· window ✓ · cache short ✓ (in use) · long ✓ · price ✓");
+	assert.equal(formatFieldStates(exact, (text, state) => `<${state}:${text}>`, undefined, "long"), "· window <found:✓> · cache short <found:✓> · long <found:✓> (in use) · price <found:✓>");
+	assert.equal(formatFieldStates(findFacts([], providers), undefined, undefined, "long"), "· providers.dev: no data for this model · cache in use: long");
 });
 
 test("the facts of the fixture cover every field the extension reads", () => {

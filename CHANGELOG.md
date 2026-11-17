@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.1] - 2026-11-17
+
+### Added
+- **The cache tier in use, in the footer** — `· cache short ✓ (in use) · long ✓`: the tier the last answer says it wrote (Anthropic tells), else the one Pi asks for. Without data for the model: `cache in use: short`. It follows answers, compactions and a change of the retention setting.
+
 ## [0.3.0] - 2026-11-17
 
 ### Added

@@ -21,6 +21,22 @@ export interface CacheState {
 }
 
 /**
+ * The cache tier in use: the one the latest cache write reported (Anthropic says which it wrote), else the one Pi asks
+ * for. A compaction starts over.
+ */
+export function cacheTier(entries: SessionEntry[]): "short" | "long" {
+	let reported: "short" | "long" | undefined;
+	for (const entry of entries) {
+		if (entry.type === "compaction") reported = undefined;
+		else if (entry.type === "message" && entry.message.role === "assistant") {
+			const { cacheWrite, cacheWrite1h } = entry.message.usage;
+			if (cacheWrite > 0 && cacheWrite1h !== undefined) reported = cacheWrite1h > 0 ? "long" : "short";
+		}
+	}
+	return reported ?? (process.env.PI_CACHE_RETENTION === "long" ? "long" : "short");
+}
+
+/**
  * `warmedAt` is when this extension last re-sent the cached request to keep it warm. Pi's own refreshes are
  * `cache_warm` usage entries; the extension's are kept in memory, because an extension cannot add usage entries.
  */
