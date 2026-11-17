@@ -181,7 +181,7 @@ Pi's model catalog doesn't say how long most providers keep a prompt cache, and 
 | Cache lifetimes (`promptCache.short`, `promptCache.long`) | only for a tier Pi has no lifetime for. "No safe lifetime" is never declared |
 | Prices (`cost`, with a tier per context size) and output limit (`maxTokens`) | only where Pi has none |
 
-**The footer** shows what was found for the current model: `· window ✓ · cache short ✓ · long ✗ · price ✓`. `✓` is found, `✗` is not in the data, `?` is found but not used because it depends on how the model is reached (below). `/cache-keeper` names the entry and the values.
+**The footer** shows what was found for the current model: `· window ✓ · cache short ✓ · long ✗ · price ✓`. `✓` is found, `✗` is not in the data, `⚠` is a guess (below) and `?` is found but not used. A guess ends the footer with `⚠ login or API key unknown: shorter values`; an answer from another kind of credential than the values are for ends it with `⚠ answered by an API key` (or `a login`). `/cache-keeper` names the entry and the values.
 
 **What you should know before it changes how Pi behaves:**
 
@@ -189,9 +189,14 @@ Pi's model catalog doesn't say how long most providers keep a prompt cache, and 
 - A larger window means larger, more expensive requests before anything compacts. `compactAtTokens` caps that on every model.
 - Values you set in `models.json` yourself are never touched. The extension keeps a note of what it wrote (in `~/.pi/agent/cache-keeper-models.json`) and only updates or removes those values. If `models.json` has comments, it is left alone.
 
-**How a model is looked up.** A provider you signed in to with a subscription is looked up as that subscription (the Claude and Meta logins have entries of their own); with an API key, as the API. Pi's ChatGPT sign-in on the `openai` provider has no entry of its own, so it is treated like the last case below.
+**How a model is looked up.** A provider you signed in to with a subscription is looked up as that subscription (the Claude and Meta logins have entries of their own); with an API key, as the API. Pi's ChatGPT sign-in on the `openai` provider has no entry of its own, so it is treated like an unknown login or key (below).
 
-**Through [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** (the `cliproxyapi` provider): `devin/…` is Devin, `lab/model` is OpenRouter. A plain model name can be served by the lab's subscription login or by its API key, and the proxy's model list doesn't say which. The two can differ (a Claude login keeps a cache for an hour, a Claude API key for 5 minutes by default), and a wrong guess would either refresh a 1-hour cache every 5 minutes or let a 5-minute cache expire. So only what both entries agree on is used, the window is the smaller of the two, and the rest shows as `?`. The proxy's model list is read from the proxy itself, with the key Pi already uses for it.
+**Through [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** (the `cliproxyapi` provider): `devin/…` is Devin, `lab/model` is OpenRouter. A plain model name can be served by the lab's subscription login or by its API key, and the two can differ: a Claude login keeps a cache for an hour, a Claude API key for 5 minutes by default.
+
+- **A CLIProxyAPI that lists its credentials** (`/v1/models?include=accounts`, [router-for-me/CLIProxyAPI#7634](https://github.com/router-for-me/CLIProxyAPI/pull/7634)) says which credentials serve each model, in the order it tries them. The values are those of the first one. It also names, on each response, the kind of credential that answered (`X-CPA-AUTH-KIND`). When that is not the first one (the login failed or is cooling down, so an API key answered), the footer warns and the countdown follows the lifetime of the credential that answered. Pi's own warming keeps the values in `models.json`. Over the Codex WebSocket there are no response headers, so the warning can't appear there.
+- **A CLIProxyAPI that doesn't list them**: where both entries have a value, the smaller one is used (marked `⚠`). A shorter lifetime than the real one costs an early refresh or compaction; a longer one would let the cache expire unnoticed. A value only one of the two entries has is not used (`?`).
+
+The proxy's model list is read from the proxy itself, with the key Pi already uses for it.
 
 **When it fetches.** At the start of an interactive session, when the saved data is a day old or Pi can use a provider there is no data for. One small request asks whether the dataset changed; only then are the providers you can use downloaded (a few dozen kilobytes). A failed fetch keeps the saved data. Nothing is fetched on its own in print or JSON mode or with `PI_OFFLINE` set. `/cache-keeper-refresh` fetches now.
 

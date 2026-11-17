@@ -72,11 +72,13 @@ export interface DataStore {
 	providers: Record<string, Record<string, Facts>>;
 	/** pi provider id of a proxy → model id → the lab the proxy says owns the model. */
 	owners: Record<string, Record<string, string>>;
+	/** pi provider id of a proxy → model id → the credentials that serve it, when the proxy lists them. */
+	accounts: Record<string, Record<string, ProxyAccount[]>>;
 	/** pi provider id → model id → what this extension wrote into models.json. */
 	written: Record<string, Record<string, Written>>;
 }
 
-export const emptyStore = (): DataStore => ({ version: 1, providers: {}, owners: {}, written: {} });
+export const emptyStore = (): DataStore => ({ version: 1, providers: {}, owners: {}, accounts: {}, written: {} });
 
 const positive = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined);
 const atLeastZero = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined);
@@ -196,36 +198,56 @@ export const usableLifetime = (seconds: number | undefined): number | undefined 
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
 
 /**
- * Facts for a model that one of several providers.dev entries describes, without knowing which (a proxy can serve one
- * model name from a subscription login or an API key). A value is kept only when every entry agrees on it; the
- * window is the smallest, which every entry accepts. `unsure` names what the entries disagree on.
+ * Facts for a model that one of several providers.dev entries describes, without knowing which (a proxy that does not
+ * say whether a login or an API key serves a model). Where every entry has a value, the smallest is taken: a shorter
+ * cache lifetime only costs an early refresh or compaction, a longer one a cache that expires unnoticed. `assumed`
+ * names the fields where the entries differ, so the value is that guess. A field some entries lack is left out and
+ * named in `unsure`; so are prices that differ.
  */
-export function mergeFacts(found: Facts[]): { facts: Facts; unsure: Field[] } {
-	if (found.length === 0) return { facts: {}, unsure: [] };
-	if (found.length === 1) return { facts: found[0], unsure: [] };
+export function mergeFacts(found: Facts[]): { facts: Facts; unsure: Field[]; assumed: Field[] } {
+	if (found.length === 0) return { facts: {}, unsure: [], assumed: [] };
+	if (found.length === 1) return { facts: found[0], unsure: [], assumed: [] };
 	const facts: Facts = {};
 	const unsure: Field[] = [];
-	const windows = found.map((one) => one.window);
-	if (windows.every((tokens) => tokens !== undefined)) {
-		facts.window = Math.min(...(windows as number[]));
-		if (found.some((one) => one.window === facts.window && one.windowAtLeast)) facts.windowAtLeast = true;
-	} else if (windows.some((tokens) => tokens !== undefined)) unsure.push("window");
+	const assumed: Field[] = [];
+	const smallest = (field: Field, values: Array<number | undefined>): number | undefined => {
+		if (!values.every((value) => value !== undefined)) {
+			if (values.some((value) => value !== undefined)) unsure.push(field);
+			return undefined;
+		}
+		const numbers = values as number[];
+		if (numbers.some((value) => value !== numbers[0])) assumed.push(field);
+		return Math.min(...numbers);
+	};
+	const window = smallest("window", found.map((one) => one.window));
+	if (window !== undefined) {
+		facts.window = window;
+		if (found.some((one) => one.window === window && one.windowAtLeast)) facts.windowAtLeast = true;
+	}
 	const outputs = found.map((one) => one.maxOutput);
 	if (outputs.every((tokens) => tokens !== undefined)) facts.maxOutput = Math.min(...(outputs as number[]));
 	for (const tier of ["short", "long"] as const) {
-		const lifetimes = found.map((one) => one[tier]);
-		if (lifetimes.every((seconds) => seconds !== undefined && seconds === lifetimes[0])) facts[tier] = lifetimes[0];
-		else if (lifetimes.some((seconds) => seconds !== undefined)) unsure.push(tier);
+		const seconds = smallest(tier, found.map((one) => one[tier]));
+		if (seconds !== undefined) facts[tier] = seconds;
 	}
 	const costs = found.map((one) => one.cost);
 	if (costs.every((cost) => cost !== undefined && same(cost, costs[0]))) facts.cost = costs[0];
 	else if (costs.some((cost) => cost !== undefined)) unsure.push("price");
-	return { facts, unsure };
+	return { facts, unsure, assumed };
 }
 
 export interface Lookup {
 	provider: string;
 	model: string;
+}
+
+/** A credential a proxy serves a model from, as CLIProxyAPI's `/v1/models?include=accounts` lists it. */
+export interface ProxyAccount {
+	/** CLIProxyAPI's provider name: claude, codex, meta, devin, antigravity, openai-compatible-<name> … */
+	provider: string;
+	/** "oauth" for a subscription login, "apikey" for an API key. */
+	kind: string;
+	priority: number;
 }
 
 export interface Access {
@@ -235,6 +257,10 @@ export interface Access {
 	proxy?: boolean;
 	/** For a proxy model: the lab the proxy's model list names as its owner. */
 	ownedBy?: string;
+	/** For a proxy model: the credentials that serve it, in the order the proxy tries them. Absent on a proxy that does not list them. */
+	accounts?: ProxyAccount[];
+	/** For a proxy model: the kind of credential that answered the last request ("oauth" or "apikey"), when the proxy said. */
+	servedKind?: string;
 }
 
 /** The providers.dev provider that holds a pi provider's subscription login. */
@@ -252,10 +278,25 @@ const PROXY_OWNERS: Record<string, string[]> = {
 	meta: ["meta-subscription", "meta"],
 };
 
+/** The providers.dev provider of a CLIProxyAPI credential, by its provider and kind. */
+const PROXY_CREDENTIALS: Record<string, { oauth?: string; apikey?: string }> = {
+	claude: { oauth: "claude-subscription", apikey: "anthropic" },
+	codex: { oauth: "openai-codex", apikey: "openai" },
+	meta: { oauth: "meta-subscription", apikey: "meta" },
+	devin: { oauth: "devin", apikey: "devin" },
+	antigravity: { oauth: "antigravity" },
+	gemini: { oauth: "google", apikey: "google" },
+	"openai-compatible-openrouter": { apikey: "openrouter" },
+};
+
+const providerOfAccount = (account: ProxyAccount | undefined): string | undefined =>
+	account ? PROXY_CREDENTIALS[account.provider]?.[account.kind as "oauth" | "apikey"] : undefined;
+
 /**
  * The providers.dev entries that can describe a pi model. One entry means the access method is known; several mean
- * it is one of them (see mergeFacts). Through CLIProxyAPI: `devin/…` is Devin, `lab/model` is OpenRouter, and a plain
- * name is the lab's subscription login or its API key, which the proxy does not tell apart.
+ * it is one of them (see mergeFacts). Through CLIProxyAPI: `devin/…` is Devin and `lab/model` is OpenRouter. A plain
+ * name is looked up under the credential the proxy tries first (or, when `servedKind` is given, the first credential
+ * of that kind); a proxy that does not list its credentials leaves both the lab's subscription login and its API key.
  */
 export function lookupsFor(model: { provider: string; id: string }, access: Access = {}): Lookup[] {
 	if (!access.proxy) {
@@ -265,6 +306,11 @@ export function lookupsFor(model: { provider: string; id: string }, access: Acce
 	const slash = model.id.indexOf("/");
 	if (model.id.startsWith("devin/")) return [{ provider: "devin", model: model.id.slice("devin/".length) }];
 	if (slash > 0) return [{ provider: "openrouter", model: model.id }];
+	if (access.accounts && access.accounts.length > 0) {
+		const account = access.servedKind ? access.accounts.find((one) => one.kind === access.servedKind) : access.accounts[0];
+		const provider = providerOfAccount(account);
+		return provider ? [{ provider, model: model.id }] : [];
+	}
 	if (!access.ownedBy) return [];
 	return (PROXY_OWNERS[access.ownedBy] ?? [access.ownedBy]).map((provider) => ({ provider, model: model.id }));
 }
@@ -273,7 +319,10 @@ export const isProxyProvider = (providerId: string, displayName?: string): boole
 
 export interface Found {
 	facts: Facts;
+	/** Fields some possible entries have and others lack, or prices that differ: left out. */
 	unsure: Field[];
+	/** Fields where the possible entries differ, so the smallest value is used. */
+	assumed: Field[];
 	/** The entries that were found, as `provider/model`. */
 	refs: string[];
 }
@@ -292,10 +341,12 @@ export function findFacts(lookups: Lookup[], providers: DataStore["providers"]):
 	return { ...mergeFacts(found), refs };
 }
 
-/** What providers.dev has for each field: a value, nothing, or values that disagree between possible entries. */
-export function fieldStates(found: Found): Record<Field, "found" | "unsure" | "missing"> {
-	const { facts, unsure } = found;
-	const state = (field: Field, has: boolean) => (has ? "found" : unsure.includes(field) ? "unsure" : "missing");
+export type FieldState = "found" | "assumed" | "unsure" | "missing";
+
+/** What providers.dev has for each field: a value, a guess (the smallest of values that differ), values that cannot be combined, or nothing. */
+export function fieldStates(found: Found): Record<Field, FieldState> {
+	const { facts, unsure, assumed } = found;
+	const state = (field: Field, has: boolean): FieldState => (has ? (assumed.includes(field) ? "assumed" : "found") : unsure.includes(field) ? "unsure" : "missing");
 	return {
 		window: state("window", facts.window !== undefined),
 		short: state("short", usableLifetime(facts.short) !== undefined),
@@ -305,13 +356,27 @@ export function fieldStates(found: Found): Record<Field, "found" | "unsure" | "m
 }
 
 const FIELD_LABELS: Record<Field, string> = { window: "window", short: "cache short", long: "long", price: "price" };
-const MARKS = { found: "✓", unsure: "?", missing: "✗" } as const;
+const MARKS: Record<FieldState, string> = { found: "✓", assumed: "⚠", unsure: "?", missing: "✗" };
 
-/** The footer text: "· window ✓ · cache short ✓ · long ✗ · price ✓", led by a dot that sets it apart from what the footer shows before it. `paint` colors one mark. */
-export function formatFieldStates(found: Found, paint: (mark: string, state: "found" | "unsure" | "missing") => string = (mark) => mark): string {
-	if (found.refs.length === 0) return "· providers.dev: no data for this model";
+/** Painted in the warning color, at the end of the footer, when the footer shows a guess. */
+export const UNKNOWN_ACCESS_WARNING = "⚠ login or API key unknown: shorter values";
+const servedWarning = (kind: string) => `⚠ answered by ${kind === "apikey" ? "an API key" : "a login"}`;
+
+/**
+ * The footer text: "· window ✓ · cache short ✓ · long ✗ · price ✓", led by a dot that sets it apart from what the
+ * footer shows before it. A guess ends it with a warning. `served` names the kind of credential that answered the
+ * last request when it is not the one the values are for. `paint` colors one mark or the warning.
+ */
+export function formatFieldStates(
+	found: Found,
+	paint: (text: string, state: FieldState) => string = (text) => text,
+	served?: string,
+): string {
+	const warnings = served ? [paint(servedWarning(served), "assumed")] : [];
+	if (found.refs.length === 0) return ["· providers.dev: no data for this model", ...warnings].join(" · ");
 	const states = fieldStates(found);
-	return `· ${FIELDS.map((field) => `${FIELD_LABELS[field]} ${paint(MARKS[states[field]], states[field])}`).join(" · ")}`;
+	if (Object.values(states).includes("assumed")) warnings.push(paint(UNKNOWN_ACCESS_WARNING, "assumed"));
+	return `· ${[...FIELDS.map((field) => `${FIELD_LABELS[field]} ${paint(MARKS[states[field]], states[field])}`), ...warnings].join(" · ")}`;
 }
 
 /** The fields of a pi model this extension looks at. */
@@ -474,6 +539,7 @@ export function loadStore(): DataStore {
 			datasetVersion: typeof parsed.datasetVersion === "string" ? parsed.datasetVersion : undefined,
 			providers: part("providers") as DataStore["providers"],
 			owners: part("owners") as DataStore["owners"],
+			accounts: part("accounts") as DataStore["accounts"],
 			written: part("written") as DataStore["written"],
 		};
 	} catch {
@@ -567,13 +633,34 @@ export async function fetchDataset(providerIds: string[], saved: DataStore, fetc
 	return { datasetVersion, providers, downloaded: true };
 }
 
-/** The lab a proxy names as the owner of each model it lists (`owned_by` in its OpenAI-style model list). */
-export async function fetchOwners(origin: string, headers: Record<string, string>, fetchImpl: Fetch, signal?: AbortSignal): Promise<Record<string, string>> {
-	const body = await getJson(fetchImpl, `${origin}/v1/models`, headers, signal);
+export interface ProxyModels {
+	/** Model id → the lab the proxy names as its owner. */
+	owners: Record<string, string>;
+	/** Model id → the credentials that serve it; empty when the proxy does not list them. */
+	accounts: Record<string, ProxyAccount[]>;
+}
+
+/**
+ * A proxy's model list (`/v1/models?include=accounts`): the lab that owns each model, and, on a CLIProxyAPI that
+ * supports it, the credentials that serve it. A proxy that does not know the parameter answers the plain list.
+ */
+export async function fetchProxyModels(origin: string, headers: Record<string, string>, fetchImpl: Fetch, signal?: AbortSignal): Promise<ProxyModels> {
+	const body = await getJson(fetchImpl, `${origin}/v1/models?include=accounts`, headers, signal);
 	const owners: Record<string, string> = {};
+	const accounts: Record<string, ProxyAccount[]> = {};
 	if (!isPlainObject(body) || !Array.isArray(body.data)) throw new Error(`${origin}/v1/models answered without a list`);
-	for (const model of body.data) if (isPlainObject(model) && typeof model.id === "string" && typeof model.owned_by === "string") owners[model.id] = model.owned_by;
-	return owners;
+	for (const model of body.data) {
+		if (!isPlainObject(model) || typeof model.id !== "string") continue;
+		if (typeof model.owned_by === "string") owners[model.id] = model.owned_by;
+		if (!Array.isArray(model.accounts)) continue;
+		const list: ProxyAccount[] = [];
+		for (const account of model.accounts) {
+			if (!isPlainObject(account) || typeof account.provider !== "string" || typeof account.kind !== "string") continue;
+			list.push({ provider: account.provider, kind: account.kind, priority: typeof account.priority === "number" ? account.priority : 0 });
+		}
+		if (list.length > 0) accounts[model.id] = list;
+	}
+	return { owners, accounts };
 }
 
 const lifetimeLabel = (seconds: number): string => (seconds % 3600 === 0 ? `${seconds / 3600} h` : seconds % 60 === 0 ? `${seconds / 60} min` : `${seconds} s`);
@@ -588,5 +675,6 @@ export function describeFound(found: Found): string {
 		facts.cost ? `price $${facts.cost.input}/$${facts.cost.output} per million` : undefined,
 	].filter((part) => part !== undefined);
 	const unsure = found.unsure.length > 0 ? `; not used: ${found.unsure.map((field) => FIELD_LABELS[field]).join(", ")} (it depends on whether a subscription login or an API key serves the model, which is not known)` : "";
-	return `${found.refs.join(" or ")}: ${parts.length > 0 ? parts.join(", ") : "nothing sure"}${unsure}`;
+	const assumed = found.assumed.length > 0 ? `; ${found.assumed.map((field) => FIELD_LABELS[field]).join(", ")}: the smaller of the login's and the API key's, because which one serves the model is not known` : "";
+	return `${found.refs.join(" or ")}: ${parts.length > 0 ? parts.join(", ") : "nothing sure"}${assumed}${unsure}`;
 }

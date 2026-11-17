@@ -38,7 +38,15 @@ const catalog: FakeModel[] = [
 	{ provider: "cliproxyapi", id: "devin/swe-2", baseUrl: "http://127.0.0.1:8317/backend-api/", contextWindow: 262_000, maxTokens: 128_000, cost: free },
 ];
 
-function harness(options: { online?: boolean; extension?: typeof cacheKeeper } = {}) {
+// The credentials a CLIProxyAPI with `include=accounts` lists: the Claude and Codex logins first, then API keys.
+const PROXY_ACCOUNTS: Record<string, unknown[]> = {
+	"gpt-6.1-sol": [{ provider: "codex", kind: "oauth", priority: -17 }, { provider: "codex", kind: "apikey", priority: -25 }],
+	"claude-opus-5-5": [{ provider: "claude", kind: "oauth", priority: -15 }, { provider: "claude", kind: "apikey", priority: -25 }],
+	"devin/claude-opus-5-5": [{ provider: "devin", kind: "oauth", priority: -20 }],
+	"devin/swe-2": [{ provider: "devin", kind: "oauth", priority: -20 }],
+};
+
+function harness(options: { online?: boolean; extension?: typeof cacheKeeper; proxyAccounts?: boolean } = {}) {
 	const state = { online: options.online ?? true, idle: true };
 	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 	const commands = new Map<string, (args: string, ctx: unknown) => Promise<unknown>>();
@@ -69,8 +77,11 @@ function harness(options: { online?: boolean; extension?: typeof cacheKeeper } =
 		requests.push({ url, headers: init.headers });
 		if (!state.online) throw new Error("offline");
 		const json = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
-		if (url === "http://127.0.0.1:8317/v1/models") {
-			return json({ data: [{ id: "gpt-6.1-sol", owned_by: "openai" }, { id: "claude-opus-5-5", owned_by: "anthropic" }, { id: "devin/swe-2", owned_by: "cognition" }] });
+		if (url.startsWith("http://127.0.0.1:8317/v1/models")) {
+			const owners: Record<string, string> = { "gpt-6.1-sol": "openai", "claude-opus-5-5": "anthropic", "devin/claude-opus-5-5": "anthropic", "devin/swe-2": "cognition" };
+			// A CLIProxyAPI without the parameter ignores it and answers the plain list.
+			const withAccounts = options.proxyAccounts && new URL(url).searchParams.get("include") === "accounts";
+			return json({ data: Object.entries(owners).map(([id, owned_by]) => ({ id, owned_by, ...(withAccounts ? { accounts: PROXY_ACCOUNTS[id] } : {}) })) });
 		}
 		if (url === "https://providers.dev/api/v1/meta") return json({ meta: { dataset_version: "d1" }, data: {} });
 		const provider = new URL(url).searchParams.get("provider");
@@ -160,10 +171,11 @@ test("a session start fetches the data, fills models.json, reloads the models an
 		"openai-codex": { modelOverrides: { "gpt-6.1-sol": { contextWindow: 922_000, promptCache: { short: 300 } } } },
 		cliproxyapi: {
 			modelOverrides: {
-				// Login or key, the proxy does not say: the window both accept, no lifetime (5 min on the login, 30 min on the key).
-				"gpt-6.1-sol": { contextWindow: 922_000 },
-				// Both keep the long tier for an hour; the short one differs (1 h on the login, 5 min on the key).
-				"claude-opus-5-5": { promptCache: { long: 3600 } },
+				// Login or key, this proxy does not say: the window both accept, and the shorter lifetime (5 min on the
+				// login, 30 min on the key); only the key has a long one, so none.
+				"gpt-6.1-sol": { contextWindow: 922_000, promptCache: { short: 300 } },
+				// Both keep the long tier for an hour; the short one is the key's 5 min, not the login's 1 h.
+				"claude-opus-5-5": { promptCache: { short: 300, long: 3600 } },
 				// Devin: one entry, so its lifetime and price are known; "999,072 accepted" does not lower a 1M window.
 				"devin/claude-opus-5-5": { promptCache: { short: 300 }, cost: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 } },
 				// SWE-2 has no safe lifetime and no price; 300,499 tokens were accepted, more than the 262,000 listed.
@@ -176,7 +188,7 @@ test("a session start fetches the data, fills models.json, reloads the models an
 	// The session's model is selected again, so it carries the new window.
 	assert.deepEqual(h.selected, ["cliproxyapi/gpt-6.1-sol"]);
 	assert.equal(h.model()?.contextWindow, 922_000);
-	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ? · long ? · price ✓");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ⚠ · long ? · price ✓ · ⚠ login or API key unknown: shorter values");
 	assert.match(h.notices.join("\n"), /Model data from https:\/\/providers\.dev: 5 models updated/);
 	const saved = JSON.parse(readFileSync(storePath, "utf8"));
 	assert.equal(saved.datasetVersion, "d1");
@@ -189,7 +201,7 @@ test("the next session start asks nothing while the data is fresh; changing the 
 	h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
 	await h.settle();
 	assert.deepEqual(h.requests, []);
-	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ? · long ? · price ✓", "the saved data is shown at once");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ⚠ · long ? · price ✓ · ⚠ login or API key unknown: shorter values", "the saved data is shown at once");
 	h.handlers.get("model_select")!({}, { ...h.ctx, model: h.ctx.modelRegistry.find("openai-codex", "gpt-6.1-sol") });
 	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ✓ · long ✗ · price ✓");
 	h.handlers.get("model_select")!({}, { ...h.ctx, model: { provider: "openai-codex", id: "unknown-model", cost: priced, contextWindow: 1, maxTokens: 1 } });
@@ -207,15 +219,15 @@ test("/cache-keeper-refresh fetches again, keeps a value the user set, and a fai
 	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
 	assert.ok(h.requests.some((request) => request.url.includes("/entries?provider=openai-codex")), "a forced refresh downloads again");
 	assert.equal(h.overrides()["openai-codex"].modelOverrides["gpt-6.1-sol"].contextWindow, 400_000, "the user's window stays");
-	assert.deepEqual(h.overrides().cliproxyapi.modelOverrides["claude-opus-5-5"], { promptCache: { long: 3600 } }, "a removed value is filled again");
-	assert.match(h.notices.at(-1)!, /1 model updated in .*models\.json\nThis model: openai-codex\/gpt-6\.1-sol or openai\/gpt-6\.1-sol: window 922,000, price \$2\/\$10 per million; not used: cache short, long/);
+	assert.deepEqual(h.overrides().cliproxyapi.modelOverrides["claude-opus-5-5"], { promptCache: { short: 300, long: 3600 } }, "a removed value is filled again");
+	assert.match(h.notices.at(-1)!, /1 model updated in .*models\.json\nThis model: openai-codex\/gpt-6\.1-sol or openai\/gpt-6\.1-sol: window 922,000, short cache 5 min, price \$2\/\$10 per million; cache short: the smaller of the login's and the API key's/);
 
 	const before = readFileSync(modelsPath, "utf8");
 	h.state.online = false;
 	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
 	assert.match(h.notices.at(-1)!, /could not refresh the model data: offline\. The saved data stays in use\./);
 	assert.equal(readFileSync(modelsPath, "utf8"), before);
-	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ? · long ? · price ✓");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ⚠ · long ? · price ✓ · ⚠ login or API key unknown: shorter values");
 });
 
 test("with modelData set to false, the values this extension wrote are taken out and the user's stay", async () => {
@@ -233,6 +245,50 @@ test("with modelData set to false, the values this extension wrote are taken out
 	assert.deepEqual(JSON.parse(readFileSync(storePath, "utf8")).written, {});
 	assert.equal(h.statuses.get("cache-keeper-data"), undefined);
 	writeFileSync(settingsPath, JSON.stringify({ cacheKeeper: { compactBeforeExpiry: false } }));
+});
+
+test("a CLIProxyAPI that lists its credentials: the values of the one it tries first, and a warning when another kind answered", async () => {
+	rmSync(storePath);
+	writeFileSync(modelsPath, "{}");
+	const h = harness({ proxyAccounts: true });
+	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
+	const proxy = h.overrides().cliproxyapi.modelOverrides;
+	// The Claude login keeps the cache for an hour, both tiers; the Codex login has a 5-minute short lifetime.
+	assert.deepEqual(proxy["claude-opus-5-5"], { promptCache: { short: 3600, long: 3600 } });
+	assert.deepEqual(proxy["gpt-6.1-sol"], { contextWindow: 922_000, promptCache: { short: 300 } });
+	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ✓ · long ✗ · price ✓", "no guess, so no warning");
+	assert.ok(
+		h.requests.some((request) => request.url.includes("/entries?provider=anthropic")),
+		"the API key's values are fetched too, for when a key answers",
+	);
+
+	// Opus on the proxy: the login's hour.
+	const opus = h.ctx.modelRegistry.find("cliproxyapi", "claude-opus-5-5")!;
+	h.handlers.get("model_select")!({}, { ...h.ctx, model: opus });
+	const onOpus = { ...h.ctx, model: opus };
+	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ✓ · long ✓ · price ✓");
+	// An answer from the login changes nothing; one from an API key (the login failed or is cooling down) is warned
+	// about, and the countdown follows the key's 5 minutes.
+	h.handlers.get("after_provider_response")!({ status: 200, headers: { "x-cpa-auth-kind": "oauth" } }, onOpus);
+	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ✓ · long ✓ · price ✓");
+	h.handlers.get("after_provider_response")!({ status: 200, headers: { "x-cpa-auth-kind": "apikey" } }, onOpus);
+	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ✓ · long ✓ · price ✓ · ⚠ answered by an API key");
+	// With Pi's short retention the key's cache lasts 5 minutes, the login's an hour.
+	const retention = process.env.PI_CACHE_RETENTION;
+	process.env.PI_CACHE_RETENTION = "short";
+	try {
+		h.notices.length = 0;
+		await h.commands.get("cache-keeper")!("", onOpus);
+		assert.match(h.notices.at(-1)!, /cache: .*\(lifetime 5 min, declared by the model\)/);
+		assert.match(h.notices.at(-1)!, /model data: claude-subscription\/claude-opus-5-5: .*; the last answer came from an API key: anthropic\/claude-opus-5-5: .*short cache 5 min/);
+	} finally {
+		process.env.PI_CACHE_RETENTION = retention;
+	}
+	h.handlers.get("after_provider_response")!({ status: 200, headers: { "X-CPA-Auth-Kind": "oauth" } }, onOpus);
+	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ✓ · long ✓ · price ✓");
+	// A model of another provider is not affected.
+	h.handlers.get("after_provider_response")!({ status: 200, headers: { "x-cpa-auth-kind": "apikey" } }, { ...h.ctx, model: h.ctx.modelRegistry.find("anthropic", "claude-opus-5-5") });
+	assert.equal(h.statuses.get("cache-keeper-data"), "· window ✓ · cache short ✓ · long ✓ · price ✓");
 });
 
 test("nothing is fetched on its own in PI_OFFLINE mode or without a UI, and models.json with comments is left alone", async () => {

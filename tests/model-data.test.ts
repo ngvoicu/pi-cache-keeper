@@ -11,7 +11,7 @@ import {
 	emptyStore,
 	factsOf,
 	fetchDataset,
-	fetchOwners,
+	fetchProxyModels,
 	fieldStates,
 	findFacts,
 	formatFieldStates,
@@ -25,6 +25,7 @@ import {
 	writeModelsFile,
 	type DataStore,
 	type Facts,
+	type Access,
 	type Fetch,
 	type PiModel,
 	type Written,
@@ -114,23 +115,33 @@ test("a pi model is looked up under the provider and access method it is reached
 test("when two entries can describe a model, only what both say is kept, and the window is the smaller one", () => {
 	const claude = findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, { proxy: true, ownedBy: "anthropic" }), providers);
 	assert.deepEqual(claude.refs, ["claude-subscription/claude-opus-5-5", "anthropic/claude-opus-5-5"]);
-	// The login keeps a cache for 1 h either way, the API key for 5 min by default: a wrong guess would refresh a
-	// 1 h cache every 5 min, or let a 5 min cache expire.
-	assert.equal(claude.facts.short, undefined);
+	// The login keeps a cache for 1 h, the API key for 5 min by default. Without knowing which serves the model, the
+	// shorter is taken: a wrong guess then costs an early refresh, not a cache that expires unnoticed.
+	assert.equal(claude.facts.short, 300);
 	assert.equal(claude.facts.long, 3600);
 	assert.equal(claude.facts.window, 1_000_000);
-	assert.deepEqual(claude.unsure, ["short"]);
-	assert.deepEqual(fieldStates(claude), { window: "found", short: "unsure", long: "found", price: "found" });
+	assert.deepEqual(claude.assumed, ["short"]);
+	assert.deepEqual(claude.unsure, []);
+	assert.deepEqual(fieldStates(claude), { window: "found", short: "assumed", long: "found", price: "found" });
 
 	const gpt = findFacts(lookupsFor({ provider: "cliproxyapi", id: "gpt-6-astra" }, { proxy: true, ownedBy: "openai" }), providers);
 	assert.equal(gpt.facts.window, 915_011);
 	assert.equal(gpt.facts.windowAtLeast, true);
-	assert.deepEqual(gpt.unsure, ["short", "long"]);
+	// Codex login 2 h, API key 30 min: the shorter. Only the API key has a long lifetime: not used.
+	assert.equal(gpt.facts.short, 1800);
+	assert.deepEqual(gpt.assumed, ["window", "short"]);
+	assert.deepEqual(gpt.unsure, ["long"]);
 
 	// One entry lacks what the other has: still not known.
-	assert.deepEqual(mergeFacts([{ window: 100 }, { short: 300 }]), { facts: {}, unsure: ["window", "short"] });
-	assert.deepEqual(mergeFacts([{ window: 200, short: 300, maxOutput: 9 }, { window: 100, short: 300, maxOutput: 5 }]), { facts: { window: 100, short: 300, maxOutput: 5 }, unsure: [] });
-	assert.deepEqual(mergeFacts([]), { facts: {}, unsure: [] });
+	assert.deepEqual(mergeFacts([{ window: 100 }, { short: 300 }]), { facts: {}, unsure: ["window", "short"], assumed: [] });
+	assert.deepEqual(mergeFacts([{ window: 200, short: 300, maxOutput: 9 }, { window: 100, short: 300, maxOutput: 5 }]), {
+		facts: { window: 100, short: 300, maxOutput: 5 },
+		unsure: [],
+		assumed: ["window"],
+	});
+	// "No safe lifetime" (0) on one side is the smaller value.
+	assert.deepEqual(mergeFacts([{ short: 0 }, { short: 300 }]), { facts: { short: 0 }, unsure: [], assumed: ["short"] });
+	assert.deepEqual(mergeFacts([]), { facts: {}, unsure: [], assumed: [] });
 
 	// One entry found of two looked up: the model may still be served the other way, which the data does not
 	// describe, so nothing of the one entry is taken as sure.
@@ -141,7 +152,7 @@ test("when two entries can describe a model, only what both say is kept, and the
 	assert.deepEqual(desiredOverride(piModel(), onlyCodex.facts), {});
 	// A single possible entry is taken as it is.
 	assert.deepEqual(findFacts([{ provider: "openai-codex", model: "gpt-6.1-terra" }], providers).unsure, []);
-	assert.deepEqual(findFacts([{ provider: "nowhere", model: "x" }], providers), { facts: {}, unsure: [], refs: [] });
+	assert.deepEqual(findFacts([{ provider: "nowhere", model: "x" }], providers), { facts: {}, unsure: [], assumed: [], refs: [] });
 });
 
 test("the footer says what was found: a lifetime evaluations found unsafe counts as not found", () => {
@@ -151,11 +162,17 @@ test("the footer says what was found: a lifetime evaluations found unsafe counts
 	assert.equal(formatFieldStates(exact("openai-codex", "gpt-6.1-terra")), "· window ✓ · cache short ✗ · long ✗ · price ✓");
 	assert.equal(formatFieldStates(exact("antigravity", "gemini-3.8-flash-high")).startsWith("· window ✗ · cache short ✓"), true);
 	const unsure = findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, { proxy: true, ownedBy: "anthropic" }), providers);
-	assert.equal(formatFieldStates(unsure, (mark, state) => `<${state}:${mark}>`), "· window <found:✓> · cache short <unsure:?> · long <found:✓> · price <found:✓>");
+	assert.equal(
+		formatFieldStates(unsure, (mark, state) => `<${state}:${mark}>`),
+		"· window <found:✓> · cache short <assumed:⚠> · long <found:✓> · price <found:✓> · <assumed:⚠ login or API key unknown: shorter values>",
+	);
 	assert.equal(formatFieldStates(exact("openai", "nope")), "· providers.dev: no data for this model");
 	assert.equal(describeFound(exact("openai-codex", "gpt-6.1-sol")), "openai-codex/gpt-6.1-sol: window 922,000, short cache 5 min, price $2/$10 per million");
 	assert.equal(describeFound(exact("devin", "swe-2")), "devin/swe-2: window at least 300,499, no safe short cache lifetime");
-	assert.match(describeFound(unsure), /^claude-subscription\/claude-opus-5-5 or anthropic\/claude-opus-5-5: window 1,000,000, long cache 1 h, price \$4\/\$20 per million; not used: cache short \(it depends on whether a subscription login or an API key serves the model/);
+	assert.equal(
+		describeFound(unsure),
+		"claude-subscription/claude-opus-5-5 or anthropic/claude-opus-5-5: window 1,000,000, short cache 5 min, long cache 1 h, price $4/$20 per million; cache short: the smaller of the login's and the API key's, because which one serves the model is not known",
+	);
 	assert.equal(describeFound(exact("openai", "nope")), "no entry for this model");
 });
 
@@ -316,14 +333,56 @@ test("providers.dev is asked once whether the dataset changed, then per provider
 	await assert.rejects(fetchDataset(["openai-codex"], saved, async () => { throw new Error("offline"); }), /offline/);
 });
 
-test("a proxy's model list names the lab behind each model, and it is asked with the proxy's own key", async () => {
+test("a proxy's model list names the lab behind each model and the credentials serving it, and it is asked with the proxy's own key", async () => {
+	const login = { provider: "claude", kind: "oauth", priority: -15 };
+	const key = { provider: "claude", kind: "apikey", priority: -25 };
 	const fetchImpl: Fetch = async (url, init) => {
-		assert.equal(url, "http://127.0.0.1:8317/v1/models");
+		assert.equal(url, "http://127.0.0.1:8317/v1/models?include=accounts");
 		assert.equal(init.headers.authorization, "Bearer k");
-		return { ok: true, status: 200, json: async () => ({ data: [{ id: "claude-opus-5-5", owned_by: "anthropic" }, { id: "claude-sonnet-4-6", owned_by: "antigravity" }, { id: "nameless" }, "junk"] }) };
+		return {
+			ok: true,
+			status: 200,
+			json: async () => ({
+				data: [
+					{ id: "claude-opus-5-5", owned_by: "anthropic", accounts: [login, key, { kind: "oauth" }] },
+					{ id: "claude-sonnet-4-6", owned_by: "antigravity", accounts: [] },
+					{ id: "nameless" },
+					"junk",
+				],
+			}),
+		};
 	};
-	assert.deepEqual(await fetchOwners("http://127.0.0.1:8317", { authorization: "Bearer k" }, fetchImpl), { "claude-opus-5-5": "anthropic", "claude-sonnet-4-6": "antigravity" });
-	await assert.rejects(fetchOwners("http://127.0.0.1:8317", {}, async () => ({ ok: true, status: 200, json: async () => ({ models: [] }) })), /without a list/);
+	assert.deepEqual(await fetchProxyModels("http://127.0.0.1:8317", { authorization: "Bearer k" }, fetchImpl), {
+		owners: { "claude-opus-5-5": "anthropic", "claude-sonnet-4-6": "antigravity" },
+		accounts: { "claude-opus-5-5": [login, key] },
+	});
+	// A proxy without the parameter answers the plain list: no accounts.
+	const plain: Fetch = async () => ({ ok: true, status: 200, json: async () => ({ data: [{ id: "claude-opus-5-5", owned_by: "anthropic" }] }) });
+	assert.deepEqual(await fetchProxyModels("http://127.0.0.1:8317", {}, plain), { owners: { "claude-opus-5-5": "anthropic" }, accounts: {} });
+	await assert.rejects(fetchProxyModels("http://127.0.0.1:8317", {}, async () => ({ ok: true, status: 200, json: async () => ({ models: [] }) })), /without a list/);
+});
+
+test("with the proxy's credential list, a plain name is looked up under the credential it tries first, or the kind that answered", () => {
+	const accounts = [
+		{ provider: "claude", kind: "oauth", priority: -15 },
+		{ provider: "claude", kind: "apikey", priority: -25 },
+	];
+	const proxy = (id: string, extra: Partial<Access> = {}) => lookupsFor({ provider: "cliproxyapi", id }, { proxy: true, ownedBy: "anthropic", accounts, ...extra });
+	assert.deepEqual(proxy("claude-opus-5-5"), [{ provider: "claude-subscription", model: "claude-opus-5-5" }]);
+	assert.deepEqual(proxy("claude-opus-5-5", { servedKind: "apikey" }), [{ provider: "anthropic", model: "claude-opus-5-5" }]);
+	assert.deepEqual(proxy("claude-opus-5-5", { accounts: [accounts[1]] }), [{ provider: "anthropic", model: "claude-opus-5-5" }], "an alias on API keys only");
+	assert.deepEqual(proxy("gpt-6.1-sol", { accounts: [{ provider: "codex", kind: "oauth", priority: -17 }] }), [{ provider: "openai-codex", model: "gpt-6.1-sol" }]);
+	assert.deepEqual(proxy("muse-ember-1.0", { accounts: [{ provider: "meta", kind: "oauth", priority: -20 }] }), [{ provider: "meta-subscription", model: "muse-ember-1.0" }]);
+	assert.deepEqual(proxy("x", { accounts: [{ provider: "something-new", kind: "oauth", priority: 0 }] }), [], "a credential with no providers.dev provider");
+	// Prefixed names keep their own provider.
+	assert.deepEqual(proxy("devin/swe-2", { accounts: [{ provider: "devin", kind: "oauth", priority: -20 }] }), [{ provider: "devin", model: "swe-2" }]);
+
+	const exact = findFacts(proxy("claude-opus-5-5"), providers);
+	assert.deepEqual({ short: exact.facts.short, long: exact.facts.long, assumed: exact.assumed, unsure: exact.unsure }, { short: 3600, long: 3600, assumed: [], unsure: [] });
+	assert.equal(formatFieldStates(exact), "· window ✓ · cache short ✓ · long ✓ · price ✓");
+	// The answer came from an API key while the values are the login's: said at the end of the footer.
+	assert.equal(formatFieldStates(exact, undefined, "apikey"), "· window ✓ · cache short ✓ · long ✓ · price ✓ · ⚠ answered by an API key");
+	assert.equal(formatFieldStates(findFacts([], providers), undefined, "apikey"), "· providers.dev: no data for this model · ⚠ answered by an API key");
 });
 
 test("the facts of the fixture cover every field the extension reads", () => {

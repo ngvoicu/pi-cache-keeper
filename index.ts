@@ -68,10 +68,11 @@ import {
 	describeFound,
 	desiredOverride,
 	fetchDataset,
-	fetchOwners,
+	fetchProxyModels,
 	findFacts,
 	formatFieldStates,
 	isProxyProvider,
+	usableLifetime,
 	loadStore,
 	lookupsFor,
 	modelsPathLabel,
@@ -163,7 +164,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	let warming: AbortController | undefined;
 	let piWarmAt: number | undefined;
 	let warmStopped: string | undefined;
-	const stateOf = (model: Model<Api>, entries: SessionEntry[]) => cacheState(model, entries, warmedAt);
+	// The cache lifetime of a proxy model follows the credential that answered (see servedModel below).
+	const stateOf = (model: Model<Api>, entries: SessionEntry[]) => cacheState(servedModel(model), entries, warmedAt);
 	const abortWarm = () => {
 		warming?.abort();
 		warming = undefined;
@@ -249,10 +251,34 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				const subscription = !proxy && registry.isUsingOAuth(model) && registry.getProvider(model.provider)?.auth.oauth?.isSubscription === true;
 				byProvider.set(model.provider, (how = { proxy, subscription }));
 			}
-			return how.proxy ? { proxy: true, ownedBy: data.owners[model.provider]?.[model.id] } : { subscription: how.subscription };
+			return how.proxy
+				? { proxy: true, ownedBy: data.owners[model.provider]?.[model.id], accounts: data.accounts[model.provider]?.[model.id] }
+				: { subscription: how.subscription };
 		};
 	};
 	const foundFor = (ctx: ExtensionContext, model: Model<Api>, accessOf = accessReader(ctx)): Found => findFacts(lookupsFor(model, accessOf(model)), data.providers);
+
+	// The kind of credential ("oauth" or "apikey") that answered the last request to a proxy model, from CLIProxyAPI's
+	// X-CPA-AUTH-KIND response header. The values in models.json are those of the credential the proxy tries first;
+	// when another kind answered (the first one failed or is cooling down), its cache lifetime is the one that holds.
+	let served: { provider: string; id: string; kind: string } | undefined;
+	const servedKindFor = (model: Model<Api> | undefined): string | undefined => {
+		if (!model || !served || served.provider !== model.provider || served.id !== model.id) return undefined;
+		const first = data.accounts[model.provider]?.[model.id]?.[0];
+		return first && first.kind !== served.kind ? served.kind : undefined;
+	};
+	const servedModel = (model: Model<Api>): Model<Api> => {
+		const kind = servedKindFor(model);
+		if (!kind) return model;
+		const found = findFacts(
+			lookupsFor(model, { proxy: true, ownedBy: data.owners[model.provider]?.[model.id], accounts: data.accounts[model.provider]?.[model.id], servedKind: kind }),
+			data.providers,
+		);
+		const short = usableLifetime(found.facts.short);
+		const long = usableLifetime(found.facts.long);
+		const promptCache = short === undefined && long === undefined ? undefined : { ...(short === undefined ? {} : { short }), ...(long === undefined ? {} : { long }) };
+		return { ...model, promptCache };
+	};
 
 	// The footer: what providers.dev has for the current model.
 	const showData = (ctx: ExtensionContext) => {
@@ -260,7 +286,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const model = ctx.model;
 		if (!config.modelData || !model || data.checkedAt === undefined) return ctx.ui.setStatus(DATA_STATUS_KEY, undefined);
 		const { theme } = ctx.ui;
-		ctx.ui.setStatus(DATA_STATUS_KEY, formatFieldStates(foundFor(ctx, model), (mark, state) => theme.fg(state === "found" ? "success" : state === "unsure" ? "warning" : "dim", mark)));
+		const color = (state: string) => (state === "found" ? "success" : state === "missing" ? "dim" : "warning");
+		ctx.ui.setStatus(DATA_STATUS_KEY, formatFieldStates(foundFor(ctx, model), (text, state) => theme.fg(color(state), text), servedKindFor(model)));
 	};
 
 	// Brings models.json in line with the saved data (or, with the setting off, takes this extension's values out).
@@ -302,15 +329,24 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const neededProviders = (ctx: ExtensionContext): string[] => {
 		const needed = new Set<string>();
 		const accessOf = accessReader(ctx);
-		for (const model of ctx.modelRegistry.getAvailable()) for (const lookup of lookupsFor(model, accessOf(model))) needed.add(lookup.provider);
+		for (const model of ctx.modelRegistry.getAvailable()) {
+			const access = accessOf(model);
+			for (const lookup of lookupsFor(model, access)) needed.add(lookup.provider);
+			// Every kind of credential a proxy may answer with, so its values are at hand when it does.
+			for (const kind of new Set((access.accounts ?? []).map((account) => account.kind))) {
+				for (const lookup of lookupsFor(model, { ...access, servedKind: kind })) needed.add(lookup.provider);
+			}
+		}
 		return [...needed].sort();
 	};
 
 	const refreshData = (ctx: ExtensionContext, force: boolean): Promise<DataSummary> =>
 		(dataRefresh ??= (async () => {
 			const registry = ctx.modelRegistry;
-			// A proxy's own model list says which lab each model belongs to. It is asked with the proxy's own key.
+			// A proxy's own model list says which lab each model belongs to and, on a CLIProxyAPI that lists them, which
+			// credentials serve it. It is asked with the proxy's own key.
 			const owners: DataStore["owners"] = {};
+			const accounts: DataStore["accounts"] = {};
 			const proxies = new Map<string, Model<Api>>();
 			for (const model of registry.getAvailable()) {
 				if (!proxies.has(model.provider) && isProxyProvider(model.provider, registry.getProviderDisplayName(model.provider))) proxies.set(model.provider, model);
@@ -320,13 +356,16 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					const auth = await registry.getApiKeyAndHeaders(model);
 					if (!auth.ok) throw new Error(auth.error);
 					const headers = { ...auth.headers, ...(auth.apiKey ? { authorization: `Bearer ${auth.apiKey}` } : {}) };
-					owners[provider] = await fetchOwners(new URL(auth.baseUrl ?? model.baseUrl).origin, headers, httpFetch);
+					const listed = await fetchProxyModels(new URL(auth.baseUrl ?? model.baseUrl).origin, headers, httpFetch);
+					owners[provider] = listed.owners;
+					accounts[provider] = listed.accounts;
 				} catch {
 					// The proxy is not answering: keep what it said last time.
 					if (data.owners[provider]) owners[provider] = data.owners[provider];
+					if (data.accounts[provider]) accounts[provider] = data.accounts[provider];
 				}
 			}
-			data = { ...data, owners };
+			data = { ...data, owners, accounts };
 			const dataset = await fetchDataset(neededProviders(ctx), data, httpFetch, { force });
 			data = { ...data, providers: dataset.providers, datasetVersion: dataset.datasetVersion, checkedAt: Date.now() };
 			saveStore(data);
@@ -655,7 +694,18 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		decision = undefined;
 		compactionTrigger = undefined;
 	});
+	pi.on("after_provider_response", (event, ctx) => {
+		const model = ctx.model;
+		if (!model || !isProxyProvider(model.provider, ctx.modelRegistry.getProviderDisplayName(model.provider))) return;
+		const headers = (event as { headers?: Record<string, string | undefined> }).headers ?? {};
+		const kind = Object.entries(headers).find(([name]) => name.toLowerCase() === "x-cpa-auth-kind")?.[1]?.trim().toLowerCase();
+		if (kind !== "oauth" && kind !== "apikey") return;
+		const before = servedKindFor(model);
+		served = { provider: model.provider, id: model.id, kind };
+		if (servedKindFor(model) !== before) showData(ctx);
+	});
 	pi.on("model_select", (_event, ctx) => {
+		served = undefined;
 		forget(ctx);
 		showData(ctx);
 	});
@@ -841,7 +891,13 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (!config.modelData) return "off";
 		const failed = dataError ? `; the last refresh failed: ${dataError}` : "";
 		if (data.checkedAt === undefined) return `not fetched from ${DATA_SOURCE} yet${failed}; /cache-keeper-refresh fetches it`;
-		const found = ctx.model ? describeFound(foundFor(ctx, ctx.model)) : "no model";
+		const model = ctx.model;
+		let found = model ? describeFound(foundFor(ctx, model)) : "no model";
+		const kind = servedKindFor(model);
+		if (model && kind) {
+			const access = { proxy: true, ownedBy: data.owners[model.provider]?.[model.id], accounts: data.accounts[model.provider]?.[model.id], servedKind: kind };
+			found += `; the last answer came from ${kind === "apikey" ? "an API key" : "a login"}: ${describeFound(findFacts(lookupsFor(model, access), data.providers))}`;
+		}
 		return `${found} (${DATA_SOURCE}, checked ${formatDuration(Date.now() - data.checkedAt)} ago${failed}; /cache-keeper-refresh fetches it again)`;
 	};
 

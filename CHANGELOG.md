@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.0] - 2026-11-17
+
+### Added
+- **Which credential serves a model through CLIProxyAPI** — A CLIProxyAPI that lists its credentials (`/v1/models?include=accounts`, router-for-me/CLIProxyAPI#7634) says, per model, which logins and API keys serve it, in the order it tries them. A plain model name is then looked up under the first one: a Claude model on a Claude login gets the login's hour, not a guess.
+- **A warning when another kind of credential answered** — Such a CLIProxyAPI names the kind of credential on each response (`X-CPA-AUTH-KIND`). When an API key answered for a model whose values are the login's, the footer ends with `⚠ answered by an API key` and the countdown follows the key's lifetime.
+
+### Changed
+- **When it isn't known whether a login or an API key serves a model** (an older CLIProxyAPI, or Pi's ChatGPT sign-in on `openai`), the smaller of the two values is used instead of none, marked `⚠`, and the footer ends with `⚠ login or API key unknown: shorter values`. A value only one of the two has is still left out (`?`).
+
 ## [0.2.1] - 2026-11-17
 
 ### Changed
