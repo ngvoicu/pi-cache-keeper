@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.4] - 2026-11-17
+
+### Changed
+- **API keys go by the host they are sent to** — A CLIProxyAPI that names the host of an API key's base URL (router-for-me/CLIProxyAPI#7634) is believed over the entry's name: `openrouter.ai` is OpenRouter whatever the entry is called, and a Claude or OpenAI key sent to another service gets no data instead of the lab's. Without a host nothing changes.
+
 ## [0.3.3] - 2026-11-17
 
 ### Changed

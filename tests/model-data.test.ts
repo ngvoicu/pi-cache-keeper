@@ -347,6 +347,7 @@ test("a proxy's model list names the lab behind each model and the credentials s
 			json: async () => ({
 				data: [
 					{ id: "claude-opus-5-5", owned_by: "anthropic", accounts: [login, key, { kind: "oauth" }] },
+					{ id: "openai/gpt-6.1-sol", owned_by: "openai", accounts: [{ provider: "openai-compatible-x", kind: "apikey", priority: 0, host: "openrouter.ai" }] },
 					{ id: "claude-sonnet-4-6", owned_by: "antigravity", accounts: [] },
 					{ id: "nameless" },
 					"junk",
@@ -355,8 +356,8 @@ test("a proxy's model list names the lab behind each model and the credentials s
 		};
 	};
 	assert.deepEqual(await fetchProxyModels("http://127.0.0.1:8317", { authorization: "Bearer k" }, fetchImpl), {
-		owners: { "claude-opus-5-5": "anthropic", "claude-sonnet-4-6": "antigravity" },
-		accounts: { "claude-opus-5-5": [login, key] },
+		owners: { "claude-opus-5-5": "anthropic", "openai/gpt-6.1-sol": "openai", "claude-sonnet-4-6": "antigravity" },
+		accounts: { "claude-opus-5-5": [login, key], "openai/gpt-6.1-sol": [{ provider: "openai-compatible-x", kind: "apikey", priority: 0, host: "openrouter.ai" }] },
 	});
 	// A proxy without the parameter answers the plain list: no accounts.
 	const plain: Fetch = async () => ({ ok: true, status: 200, json: async () => ({ data: [{ id: "claude-opus-5-5", owned_by: "anthropic" }] }) });
@@ -384,6 +385,14 @@ test("with the proxy's credential list, a plain name is looked up under the cred
 	assert.deepEqual(proxy("anthropic/claude-opus-5-5", { accounts: [accounts[0]] }), [{ provider: "claude-subscription", model: "claude-opus-5-5" }]);
 	const openrouter = { provider: "openai-compatible-openrouter", kind: "apikey", priority: 0 };
 	assert.deepEqual(proxy("openai/gpt-6.1-sol", { accounts: [openrouter] }), [{ provider: "openrouter", model: "openai/gpt-6.1-sol" }]);
+	// A proxy that names the host of an API key's base URL: the host decides, whatever the entry is called.
+	const at = (host: string, provider = "openai-compatible-mine") => ({ provider, kind: "apikey", priority: 0, host });
+	assert.deepEqual(proxy("openai/gpt-6.1-sol", { accounts: [at("openrouter.ai")] }), [{ provider: "openrouter", model: "openai/gpt-6.1-sol" }]);
+	assert.deepEqual(proxy("gpt-6.1-sol", { accounts: [at("api.openai.com", "codex")] }), [{ provider: "openai", model: "gpt-6.1-sol" }]);
+	assert.deepEqual(proxy("claude-opus-5-5", { accounts: [at("api.anthropic.com", "claude")] }), [{ provider: "anthropic", model: "claude-opus-5-5" }]);
+	// A Claude key sent somewhere else, or an entry named openrouter on another host: not what the name says.
+	assert.deepEqual(proxy("claude-opus-5-5", { accounts: [at("llm.example.com", "claude")] }), []);
+	assert.deepEqual(proxy("openai/gpt-6.1-sol", { accounts: [at("llm.example.com", "openai-compatible-openrouter")] }), []);
 
 	// CPA uses the highest priority that is free, and picks among the credentials sharing it (round-robin by default).
 	// Nothing set means every credential sits at 0: a login and a key then take turns, so both are possible.

@@ -248,6 +248,8 @@ export interface ProxyAccount {
 	/** "oauth" for a subscription login, "apikey" for an API key. */
 	kind: string;
 	priority: number;
+	/** The host of an API key's base URL, when the proxy names it (CLIProxyAPI#7634). */
+	host?: string;
 }
 
 export interface Access {
@@ -289,7 +291,20 @@ const PROXY_CREDENTIALS: Record<string, { oauth?: string; apikey?: string }> = {
 	"openai-compatible-openrouter": { apikey: "openrouter" },
 };
 
-const providerOfAccount = (account: ProxyAccount): string | undefined => PROXY_CREDENTIALS[account.provider]?.[account.kind as "oauth" | "apikey"];
+/** The providers.dev provider of an API key, by the host it is sent to. */
+const API_HOSTS: Record<string, string> = {
+	"openrouter.ai": "openrouter",
+	"api.openai.com": "openai",
+	"api.anthropic.com": "anthropic",
+	"generativelanguage.googleapis.com": "google",
+};
+
+/**
+ * An API key whose host the proxy names goes by the host: an OpenAI-compatible entry is called whatever the operator
+ * chose, and a Claude or OpenAI key can be sent to another service. Otherwise by the proxy's provider name.
+ */
+const providerOfAccount = (account: ProxyAccount): string | undefined =>
+	account.kind === "apikey" && account.host ? API_HOSTS[account.host] : PROXY_CREDENTIALS[account.provider]?.[account.kind as "oauth" | "apikey"];
 
 /**
  * The credentials a proxy may answer with: those at the highest priority (CLIProxyAPI uses the highest priority that is
@@ -685,7 +700,12 @@ export async function fetchProxyModels(origin: string, headers: Record<string, s
 		const list: ProxyAccount[] = [];
 		for (const account of model.accounts) {
 			if (!isPlainObject(account) || typeof account.provider !== "string" || typeof account.kind !== "string") continue;
-			list.push({ provider: account.provider, kind: account.kind, priority: typeof account.priority === "number" ? account.priority : 0 });
+			list.push({
+				provider: account.provider,
+				kind: account.kind,
+				priority: typeof account.priority === "number" ? account.priority : 0,
+				...(typeof account.host === "string" && account.host ? { host: account.host.toLowerCase() } : {}),
+			});
 		}
 		if (list.length > 0) accounts[model.id] = list;
 	}
