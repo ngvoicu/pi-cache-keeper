@@ -42,7 +42,7 @@ test("settings: compacting when full is on at 90% by default, takes a whole perc
 		}
 		writeFileSync(settings, JSON.stringify({ theme: "dark", compaction: { enabled: true }, cacheKeeper: { minContextTokens: 200_000 } }));
 		const saved = saveConfig({ compactAtPercent: 80, cacheRetention: "short" });
-		assert.deepEqual(saved, { cacheRetention: "short", compactBeforeExpiry: true, minContextTokens: 200_000, compactAtPercent: 80, compactAtTokens: 0, keepWarmMinutes: 0 });
+		assert.deepEqual(saved, { cacheRetention: "short", compactBeforeExpiry: true, minContextTokens: 200_000, compactAtPercent: 80, compactAtTokens: 0, keepWarmMinutes: 0, modelData: true });
 		assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")), {
 			theme: "dark",
 			compaction: { enabled: true },
@@ -127,17 +127,36 @@ test("settings: without cacheKeeper, pi-cached-compaction's cachedCompaction is 
 		const old = { cacheRetention: "short", minContextTokens: 140_000, compactAtPercent: 70, compactAtTokens: 400_000 };
 		writeFileSync(settings, JSON.stringify({ theme: "dark", cachedCompaction: old }));
 		assert.equal(settingsKeyInUse(), "cachedCompaction");
-		assert.deepEqual(loadConfig(), { ...old, compactBeforeExpiry: true, keepWarmMinutes: 0 });
+		assert.deepEqual(loadConfig(), { ...old, compactBeforeExpiry: true, keepWarmMinutes: 0, modelData: true });
 		writeFileSync(settings, JSON.stringify({ cachedCompaction: { compactAtPercent: 101 } }));
 		assert.throws(loadConfig, /^Error: cachedCompaction\.compactAtPercent/, "errors name the key the value came from");
 		writeFileSync(settings, JSON.stringify({ theme: "dark", cachedCompaction: old }));
 		const saved = saveConfig({ keepWarmMinutes: 60 });
-		assert.deepEqual(saved, { ...old, compactBeforeExpiry: true, keepWarmMinutes: 60 });
+		assert.deepEqual(saved, { ...old, compactBeforeExpiry: true, keepWarmMinutes: 60, modelData: true });
 		assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")), { theme: "dark", cachedCompaction: old, cacheKeeper: { ...old, keepWarmMinutes: 60 } });
 		assert.equal(settingsKeyInUse(), "cacheKeeper");
 		// Once cacheKeeper is present, the old key is ignored.
 		writeFileSync(settings, JSON.stringify({ cachedCompaction: old, cacheKeeper: { compactAtPercent: 80 } }));
-		assert.deepEqual(loadConfig(), { cacheRetention: "long", compactBeforeExpiry: true, minContextTokens: 140_000, compactAtPercent: 80, compactAtTokens: 0, keepWarmMinutes: 0 });
+		assert.deepEqual(loadConfig(), { cacheRetention: "long", compactBeforeExpiry: true, minContextTokens: 140_000, compactAtPercent: 80, compactAtTokens: 0, keepWarmMinutes: 0, modelData: true });
+	} finally {
+		delete process.env.PI_CODING_AGENT_DIR;
+		rmSync(dir, { recursive: true });
+	}
+});
+
+test("settings: model data from providers.dev is on by default, takes true or false, and is saved beside the others", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pcc-config-"));
+	const settings = join(dir, "settings.json");
+	process.env.PI_CODING_AGENT_DIR = dir;
+	try {
+		assert.equal(loadConfig().modelData, true);
+		writeFileSync(settings, JSON.stringify({ cacheKeeper: { modelData: false } }));
+		assert.equal(loadConfig().modelData, false);
+		writeFileSync(settings, JSON.stringify({ cacheKeeper: { modelData: "off" } }));
+		assert.throws(loadConfig, /modelData .* must be true or false/);
+		writeFileSync(settings, JSON.stringify({ cacheKeeper: { compactAtPercent: 70 } }));
+		assert.equal(saveConfig({ modelData: false }).modelData, false);
+		assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")).cacheKeeper, { compactAtPercent: 70, modelData: false });
 	} finally {
 		delete process.env.PI_CODING_AGENT_DIR;
 		rmSync(dir, { recursive: true });

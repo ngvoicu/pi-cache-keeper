@@ -1,0 +1,2694 @@
+{
+ "note": "Entries from https://providers.dev/api/v1/entries (dataset of 2026-11-17), reduced to the fields this extension reads.",
+ "data": [
+  {
+   "provider": "anthropic",
+   "model": "claude-haiku-5-5",
+   "access": "api",
+   "context": 1000000,
+   "max_output": 128000,
+   "input_window": {
+    "tokens": 1000000,
+    "basis": "documented",
+    "bound": "limit",
+    "scope": "window"
+   },
+   "cache_lifetime": {
+    "short": {
+     "safe_s": 300,
+     "basis": "documented"
+    },
+    "long": {
+     "safe_s": 3600,
+     "basis": "documented"
+    }
+   },
+   "pricing": {
+    "billing": "per_use",
+    "rules": [
+     {
+      "id": "cost.text.input.price",
+      "when": null,
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 0.1,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.read",
+      "when": null,
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.01,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.price",
+      "when": null,
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 0.5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.web_search.price",
+      "when": null,
+      "meter": "web_search",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "search",
+       "quantity": 1000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.5m",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 300
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 0.125,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.1h",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 3600
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 0.2,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 100000
+      },
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 0.5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.read",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 100000
+      },
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.05,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.write.5m",
+      "when": {
+       "kind": "all",
+       "conditions": [
+        {
+         "kind": "predicate",
+         "field": "request.context_tokens",
+         "op": "gt",
+         "value": 100000
+        },
+        {
+         "kind": "predicate",
+         "field": "cache.retention_s",
+         "op": "eq",
+         "value": 300
+        }
+       ]
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 0.625,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.write.1h",
+      "when": {
+       "kind": "all",
+       "conditions": [
+        {
+         "kind": "predicate",
+         "field": "request.context_tokens",
+         "op": "gt",
+         "value": 100000
+        },
+        {
+         "kind": "predicate",
+         "field": "cache.retention_s",
+         "op": "eq",
+         "value": 3600
+        }
+       ]
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 1,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.overrides[0].price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 100000
+      },
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 2.5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.multipliers[0].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.region",
+       "op": "eq",
+       "value": "us"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 1.1,
+      "unit": null
+     }
+    ]
+   }
+  },
+  {
+   "provider": "anthropic",
+   "model": "claude-opus-5-5",
+   "access": "api",
+   "context": 1000000,
+   "max_output": 128000,
+   "input_window": {
+    "tokens": 1000000,
+    "basis": "documented",
+    "bound": "limit",
+    "scope": "window"
+   },
+   "cache_lifetime": {
+    "short": {
+     "safe_s": 300,
+     "basis": "documented"
+    },
+    "long": {
+     "safe_s": 3600,
+     "basis": "documented"
+    }
+   },
+   "pricing": {
+    "billing": "per_use",
+    "rules": [
+     {
+      "id": "cost.text.input.price",
+      "when": null,
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 4,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.read",
+      "when": null,
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.2,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.price",
+      "when": null,
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 20,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.web_search.price",
+      "when": null,
+      "meter": "web_search",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "search",
+       "quantity": 1000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.5m",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 300
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.1h",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 3600
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 8,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.multipliers[0].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "fast"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 2,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[1].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.region",
+       "op": "eq",
+       "value": "us"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 1.1,
+      "unit": null
+     }
+    ]
+   }
+  },
+  {
+   "provider": "anthropic",
+   "model": "claude-fable-5-2",
+   "access": "api",
+   "context": 1000000,
+   "max_output": 128000,
+   "input_window": {
+    "tokens": 1000000,
+    "basis": "documented",
+    "bound": "limit",
+    "scope": "window"
+   },
+   "cache_lifetime": {
+    "short": {
+     "safe_s": 300,
+     "basis": "documented"
+    },
+    "long": {
+     "safe_s": 3600,
+     "basis": "documented"
+    }
+   },
+   "pricing": {
+    "billing": "per_use",
+    "rules": [
+     {
+      "id": "cost.text.input.price",
+      "when": null,
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 8,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.read",
+      "when": null,
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.2,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.price",
+      "when": null,
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 40,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.web_search.price",
+      "when": null,
+      "meter": "web_search",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "search",
+       "quantity": 1000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.5m",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 300
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.1h",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 3600
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 16,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.multipliers[0].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "fast"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 2,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[1].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.region",
+       "op": "eq",
+       "value": "us"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 1.1,
+      "unit": null
+     }
+    ]
+   }
+  },
+  {
+   "provider": "claude-subscription",
+   "model": "claude-opus-5-5",
+   "access": "subscription",
+   "context": 1000000,
+   "max_output": 128000,
+   "input_window": {
+    "tokens": 1000000,
+    "basis": "measured",
+    "bound": "limit",
+    "scope": "window"
+   },
+   "cache_lifetime": {
+    "short": {
+     "safe_s": 3600,
+     "basis": "measured"
+    },
+    "long": {
+     "safe_s": 3600,
+     "basis": "measured"
+    }
+   },
+   "pricing": {
+    "billing": "reference",
+    "rules": [
+     {
+      "id": "cost.text.input.price",
+      "when": null,
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 4,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.read",
+      "when": null,
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.2,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.price",
+      "when": null,
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 20,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.web_search.price",
+      "when": null,
+      "meter": "web_search",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "search",
+       "quantity": 1000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.5m",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 300
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.1h",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 3600
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 8,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.multipliers[0].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "fast"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 2,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[1].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.region",
+       "op": "eq",
+       "value": "us"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 1.1,
+      "unit": null
+     }
+    ]
+   }
+  },
+  {
+   "provider": "openai",
+   "model": "gpt-6.1-sol",
+   "access": "api",
+   "context": 1050000,
+   "max_output": 128000,
+   "input_window": {
+    "tokens": 922000,
+    "basis": "documented",
+    "bound": "limit",
+    "scope": "input"
+   },
+   "cache_lifetime": {
+    "short": {
+     "safe_s": 1800,
+     "basis": "documented"
+    },
+    "long": {
+     "safe_s": 43200,
+     "basis": "documented"
+    }
+   },
+   "pricing": {
+    "billing": "per_use",
+    "rules": [
+     {
+      "id": "cost.text.input.price",
+      "when": null,
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 2,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.read",
+      "when": null,
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.1,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.price",
+      "when": null,
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.web_search.price",
+      "when": null,
+      "meter": "web_search",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "search",
+       "quantity": 1000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.30m",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 1800
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 2.5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.12h",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 43200
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 4,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.read",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.2,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.write.30m",
+      "when": {
+       "kind": "all",
+       "conditions": [
+        {
+         "kind": "predicate",
+         "field": "request.context_tokens",
+         "op": "gt",
+         "value": 272000
+        },
+        {
+         "kind": "predicate",
+         "field": "cache.retention_s",
+         "op": "eq",
+         "value": 1800
+        }
+       ]
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.write.12h",
+      "when": {
+       "kind": "all",
+       "conditions": [
+        {
+         "kind": "predicate",
+         "field": "request.context_tokens",
+         "op": "gt",
+         "value": 272000
+        },
+        {
+         "kind": "predicate",
+         "field": "cache.retention_s",
+         "op": "eq",
+         "value": 43200
+        }
+       ]
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.overrides[0].price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 15,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.multipliers[0].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "priority"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 2,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[1].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "ultrafast"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 6,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[2].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "flex"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 0.5,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[3].factor.text",
+      "when": {
+       "kind": "not",
+       "condition": {
+        "kind": "predicate",
+        "field": "request.region",
+        "op": "eq",
+        "value": "global"
+       }
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 1.1,
+      "unit": null
+     }
+    ]
+   }
+  },
+  {
+   "provider": "openai",
+   "model": "gpt-6-astra",
+   "access": "api",
+   "context": 1050000,
+   "max_output": 128000,
+   "input_window": {
+    "tokens": 922000,
+    "basis": "documented",
+    "bound": "limit",
+    "scope": "input"
+   },
+   "cache_lifetime": {
+    "short": {
+     "safe_s": 1800,
+     "basis": "documented"
+    },
+    "long": {
+     "safe_s": 43200,
+     "basis": "documented"
+    }
+   },
+   "pricing": {
+    "billing": "per_use",
+    "rules": [
+     {
+      "id": "cost.text.input.price",
+      "when": null,
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.read",
+      "when": null,
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 1,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.price",
+      "when": null,
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 50,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.web_search.price",
+      "when": null,
+      "meter": "web_search",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "search",
+       "quantity": 1000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.30m",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 1800
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 12.5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.12h",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 43200
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 25,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 20,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.read",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 2,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.write.30m",
+      "when": {
+       "kind": "all",
+       "conditions": [
+        {
+         "kind": "predicate",
+         "field": "request.context_tokens",
+         "op": "gt",
+         "value": 272000
+        },
+        {
+         "kind": "predicate",
+         "field": "cache.retention_s",
+         "op": "eq",
+         "value": 1800
+        }
+       ]
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 25,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.write.12h",
+      "when": {
+       "kind": "all",
+       "conditions": [
+        {
+         "kind": "predicate",
+         "field": "request.context_tokens",
+         "op": "gt",
+         "value": 272000
+        },
+        {
+         "kind": "predicate",
+         "field": "cache.retention_s",
+         "op": "eq",
+         "value": 43200
+        }
+       ]
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 50,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.overrides[0].price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 75,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.multipliers[0].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "priority"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 2,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[1].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "ultrafast"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 6,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[2].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "flex"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 0.5,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[3].factor.text",
+      "when": {
+       "kind": "not",
+       "condition": {
+        "kind": "predicate",
+        "field": "request.region",
+        "op": "eq",
+        "value": "global"
+       }
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 1.1,
+      "unit": null
+     }
+    ]
+   }
+  },
+  {
+   "provider": "openai-codex",
+   "model": "gpt-6.1-sol",
+   "access": "subscription",
+   "context": 1050000,
+   "max_output": 128000,
+   "input_window": {
+    "tokens": 922000,
+    "basis": "documented",
+    "bound": "limit",
+    "scope": "input"
+   },
+   "cache_lifetime": {
+    "short": {
+     "safe_s": 300,
+     "basis": "measured"
+    },
+    "long": {
+     "safe_s": null,
+     "basis": "none"
+    }
+   },
+   "pricing": {
+    "billing": "reference",
+    "rules": [
+     {
+      "id": "cost.text.input.price",
+      "when": null,
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 2,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.read",
+      "when": null,
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.1,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.price",
+      "when": null,
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.web_search.price",
+      "when": null,
+      "meter": "web_search",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "search",
+       "quantity": 1000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.30m",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 1800
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 2.5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.12h",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 43200
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 4,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.read",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.2,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.write.30m",
+      "when": {
+       "kind": "all",
+       "conditions": [
+        {
+         "kind": "predicate",
+         "field": "request.context_tokens",
+         "op": "gt",
+         "value": 272000
+        },
+        {
+         "kind": "predicate",
+         "field": "cache.retention_s",
+         "op": "eq",
+         "value": 1800
+        }
+       ]
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.write.12h",
+      "when": {
+       "kind": "all",
+       "conditions": [
+        {
+         "kind": "predicate",
+         "field": "request.context_tokens",
+         "op": "gt",
+         "value": 272000
+        },
+        {
+         "kind": "predicate",
+         "field": "cache.retention_s",
+         "op": "eq",
+         "value": 43200
+        }
+       ]
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.overrides[0].price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 15,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.multipliers[0].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "priority"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 2,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[1].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "ultrafast"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 6,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[2].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "flex"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 0.5,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[3].factor.text",
+      "when": {
+       "kind": "not",
+       "condition": {
+        "kind": "predicate",
+        "field": "request.region",
+        "op": "eq",
+        "value": "global"
+       }
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 1.1,
+      "unit": null
+     }
+    ]
+   }
+  },
+  {
+   "provider": "openai-codex",
+   "model": "gpt-6-astra",
+   "access": "subscription",
+   "context": null,
+   "max_output": null,
+   "input_window": {
+    "tokens": 915011,
+    "basis": "measured",
+    "bound": "at_least",
+    "scope": "input"
+   },
+   "cache_lifetime": {
+    "short": {
+     "safe_s": 7200,
+     "basis": "measured"
+    },
+    "long": {
+     "safe_s": null,
+     "basis": "none"
+    }
+   },
+   "pricing": {
+    "billing": "reference",
+    "rules": [
+     {
+      "id": "cost.text.input.price",
+      "when": null,
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.read",
+      "when": null,
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 1,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.price",
+      "when": null,
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 50,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.web_search.price",
+      "when": null,
+      "meter": "web_search",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "search",
+       "quantity": 1000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.30m",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 1800
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 12.5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.12h",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 43200
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 25,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 20,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.read",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 2,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.write.30m",
+      "when": {
+       "kind": "all",
+       "conditions": [
+        {
+         "kind": "predicate",
+         "field": "request.context_tokens",
+         "op": "gt",
+         "value": 272000
+        },
+        {
+         "kind": "predicate",
+         "field": "cache.retention_s",
+         "op": "eq",
+         "value": 1800
+        }
+       ]
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 25,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.write.12h",
+      "when": {
+       "kind": "all",
+       "conditions": [
+        {
+         "kind": "predicate",
+         "field": "request.context_tokens",
+         "op": "gt",
+         "value": 272000
+        },
+        {
+         "kind": "predicate",
+         "field": "cache.retention_s",
+         "op": "eq",
+         "value": 43200
+        }
+       ]
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 50,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.overrides[0].price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 75,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.multipliers[0].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "priority"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 2,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[1].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "ultrafast"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 6,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[2].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "flex"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 0.5,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[3].factor.text",
+      "when": {
+       "kind": "not",
+       "condition": {
+        "kind": "predicate",
+        "field": "request.region",
+        "op": "eq",
+        "value": "global"
+       }
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 1.1,
+      "unit": null
+     }
+    ]
+   }
+  },
+  {
+   "provider": "openai-codex",
+   "model": "gpt-6.1-terra",
+   "access": "subscription",
+   "context": 1050000,
+   "max_output": 128000,
+   "input_window": {
+    "tokens": 922000,
+    "basis": "documented",
+    "bound": "limit",
+    "scope": "input"
+   },
+   "cache_lifetime": {
+    "short": {
+     "safe_s": 0,
+     "basis": "measured"
+    },
+    "long": {
+     "safe_s": null,
+     "basis": "none"
+    }
+   },
+   "pricing": {
+    "billing": "reference",
+    "rules": [
+     {
+      "id": "cost.text.input.price",
+      "when": null,
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 1,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.read",
+      "when": null,
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.05,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.price",
+      "when": null,
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.web_search.price",
+      "when": null,
+      "meter": "web_search",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "search",
+       "quantity": 1000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.30m",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 1800
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 1.25,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.12h",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 43200
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 2.5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 2,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.read",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.1,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.write.30m",
+      "when": {
+       "kind": "all",
+       "conditions": [
+        {
+         "kind": "predicate",
+         "field": "request.context_tokens",
+         "op": "gt",
+         "value": 272000
+        },
+        {
+         "kind": "predicate",
+         "field": "cache.retention_s",
+         "op": "eq",
+         "value": 1800
+        }
+       ]
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 2.5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.write.12h",
+      "when": {
+       "kind": "all",
+       "conditions": [
+        {
+         "kind": "predicate",
+         "field": "request.context_tokens",
+         "op": "gt",
+         "value": 272000
+        },
+        {
+         "kind": "predicate",
+         "field": "cache.retention_s",
+         "op": "eq",
+         "value": 43200
+        }
+       ]
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.overrides[0].price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 7.5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.multipliers[0].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "priority"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 2,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[1].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "flex"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 0.5,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[2].factor.text",
+      "when": {
+       "kind": "not",
+       "condition": {
+        "kind": "predicate",
+        "field": "request.region",
+        "op": "eq",
+        "value": "global"
+       }
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 1.1,
+      "unit": null
+     }
+    ]
+   }
+  },
+  {
+   "provider": "meta-subscription",
+   "model": "muse-ember-1.0",
+   "access": "subscription",
+   "context": 1048576,
+   "max_output": null,
+   "input_window": {
+    "tokens": 1048576,
+    "basis": "measured",
+    "bound": "limit",
+    "scope": "window"
+   },
+   "cache_lifetime": {
+    "short": {
+     "safe_s": 300,
+     "basis": "measured"
+    },
+    "long": {
+     "safe_s": 14400,
+     "basis": "measured"
+    }
+   },
+   "pricing": {
+    "billing": "reference",
+    "rules": [
+     {
+      "id": "cost.text.input.price",
+      "when": null,
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 0.1,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.read",
+      "when": null,
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.004,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.price",
+      "when": null,
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 0.5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 200000
+      },
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 0.3,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.read",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 200000
+      },
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.012,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.overrides[0].price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 200000
+      },
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 1.5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     }
+    ]
+   }
+  },
+  {
+   "provider": "meta",
+   "model": "muse-ember-1.0",
+   "access": "api",
+   "context": 1048576,
+   "max_output": 524288,
+   "input_window": {
+    "tokens": 1048576,
+    "basis": "documented",
+    "bound": "limit",
+    "scope": "window"
+   },
+   "cache_lifetime": {
+    "short": {
+     "safe_s": null,
+     "basis": "none"
+    },
+    "long": {
+     "safe_s": null,
+     "basis": "none"
+    }
+   },
+   "pricing": {
+    "billing": "per_use",
+    "rules": [
+     {
+      "id": "cost.text.input.price",
+      "when": null,
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 0.1,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.read",
+      "when": null,
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.004,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.price",
+      "when": null,
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 0.5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 200000
+      },
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 0.3,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.read",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 200000
+      },
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.012,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.overrides[0].price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 200000
+      },
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 1.5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     }
+    ]
+   }
+  },
+  {
+   "provider": "devin",
+   "model": "swe-2",
+   "access": "subscription",
+   "context": null,
+   "max_output": null,
+   "input_window": {
+    "tokens": 300499,
+    "basis": "measured",
+    "bound": "at_least",
+    "scope": "input"
+   },
+   "cache_lifetime": {
+    "short": {
+     "safe_s": 0,
+     "basis": "measured"
+    },
+    "long": {
+     "safe_s": null,
+     "basis": "none"
+    }
+   },
+   "pricing": {
+    "billing": "not_applicable",
+    "rules": null
+   }
+  },
+  {
+   "provider": "devin",
+   "model": "claude-opus-5-5",
+   "access": "subscription",
+   "context": null,
+   "max_output": null,
+   "input_window": {
+    "tokens": 999072,
+    "basis": "measured",
+    "bound": "at_least",
+    "scope": "input"
+   },
+   "cache_lifetime": {
+    "short": {
+     "safe_s": 300,
+     "basis": "measured"
+    },
+    "long": {
+     "safe_s": null,
+     "basis": "none"
+    }
+   },
+   "pricing": {
+    "billing": "reference",
+    "rules": [
+     {
+      "id": "cost.text.input.price",
+      "when": null,
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 4,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.read",
+      "when": null,
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.2,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.price",
+      "when": null,
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 20,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.web_search.price",
+      "when": null,
+      "meter": "web_search",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "search",
+       "quantity": 1000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.5m",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 300
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write.1h",
+      "when": {
+       "kind": "predicate",
+       "field": "cache.retention_s",
+       "op": "eq",
+       "value": 3600
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 8,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.multipliers[0].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "fast"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 2,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[1].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.region",
+       "op": "eq",
+       "value": "us"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 1.1,
+      "unit": null
+     }
+    ]
+   }
+  },
+  {
+   "provider": "openrouter",
+   "model": "openai/gpt-6.1-sol",
+   "access": "api",
+   "context": 1050000,
+   "max_output": 128000,
+   "input_window": {
+    "tokens": 922000,
+    "basis": "documented",
+    "bound": "limit",
+    "scope": "input"
+   },
+   "cache_lifetime": {
+    "short": {
+     "safe_s": 1800,
+     "basis": "documented"
+    },
+    "long": {
+     "safe_s": null,
+     "basis": "none"
+    }
+   },
+   "pricing": {
+    "billing": "per_use",
+    "rules": [
+     {
+      "id": "cost.text.input.price",
+      "when": null,
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 2,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.read",
+      "when": null,
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.1,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.write",
+      "when": null,
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 2.5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.price",
+      "when": null,
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.web_search.price",
+      "when": null,
+      "meter": "web_search",
+      "operation": "set",
+      "amount": 10,
+      "unit": {
+       "name": "search",
+       "quantity": 1000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 4,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.read",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.2,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.overrides[0].cache.write",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.cache_write",
+      "operation": "set",
+      "amount": 5,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.output.overrides[0].price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.context_tokens",
+       "op": "gt",
+       "value": 272000
+      },
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 15,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     }
+    ]
+   }
+  },
+  {
+   "provider": "antigravity",
+   "model": "gemini-3.8-flash-high",
+   "access": "subscription",
+   "context": null,
+   "max_output": null,
+   "input_window": {
+    "tokens": null,
+    "basis": "none",
+    "bound": null,
+    "scope": null
+   },
+   "cache_lifetime": {
+    "short": {
+     "safe_s": 150,
+     "basis": "measured"
+    },
+    "long": {
+     "safe_s": null,
+     "basis": "none"
+    }
+   },
+   "pricing": {
+    "billing": "reference",
+    "rules": [
+     {
+      "id": "cost.text.input.price",
+      "when": null,
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 0.75,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.read",
+      "when": null,
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.075,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.text.input.cache.storage",
+      "when": null,
+      "meter": "text.cache_storage",
+      "operation": "set",
+      "amount": 0.5,
+      "unit": null
+     },
+     {
+      "id": "cost.text.output.price",
+      "when": null,
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 3.75,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.audio.input.price",
+      "when": null,
+      "meter": "audio.input",
+      "operation": "set",
+      "amount": 0.75,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.audio.input.cache.read",
+      "when": null,
+      "meter": "audio.cache_read",
+      "operation": "set",
+      "amount": 0.075,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "id": "cost.audio.input.cache.storage",
+      "when": null,
+      "meter": "audio.cache_storage",
+      "operation": "set",
+      "amount": 0.5,
+      "unit": null
+     },
+     {
+      "id": "cost.web_search.price",
+      "when": null,
+      "meter": "web_search",
+      "operation": "set",
+      "amount": 14,
+      "unit": {
+       "name": "search",
+       "quantity": 1000
+      }
+     },
+     {
+      "id": "cost.multipliers[0].factor.text.input.price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "priority"
+      },
+      "meter": "text.input",
+      "operation": "multiply",
+      "amount": 1.8,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[0].factor.text.input.cache.read",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "priority"
+      },
+      "meter": "text.cache_read",
+      "operation": "multiply",
+      "amount": 1.8,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[0].factor.text.output",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "priority"
+      },
+      "meter": "text.output",
+      "operation": "multiply",
+      "amount": 1.8,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[0].factor.audio.input.price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "priority"
+      },
+      "meter": "audio.input",
+      "operation": "multiply",
+      "amount": 1.8,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[0].factor.audio.input.cache.read",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "priority"
+      },
+      "meter": "audio.cache_read",
+      "operation": "multiply",
+      "amount": 1.8,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[1].factor.text.input.price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "flex"
+      },
+      "meter": "text.input",
+      "operation": "multiply",
+      "amount": 0.5,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[1].factor.text.input.cache.read",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "flex"
+      },
+      "meter": "text.cache_read",
+      "operation": "multiply",
+      "amount": 0.5,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[1].factor.text.output",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "flex"
+      },
+      "meter": "text.output",
+      "operation": "multiply",
+      "amount": 0.5,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[1].factor.audio.input.price",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "flex"
+      },
+      "meter": "audio.input",
+      "operation": "multiply",
+      "amount": 0.5,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[1].factor.audio.input.cache.read",
+      "when": {
+       "kind": "predicate",
+       "field": "request.service_tier",
+       "op": "eq",
+       "value": "flex"
+      },
+      "meter": "audio.cache_read",
+      "operation": "multiply",
+      "amount": 0.5,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[2].factor.text",
+      "when": {
+       "kind": "predicate",
+       "field": "request.date",
+       "op": "gte",
+       "value": "2027-01-01"
+      },
+      "meter": "text.*",
+      "operation": "multiply",
+      "amount": 2,
+      "unit": null
+     },
+     {
+      "id": "cost.multipliers[2].factor.audio",
+      "when": {
+       "kind": "predicate",
+       "field": "request.date",
+       "op": "gte",
+       "value": "2027-01-01"
+      },
+      "meter": "audio.*",
+      "operation": "multiply",
+      "amount": 2,
+      "unit": null
+     }
+    ]
+   }
+  }
+ ]
+}

@@ -1,8 +1,8 @@
 # pi-cache-keeper
 
-A Pi extension that makes the prompt cache pay off. It compacts by reading the prompt cache your session already built, so on big sessions it costs a fraction of Pi's compaction, and the summary is written from the full tool output instead of 2,000-character excerpts. It compacts when the context gets full or just before the cache expires, and it can keep the cache warm through a break.
+A Pi extension that makes the prompt cache pay off. It compacts by reading the prompt cache your session already built, so on big sessions it costs a fraction of Pi's compaction, and the summary is written from the full tool output instead of 2,000-character excerpts. It compacts when the context gets full or just before the cache expires, and it can keep the cache warm through a break. It also fills in what Pi doesn't know about a model (how much input it takes, how long its cache lasts, what it costs) from [providers.dev](https://providers.dev).
 
-pi-cache-keeper is based on [pi-cached-compaction](https://github.com/nicobailon/pi-cached-compaction) by Nico Bailon, released under the MIT licence. Compaction from the warm cache, the compaction card, the cache countdown, compacting before the cache expires and the longer cache are his work, and his commits are kept in this repository's history. Added here since then: compacting when the context is full (`compactAtPercent`) or at a token cap (`compactAtTokens`), a summary sized to the model's window, a settings menu, a cache countdown that says what it means for cost, and keeping the cache warm while Pi is idle (`keepWarmMinutes`, off unless you set it). This is a separate project; it is not maintained by Nico Bailon.
+pi-cache-keeper is based on [pi-cached-compaction](https://github.com/nicobailon/pi-cached-compaction) by Nico Bailon, released under the MIT licence. Compaction from the warm cache, the compaction card, the cache countdown, compacting before the cache expires and the longer cache are his work, and his commits are kept in this repository's history. Added here since then: compacting when the context is full (`compactAtPercent`) or at a token cap (`compactAtTokens`), a summary sized to the model's window, a settings menu, a cache countdown that says what it means for cost, keeping the cache warm while Pi is idle (`keepWarmMinutes`, off unless you set it), and each model's input window, cache lifetimes and prices from [providers.dev](https://providers.dev). This is a separate project; it is not maintained by Nico Bailon.
 
 Nico Bailon's 78-second explainer of the original extension (it uses the old name):
 
@@ -49,7 +49,7 @@ Before sending, the extension checks that the request repeats your last one byte
 pi install git:github.com/ngvoicu/pi-cache-keeper
 ```
 
-Then run `/reload` (Pi loads extensions only at startup or on `/reload`). It needs Pi 0.87.0 or newer. Compacting from the cache, compacting when full and compacting before expiry are on by default; keeping the cache warm is off until you set `keepWarmMinutes`.
+Then run `/reload` (Pi loads extensions only at startup or on `/reload`). It needs Pi 0.87.0 or newer. Compacting from the cache, compacting when full, compacting before expiry and [model data from providers.dev](#model-data-from-providersdev) are on by default; keeping the cache warm is off until you set `keepWarmMinutes`.
 
 ### Moving from pi-cached-compaction
 
@@ -70,7 +70,7 @@ Then run `/reload` (Pi loads extensions only at startup or on `/reload`). It nee
 
 **The countdown** in the footer shows how long the cache has left. Sending a message restarts it, and it reads `cache warm · 59m left … cache warm · 0:25 left` (in the warning color for the last 30 seconds), then `cache cold · next message full price`. A message sent while the cache is warm reads the conversation from the cache at a fraction of the price and restarts the countdown; after it goes cold, the next message pays full price to write the conversation again. While a request runs it reads `cache in use`, so the status keeps its place in the footer. In powerline-footer it shows in the `extension_statuses` segment. The lifetime is the model's declared one, else the cache tier the provider reports writing (Anthropic and pi-claude-bridge report it), else OpenAI's 30-minute minimum for GPT-5.6 and later, else Kimi K3's 5-minute or 1-hour option. Models with none of those show no countdown.
 
-**`/cache-keeper`** shows the cache right now, whether the next compaction would take the cached path, and this session's log:
+**`/cache-keeper`** shows the cache right now, whether the next compaction would take the cached path, the model data in use, and this session's log:
 
 ![The output of /cache-keeper: "pi-cache-keeper · opencode-go/gpt-6-luna. cache: ⏱ 29m left (lifetime 30 min, OpenAI's minimum). next compaction: cached path; last request 4 s ago with 186 messages, 1 since. The request prefix is checked when it runs. before expiry: on, from 50k tokens of context · retention long. log: ~/.pi/agent/cache-keeper.jsonl. This session: 23:43:49 /compact: cached, 99% of 50k from cache, 2k out, 11.3s, summary 3263 chars. vs Pi's compaction: 62% less, $0.0013 instead of ~$0.0035 (it sends ~27k tokens, none from cache). 23:43:49 saved, 49k tokens summarized."](media/status-command.png)
 
@@ -86,29 +86,30 @@ jq -c 'select(.event == "compact") | {at, trigger, outcome, reason, cacheRead: .
 |---|---|
 | See the cache now and this session's compactions | `/cache-keeper` |
 | See why a compaction didn't use the cache | expand its card with ctrl+o |
-| Change the settings from Pi | `/cache-keeper-settings` (or `/cache-keeper settings`) |
+| Change the settings from Pi | `/cache-keeper-settings` |
 | Compact earlier or later on big models | change "Compact when the context is" (`compactAtPercent`) |
 | Keep the context under a fixed size on every model | set "Or once it holds" (`compactAtTokens`) |
 | Stop compacting before the cache expires | `"compactBeforeExpiry": false` in [Settings](#settings) |
 | Compact before expiry only on bigger sessions | raise `minContextTokens` |
 | Keep the cache warm through a long break | "Keep the cache warm when idle" (`keepWarmMinutes`), see [Keeping the cache warm](#keeping-the-cache-warm) |
 | Keep Pi's 5-minute cache and its 1.25× writes on Anthropic | `"cacheRetention": "short"` |
-| Get the countdown for GPT on opencode-go | `/cache-keeper cache-flag` (see [Providers](#providers)) |
-| Get the countdown on another model | declare a lifetime with Pi's `modelOverrides.promptCache` |
+| See what is known about the current model | the footer: `window ✓ · cache short ✓ · long ✗ · price ✓` (see [Model data](#model-data-from-providersdev)) |
+| Fetch the model data again now | `/cache-keeper-refresh` |
+| Get the countdown on a model providers.dev has no lifetime for | declare one with Pi's `modelOverrides.promptCache` |
 | Look through past decisions | the `jq` line under [What you'll see](#what-youll-see) |
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `/cache-keeper` | shows the cache right now, whether the next compaction would read it, the settings in effect, and this session's log |
-| `/cache-keeper-settings` (or `/cache-keeper settings`) | opens the settings menu; outside the TUI it lists the settings |
-| `/cache-keeper cache-flag` | turns on OpenAI's cache options for GPT models on opencode-go (see [Providers](#providers)) |
+| `/cache-keeper` | shows the cache right now, whether the next compaction would read it, the settings in effect, the model data in use, and this session's log |
+| `/cache-keeper-settings` | opens the settings menu; outside the TUI it lists the settings |
+| `/cache-keeper-refresh` | fetches the model data from providers.dev now and puts it into Pi's `models.json` (see [Model data](#model-data-from-providersdev)) |
 | `/compact` | Pi's own command; it goes through the cached path too |
 
 ## Settings
 
-Run `/cache-keeper-settings` (or `/cache-keeper settings`) to change them in a menu; changes are saved to the `cacheKeeper` key in `~/.pi/agent/settings.json` and apply right away. You can also edit that key by hand. When there is no `cacheKeeper` key, the `cachedCompaction` key of pi-cached-compaction is read instead, unchanged. Project settings files don't apply to it, and an unknown key is an error.
+Run `/cache-keeper-settings` to change them in a menu; changes are saved to the `cacheKeeper` key in `~/.pi/agent/settings.json` and apply right away. You can also edit that key by hand. When there is no `cacheKeeper` key, the `cachedCompaction` key of pi-cached-compaction is read instead, unchanged. Project settings files don't apply to it, and an unknown key is an error.
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -118,6 +119,7 @@ Run `/cache-keeper-settings` (or `/cache-keeper settings`) to change them in a m
 | `minContextTokens` | `140000` | the smallest context worth keeping warm or compacting before expiry |
 | `keepWarmMinutes` | `0` | keep the cache warm for this many minutes after Pi goes idle; `0` turns it off |
 | `cacheRetention` | `"long"` | ask for the longer cache in interactive sessions (2× writes on Anthropic and Kimi); `"short"` keeps Pi's default |
+| `modelData` | `true` | read each model's input window, cache lifetimes and prices from providers.dev and put them into Pi's `models.json`; `false` takes them out again |
 
 ```json
 {
@@ -167,6 +169,36 @@ Each refresh reads the whole context from the cache: about a tenth of the input 
 
 Pi's footer totals don't include these refreshes, since an extension can't add usage to the session; the log has their cost. After a restart, the countdown doesn't know about refreshes sent before it, so it may show the cache as cold early.
 
+## Model data from providers.dev
+
+Pi's model catalog doesn't say how long most providers keep a prompt cache, and for some models its input window is smaller than what the provider accepts. Without a lifetime there is no countdown, no compacting before expiry and no warming; with a window that is too small, Pi compacts long before it has to.
+
+[providers.dev](https://providers.dev) publishes both, with prices, for each model at each provider and access method (API key or subscription login), from the providers' documentation and from evaluations. The extension reads that and puts it into the `modelOverrides` of `~/.pi/agent/models.json`, the place Pi has for it. Pi's own warming and compaction then use the same numbers as the countdown here.
+
+| Value | What is written |
+|---|---|
+| Input window (`contextWindow`) | providers.dev's window replaces Pi's. A window that is only "the largest input an evaluation saw accepted" can raise Pi's and never lowers it |
+| Cache lifetimes (`promptCache.short`, `promptCache.long`) | only for a tier Pi has no lifetime for. "No safe lifetime" is never declared |
+| Prices (`cost`, with a tier per context size) and output limit (`maxTokens`) | only where Pi has none |
+
+**The footer** shows what was found for the current model: `window ✓ · cache short ✓ · long ✗ · price ✓`. `✓` is found, `✗` is not in the data, `?` is found but not used because it depends on how the model is reached (below). `/cache-keeper` names the entry and the values.
+
+**What you should know before it changes how Pi behaves:**
+
+- A model that gets a cache lifetime also gets what comes with one: Pi's own warming (`cacheWarming` in Pi's settings) and this extension's countdown and compacting before expiry. A model with a 5-minute lifetime and a context over `minContextTokens` is compacted after about 5 idle minutes, unless Pi's warming or `keepWarmMinutes` keeps it warm.
+- A larger window means larger, more expensive requests before anything compacts. `compactAtTokens` caps that on every model.
+- Values you set in `models.json` yourself are never touched. The extension keeps a note of what it wrote (in `~/.pi/agent/cache-keeper-models.json`) and only updates or removes those values. If `models.json` has comments, it is left alone.
+
+**How a model is looked up.** A provider you signed in to with a subscription is looked up as that subscription (the Claude and Meta logins have entries of their own); with an API key, as the API. Pi's ChatGPT sign-in on the `openai` provider has no entry of its own, so it is treated like the last case below.
+
+**Through [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** (the `cliproxyapi` provider): `devin/…` is Devin, `lab/model` is OpenRouter. A plain model name can be served by the lab's subscription login or by its API key, and the proxy's model list doesn't say which. The two can differ (a Claude login keeps a cache for an hour, a Claude API key for 5 minutes by default), and a wrong guess would either refresh a 1-hour cache every 5 minutes or let a 5-minute cache expire. So only what both entries agree on is used, the window is the smaller of the two, and the rest shows as `?`. The proxy's model list is read from the proxy itself, with the key Pi already uses for it.
+
+**When it fetches.** At the start of an interactive session, when the saved data is a day old or Pi can use a provider there is no data for. One small request asks whether the dataset changed; only then are the providers you can use downloaded (a few dozen kilobytes). A failed fetch keeps the saved data. Nothing is fetched on its own in print or JSON mode or with `PI_OFFLINE` set. `/cache-keeper-refresh` fetches now.
+
+**What is sent.** The names of the providers Pi has credentials for, as query parameters to a public read-only API. No key, no account, nothing about your sessions or prompts.
+
+**Turning it off.** Set "Model data from providers.dev" to off in `/cache-keeper-settings` (`"modelData": false`). The values the extension wrote are taken out of `models.json`, which brings Pi's own back.
+
 ## Providers
 
 | Provider | Cached compaction | Countdown and compact before expiry | Longer cache (interactive) |
@@ -175,10 +207,10 @@ Pi's footer totals don't include these refreshes, since an extension can't add u
 | Anthropic API | yes | yes, 1 hour | 1 hour instead of 5 minutes |
 | Claude on opencode-go | yes | yes, 1 hour | 1 hour instead of 5 minutes |
 | GPT-5.6+ on `openai` | yes, not tested live yet | yes, 30 minutes | 12-hour shared system prompt |
-| GPT-5.6+ on opencode-go | yes | after `/cache-keeper cache-flag` (below) | after `cache-flag` |
+| GPT-5.6+ on opencode-go | yes | after you set the flag in `models.json` (below) | after the flag |
 | Kimi K3 on `moonshotai` and `moonshotai-cn` | yes, not tested live yet | yes, 5 minutes or 1 hour | 1 hour instead of 5 minutes |
-| Other Responses and Chat Completions APIs | yes | only with a declared lifetime (`modelOverrides.promptCache`) | the provider's own |
-| `openai-codex` (ChatGPT sign-in) | yes, not tested live yet | no, there's no documented lifetime | no |
+| Other Responses and Chat Completions APIs | yes | with a lifetime from providers.dev, or one you declare (`modelOverrides.promptCache`) | the provider's own |
+| `openai-codex` (ChatGPT sign-in) | yes, not tested live yet | with the lifetime providers.dev has for the model; there's no documented one | no |
 | Google and others | no, Pi's compaction runs | no | no |
 
 **Claude through pi-claude-bridge.** These models run in Claude Code, so there's no HTTP payload for the extension to compare. Instead it sends the summary request with the bridge's `x-claude-bridge-fork: 1` header. The bridge runs it on a temporary copy of the live Claude Code conversation, which reads its cache, and then deletes the copy. The live conversation is only read. A bridge without fork support runs the request as a one-shot: the summary still works without the cache hit, and the card shows that. Claude Code keeps any tool result over about 50 KB as a file with a 2 KB preview, so for those the summary sees the preview, the same as the live model did.
@@ -196,7 +228,7 @@ The 12-hour write costs an extra 1.25× of that prefix once, and the second sess
 
 **Kimi K3 on Moonshot's API.** Kimi picks a cache lifetime of 5 minutes or 1 hour per request, and keeps a cache at the lifetime it was first written with. Pi doesn't send that option, so with the longer cache the extension adds it, and the countdown follows the lifetime it asked for. Pi's model catalog prices Kimi's cache writes at $0, so its cost display and the card leave them out. Kimi through opencode-go, OpenRouter, or Kimi For Coding keeps the host's own caching.
 
-**opencode-go.** Pi doesn't send OpenAI's cache options to opencode-go's GPT models, so they get no 12-hour prefix and no countdown until you turn the options on. Run `/cache-keeper cache-flag` and it adds them to `~/.pi/agent/models.json` for every opencode-go model that has them on `openai`, then switches the current session over. It rewrites the file as plain JSON, so if yours has comments it stops and you add this by hand:
+**opencode-go.** Pi doesn't send OpenAI's cache options to opencode-go's GPT models, so they get no 12-hour prefix and no countdown until you turn the options on. Add the flag to `~/.pi/agent/models.json` for each opencode-go GPT model that has it on `openai`, then pick the model again with `/model`:
 
 ```json
 {
@@ -253,7 +285,7 @@ So the instruction quotes the first kept message as the model sees it (and says 
 
 ## Limitations
 
-- Without a known cache lifetime, the extension can't tell a cold cache from a warm one. A compaction after a long break then pays to rewrite the whole session. Declare a lifetime with Pi's `modelOverrides.promptCache`, or, for GPT on opencode-go, run `/cache-keeper cache-flag`.
+- Without a known cache lifetime, the extension can't tell a cold cache from a warm one. A compaction after a long break then pays to rewrite the whole session. providers.dev fills in a lifetime where it has one ([Model data](#model-data-from-providersdev)); for other models, declare one with Pi's `modelOverrides.promptCache`.
 - Through pi-claude-bridge the extension can't check the request. If the bridge can't copy the whole Claude Code conversation, the summary is still correct but reads less from the cache, and the card shows the low cache share.
 - Fields that extensions loaded before this one add to provider requests are copied into the summary request, such as codex-fast's `service_tier`. Changes from extensions loaded after it aren't seen, so the request can miss the cache. The summary is still correct, it just costs about what Pi's compaction would, and the card shows the low cache share.
 - When a later compaction falls back to Pi's own, its read and modified file lists start over. Pi doesn't carry the lists forward from an extension's compaction.

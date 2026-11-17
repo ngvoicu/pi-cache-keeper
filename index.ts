@@ -1,11 +1,8 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { calculateCost, contentText, type Api, type AssistantMessage, type Model, type Usage } from "@earendil-works/pi-ai";
 import {
 	convertToLlm,
-	getAgentDir,
 	getLastAssistantUsage,
 	getLatestCompactionEntry,
 	getSettingsListTheme,
@@ -65,6 +62,28 @@ import {
 	type Trigger,
 } from "./trace.ts";
 import { cachedShare, canReplay, keepWarmLabel, MIN_WARM_CACHED_SHARE, wantsWarm, warmLeadMs, warmPayload } from "./keep-warm.ts";
+import {
+	DATA_MAX_AGE_MS,
+	DATA_SOURCE,
+	describeFound,
+	desiredOverride,
+	fetchDataset,
+	fetchOwners,
+	findFacts,
+	formatFieldStates,
+	isProxyProvider,
+	loadStore,
+	lookupsFor,
+	modelsPathLabel,
+	planOverrides,
+	readModelsFile,
+	saveStore,
+	writeModelsFile,
+	type Access,
+	type DataStore,
+	type Fetch,
+	type Found,
+} from "./model-data.ts";
 
 interface CapturedRequest {
 	transcript: AgentMessage[];
@@ -81,6 +100,8 @@ interface CachedPath {
 }
 
 const STATUS_KEY = "cache-keeper";
+const DATA_STATUS_KEY = "cache-keeper-data";
+const httpFetch: Fetch = (url, init) => fetch(url, init);
 const CARD_TYPE = "cache-keeper";
 /** The card type pi-cached-compaction wrote; still rendered so cards in older sessions show. */
 const LEGACY_CARD_TYPE = "cached-compaction";
@@ -203,6 +224,148 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		} catch {
 			// The session this compaction belonged to is gone; there is nothing left to update.
 		}
+	};
+
+	// Model data from providers.dev: each model's input window, cache lifetimes and prices, written into the
+	// modelOverrides of pi's models.json, so pi's own warming and compaction and this extension's countdown use them.
+	let data = loadStore();
+	let dataRefresh: Promise<DataSummary> | undefined;
+	let dataError: string | undefined;
+	interface DataSummary {
+		/** How many models' entries in models.json changed. */
+		models: number;
+		downloaded: boolean;
+	}
+
+	// How pi reaches a model: through the proxy, with a subscription login, or with an API key. The answer is the
+	// same for every model of a provider, so one pass over the models asks pi once per provider.
+	const accessReader = (ctx: ExtensionContext) => {
+		const registry = ctx.modelRegistry;
+		const byProvider = new Map<string, { proxy: boolean; subscription: boolean }>();
+		return (model: Model<Api>): Access => {
+			let how = byProvider.get(model.provider);
+			if (!how) {
+				const proxy = isProxyProvider(model.provider, registry.getProviderDisplayName(model.provider));
+				const subscription = !proxy && registry.isUsingOAuth(model) && registry.getProvider(model.provider)?.auth.oauth?.isSubscription === true;
+				byProvider.set(model.provider, (how = { proxy, subscription }));
+			}
+			return how.proxy ? { proxy: true, ownedBy: data.owners[model.provider]?.[model.id] } : { subscription: how.subscription };
+		};
+	};
+	const foundFor = (ctx: ExtensionContext, model: Model<Api>, accessOf = accessReader(ctx)): Found => findFacts(lookupsFor(model, accessOf(model)), data.providers);
+
+	// The footer: what providers.dev has for the current model.
+	const showData = (ctx: ExtensionContext) => {
+		if (!ctx.hasUI) return;
+		const model = ctx.model;
+		if (!config.modelData || !model || data.checkedAt === undefined) return ctx.ui.setStatus(DATA_STATUS_KEY, undefined);
+		const { theme } = ctx.ui;
+		ctx.ui.setStatus(DATA_STATUS_KEY, formatFieldStates(foundFor(ctx, model), (mark, state) => theme.fg(state === "found" ? "success" : state === "unsure" ? "warning" : "dim", mark)));
+	};
+
+	// Brings models.json in line with the saved data (or, with the setting off, takes this extension's values out).
+	const applyData = async (ctx: ExtensionContext): Promise<number> => {
+		const registry = ctx.modelRegistry;
+		const models = config.modelData ? registry.getAvailable() : [];
+		const byKey = new Map(models.map((model) => [`${model.provider}\n${model.id}`, model]));
+		let file: Record<string, unknown>;
+		try {
+			file = readModelsFile();
+		} catch (error) {
+			throw new Error(`${modelsPathLabel()} is not plain JSON (${error instanceof Error ? error.message : String(error)}), so it is left as it is`);
+		}
+		const accessOf = accessReader(ctx);
+		const plan = planOverrides(file, data.written, models, (provider, id, owned) => {
+			const model = byKey.get(`${provider}\n${id}`);
+			return model ? desiredOverride(model, foundFor(ctx, model, accessOf).facts, owned) : {};
+		});
+		if (plan.changed.length > 0) writeModelsFile(plan.file);
+		data = { ...data, written: plan.written };
+		saveStore(data);
+		if (plan.changed.length === 0) return 0;
+		await registry.refresh({ providers: [...new Set(plan.changed.map((one) => one.provider))], allowNetwork: false });
+		// The session holds the model as it was; selecting it again picks up the new values. setModel resets the
+		// thinking level and makes the extension forget the last request, so it waits for an idle moment.
+		const current = ctx.model;
+		if (current && ctx.isIdle() && plan.changed.some((one) => one.provider === current.provider && one.id === current.id)) {
+			const fresh = registry.find(current.provider, current.id);
+			const level = pi.getThinkingLevel();
+			if (fresh && (await pi.setModel(fresh))) {
+				pi.setThinkingLevel(level);
+				startTimer(ctx);
+			}
+		}
+		return plan.changed.length;
+	};
+
+	// Which providers.dev providers describe the models pi can use right now.
+	const neededProviders = (ctx: ExtensionContext): string[] => {
+		const needed = new Set<string>();
+		const accessOf = accessReader(ctx);
+		for (const model of ctx.modelRegistry.getAvailable()) for (const lookup of lookupsFor(model, accessOf(model))) needed.add(lookup.provider);
+		return [...needed].sort();
+	};
+
+	const refreshData = (ctx: ExtensionContext, force: boolean): Promise<DataSummary> =>
+		(dataRefresh ??= (async () => {
+			const registry = ctx.modelRegistry;
+			// A proxy's own model list says which lab each model belongs to. It is asked with the proxy's own key.
+			const owners: DataStore["owners"] = {};
+			const proxies = new Map<string, Model<Api>>();
+			for (const model of registry.getAvailable()) {
+				if (!proxies.has(model.provider) && isProxyProvider(model.provider, registry.getProviderDisplayName(model.provider))) proxies.set(model.provider, model);
+			}
+			for (const [provider, model] of proxies) {
+				try {
+					const auth = await registry.getApiKeyAndHeaders(model);
+					if (!auth.ok) throw new Error(auth.error);
+					const headers = { ...auth.headers, ...(auth.apiKey ? { authorization: `Bearer ${auth.apiKey}` } : {}) };
+					owners[provider] = await fetchOwners(new URL(auth.baseUrl ?? model.baseUrl).origin, headers, httpFetch);
+				} catch {
+					// The proxy is not answering: keep what it said last time.
+					if (data.owners[provider]) owners[provider] = data.owners[provider];
+				}
+			}
+			data = { ...data, owners };
+			const dataset = await fetchDataset(neededProviders(ctx), data, httpFetch, { force });
+			data = { ...data, providers: dataset.providers, datasetVersion: dataset.datasetVersion, checkedAt: Date.now() };
+			saveStore(data);
+			return { models: await applyData(ctx), downloaded: dataset.downloaded };
+		})().finally(() => {
+			dataRefresh = undefined;
+		}));
+
+	// Runs a refresh and reports it: in the log, in the footer, and (when asked for, or when something changed) as a notice.
+	const refreshAndReport = async (ctx: ExtensionContext, force: boolean, announce: boolean) => {
+		try {
+			const summary = await refreshData(ctx, force);
+			dataError = undefined;
+			ifSessionAlive(() => {
+				trace(ctx, { event: "data", action: summary.models > 0 ? "updated" : "unchanged", models: summary.models, dataset: data.datasetVersion, downloaded: summary.downloaded });
+				showData(ctx);
+				if (!ctx.hasUI || (!announce && summary.models === 0)) return;
+				const changed = summary.models > 0 ? `${summary.models} model${summary.models === 1 ? "" : "s"} updated in ${modelsPathLabel()}` : `${modelsPathLabel()} already holds it`;
+				const current = ctx.model ? `\nThis model: ${describeFound(foundFor(ctx, ctx.model))}` : "";
+				ctx.ui.notify(`Model data from ${DATA_SOURCE}: ${changed}${announce ? current : ""}`, "info");
+			});
+		} catch (error) {
+			dataError = error instanceof Error ? error.message : String(error);
+			ifSessionAlive(() => {
+				trace(ctx, { event: "data", action: "failed", reason: dataError });
+				showData(ctx);
+				if (ctx.hasUI && announce) ctx.ui.notify(`pi-cache-keeper could not refresh the model data: ${dataError}. The saved data stays in use.`, "warning");
+			});
+		}
+	};
+
+	// At the start of an interactive session: ask providers.dev again when the saved data is a day old, or when pi
+	// can now use a provider it has no data for. Never waited for, and never in PI_OFFLINE mode.
+	const refreshDataIfDue = (ctx: ExtensionContext) => {
+		// Turned off by hand in settings.json: take this extension's values out of models.json, as the menu does.
+		if (!config.modelData && Object.keys(data.written).length > 0) void applyData(ctx).catch(() => {});
+		if (!config.modelData || !ctx.hasUI || process.env.PI_OFFLINE) return;
+		const due = data.checkedAt === undefined || Date.now() - data.checkedAt > DATA_MAX_AGE_MS || neededProviders(ctx).some((provider) => data.providers[provider] === undefined);
+		if (due) void refreshAndReport(ctx, false, false);
 	};
 
 	const compactBeforeExpiry = (ctx: ExtensionContext, remainingMs: number) => {
@@ -446,6 +609,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		idleSince = Date.now();
 		applyRetention(config.cacheRetention === "long", ctx.hasUI);
 		startTimer(ctx);
+		// Another Pi window may have refreshed the data since this one loaded it.
+		data = loadStore();
+		showData(ctx);
+		refreshDataIfDue(ctx);
 	});
 	pi.on("cache_warming_decision", (event) => {
 		if (event.action === "warm") piWarmAt = Date.now();
@@ -488,7 +655,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		decision = undefined;
 		compactionTrigger = undefined;
 	});
-	pi.on("model_select", (_event, ctx) => forget(ctx));
+	pi.on("model_select", (_event, ctx) => {
+		forget(ctx);
+		showData(ctx);
+	});
 	pi.on("session_tree", (_event, ctx) => {
 		forget(ctx);
 		startTimer(ctx);
@@ -667,6 +837,14 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		return `for ${keepWarmLabel(config.keepWarmMinutes)} after Pi goes idle, from ${formatTokens(config.minContextTokens)} tokens of context${stopped}`;
 	};
 
+	const dataNote = (ctx: ExtensionContext): string => {
+		if (!config.modelData) return "off";
+		const failed = dataError ? `; the last refresh failed: ${dataError}` : "";
+		if (data.checkedAt === undefined) return `not fetched from ${DATA_SOURCE} yet${failed}; /cache-keeper-refresh fetches it`;
+		const found = ctx.model ? describeFound(foundFor(ctx, ctx.model)) : "no model";
+		return `${found} (${DATA_SOURCE}, checked ${formatDuration(Date.now() - data.checkedAt)} ago${failed}; /cache-keeper-refresh fetches it again)`;
+	};
+
 	const openSettings = async (ctx: ExtensionCommandContext) => {
 		if (ctx.mode !== "tui") {
 			ctx.ui.notify(
@@ -676,6 +854,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					`compactBeforeExpiry: ${config.compactBeforeExpiry} · minContextTokens: ${config.minContextTokens}`,
 					`keepWarmMinutes: ${config.keepWarmMinutes} (${keepWarmNote()})`,
 					`cacheRetention: ${config.cacheRetention}`,
+					`modelData: ${config.modelData} (${dataNote(ctx)})`,
 				].join("\n"),
 				"info",
 			);
@@ -735,6 +914,13 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				values: ["short", "long"],
 				description: "long asks for the longer cache in interactive sessions (2× the write price on Anthropic and Kimi); short keeps Pi's default. Applies from the next request.",
 			},
+			{
+				id: "modelData",
+				label: "Model data from providers.dev",
+				currentValue: config.modelData ? "on" : "off",
+				values: ["on", "off"],
+				description: `Once a day, read each model's input window, cache lifetimes and prices from ${DATA_SOURCE} (a public API: no key, and nothing about your sessions is sent) and put them into ~/.pi/agent/models.json: the window replaces Pi's, lifetimes and prices fill what Pi has none for, and values you set there yourself are never touched. The footer shows what was found for the current model. off takes these values out again.`,
+			},
 		];
 		await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
 			const list = new SettingsList(
@@ -748,6 +934,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					else if (id === "compactBeforeExpiry") patch = { compactBeforeExpiry: value === "on" };
 					else if (id === "keepWarmMinutes") patch = { keepWarmMinutes: warmChoices.find((m) => keepWarmLabel(m) === value) ?? config.keepWarmMinutes };
 					else if (id === "minContextTokens") patch = { minContextTokens: minimums.find((n) => formatTokens(n) === value) ?? config.minContextTokens };
+					else if (id === "modelData") patch = { modelData: value === "on" };
 					else patch = { cacheRetention: value === "long" ? "long" : "short" };
 					try {
 						config = saveConfig(patch);
@@ -756,6 +943,15 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 						return;
 					}
 					if (id === "cacheRetention") applyRetention(config.cacheRetention === "long", ctx.hasUI);
+					if (id === "modelData") {
+						// On: fetch and apply. Off: take this extension's values out of models.json again.
+						if (config.modelData) void refreshAndReport(ctx, false, true);
+						else {
+							void applyData(ctx)
+								.then(() => ifSessionAlive(() => showData(ctx)))
+								.catch((error: unknown) => ifSessionAlive(() => ctx.ui.notify(`pi-cache-keeper could not update models.json: ${error instanceof Error ? error.message : String(error)}`, "error")));
+						}
+					}
 					if (id === "compactAtPercent" || id === "compactAtTokens") {
 						fullStuck = false;
 						lastFullSkip = undefined;
@@ -782,45 +978,25 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	};
 
 	pi.registerCommand("cache-keeper-settings", {
-		description: "Change pi-cache-keeper's settings: compact when full, compact before expiry, keep the cache warm, cache retention",
+		description: "Change pi-cache-keeper's settings: compact when full, compact before expiry, keep the cache warm, cache retention, model data",
 		handler: async (_args, ctx) => openSettings(ctx),
 	});
 
-	pi.registerCommand("cache-keeper", {
-		description:
-			"Show the prompt cache state and this session's compaction log; `settings` changes this extension's settings; `cache-flag` turns on OpenAI's cache options for GPT on opencode-go",
-		getArgumentCompletions: (prefix) => {
-			const matches = ["settings", "cache-flag"].filter((value) => value.startsWith(prefix.trim()));
-			return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
+	pi.registerCommand("cache-keeper-refresh", {
+		description: `Fetch the model data (input window, cache lifetimes, prices) from ${DATA_SOURCE} now and put it into Pi's models.json`,
+		handler: async (_args, ctx) => {
+			if (!config.modelData) return ctx.ui.notify("Model data from providers.dev is off. Turn it on in /cache-keeper-settings.", "info");
+			await refreshAndReport(ctx, true, true);
 		},
-		handler: async (args, ctx) => {
-			if (args.trim() === "settings") return openSettings(ctx);
-			const flagless = ctx.modelRegistry.getAll().filter((m) => m.provider === "opencode-go" && m.api === "openai-responses" &&
-				!("supportsExplicitPromptCacheMode" in (m.compat ?? {})) && hasExplicitPromptCache(ctx.modelRegistry.find("openai", m.id) ?? m)).map((m) => m.id);
-			if (args.trim() === "cache-flag") {
-				if (flagless.length === 0) return ctx.ui.notify("Every opencode-go model that supports OpenAI's cache options already has the flag.", "info");
-				const path = join(getAgentDir(), "models.json");
-				let file;
-				try {
-					file = JSON.parse(existsSync(path) ? readFileSync(path, "utf8") : "{}");
-				} catch {
-					return ctx.ui.notify(`${path} has comments or isn't valid JSON, so add the flag by hand as the README shows.`, "error");
-				}
-				const overrides = ((file.providers ??= {})["opencode-go"] ??= {}).modelOverrides ??= {};
-				for (const id of flagless) ((overrides[id] ??= {}).compat ??= {}).supportsExplicitPromptCacheMode = true;
-				writeFileSync(path, `${JSON.stringify(file, null, 2)}\n`);
-				await ctx.modelRegistry.refresh({ providers: ["opencode-go"], allowNetwork: false });
-				// setModel resets the thinking level.
-				const current = ctx.model?.provider === "opencode-go" && flagless.includes(ctx.model.id) ? ctx.modelRegistry.find("opencode-go", ctx.model.id) : undefined;
-				const level = pi.getThinkingLevel();
-				if (current && (await pi.setModel(current))) pi.setThinkingLevel(level);
-				return ctx.ui.notify(`Turned on OpenAI's cache options in ${path} for opencode-go/${flagless.join(", opencode-go/")}.`, "info");
-			}
+	});
+
+	pi.registerCommand("cache-keeper", {
+		description: "Show the prompt cache state, the model data in use and this session's compaction log",
+		handler: async (_args, ctx) => {
 			const entries = ctx.sessionManager.getBranch();
 			const model = ctx.model;
 			const state = model && stateOf(model, entries);
 			let cache = "lifetime unknown, so no countdown";
-			if (model?.provider === "opencode-go" && flagless.includes(model.id)) cache += "; run /cache-keeper cache-flag to get one";
 			if (state?.lifetime) {
 				let left = state.replied ? "the last request did not use the prompt cache" : "no request since the session started or compacted";
 				if (state.expiresAt !== undefined) left = state.expiresAt > Date.now() ? `${formatRemaining(state.expiresAt - Date.now())} left` : "expired";
@@ -849,6 +1025,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					`when full: ${fullNote(model)}`,
 					`keep warm: ${keepWarmNote()}`,
 					`before expiry: ${expiryNote()} · retention ${model?.api === BRIDGE_API ? "set by Claude Code" : (process.env.PI_CACHE_RETENTION ?? "short")}`,
+					`model data: ${dataNote(ctx)}`,
 					"settings: /cache-keeper-settings",
 					`log: ${TRACE_PATH_LABEL}`,
 					"",

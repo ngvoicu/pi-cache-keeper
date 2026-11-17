@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.0] - 2026-11-17
+
+### Added
+- **Model data from providers.dev** — Pi's catalog has no cache lifetime for most providers and, for some models, an input window smaller than the provider accepts. The extension now reads each model's input window, cache lifetimes and prices from [providers.dev](https://providers.dev) (a public read-only API: no key, and only provider names are sent) and puts them into the `modelOverrides` of `~/.pi/agent/models.json`. The window replaces Pi's; lifetimes, prices and the output limit only fill what Pi has none for; values you set yourself are never touched. It fetches at the start of an interactive session when the saved data is a day old, never with `PI_OFFLINE` set. On by default; `"modelData": false` (or the settings menu) turns it off and takes the values out again.
+- **`/cache-keeper-refresh`** — Fetches the model data now and says what changed.
+- **What is known, in the footer** — `window ✓ · cache short ✓ · long ✗ · price ✓` for the current model; `?` marks a value that depends on whether a subscription login or an API key serves the model. `/cache-keeper` names the providers.dev entry and its values.
+- **Through CLIProxyAPI** — `devin/…` is looked up as Devin and `lab/model` as OpenRouter. A plain model name can be a subscription login or an API key, which the proxy doesn't tell apart, so only what both agree on is used.
+
+### Changed
+- A model that gets a cache lifetime this way also gets Pi's own warming and this extension's countdown and compacting before expiry, as any model with a declared lifetime does.
+
+### Removed
+- **`/cache-keeper settings`** — Use `/cache-keeper-settings`.
+- **`/cache-keeper cache-flag`** — The flag for GPT on opencode-go is set by hand in `models.json`; the README shows how.
+
 ## [0.1.0] - 2026-11-16
 
 First release of pi-cache-keeper. Needs Pi 0.87.0 or newer.

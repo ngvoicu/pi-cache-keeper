@@ -82,9 +82,20 @@ export interface WarmTrace {
 	usage?: TraceUsage;
 }
 
-export type TraceEvent = CompactTrace | ResultTrace | FailedTrace | ExpiryTrace | FullTrace | WarmTrace;
+export interface DataTrace {
+	event: "data";
+	/** "updated": models.json changed; "unchanged": it already held the data; "failed": providers.dev or models.json could not be read. */
+	action: "updated" | "unchanged" | "failed";
+	reason?: string;
+	/** How many models' entries in models.json changed. */
+	models?: number;
+	dataset?: string;
+	downloaded?: boolean;
+}
+
+export type TraceEvent = CompactTrace | ResultTrace | FailedTrace | ExpiryTrace | FullTrace | WarmTrace | DataTrace;
 export type TraceRecord = TraceEvent & { at: string; session: string };
-const TRACE_EVENTS = new Set<string>(["compact", "result", "failed", "expiry", "full", "warm"] satisfies TraceEvent["event"][]);
+const TRACE_EVENTS = new Set<string>(["compact", "result", "failed", "expiry", "full", "warm", "data"] satisfies TraceEvent["event"][]);
 
 export function appendTrace(record: TraceRecord): void {
 	try {
@@ -201,6 +212,11 @@ export function describeTrace(record: TraceRecord): string {
 			if (record.action === "failed") return `${time} keeping the cache warm failed: ${record.reason}`;
 			return `${time} cache expires in ${record.secondsLeft}s: not keeping it warm, ${record.reason}`;
 		}
+		case "data":
+			if (record.action === "failed") return `${time} model data from providers.dev: failed, ${record.reason}`;
+			return record.action === "updated"
+				? `${time} model data from providers.dev: ${record.models} model${record.models === 1 ? "" : "s"} updated in models.json`
+				: `${time} model data from providers.dev: nothing to change`;
 		case "full": {
 			const mark = record.tokens === undefined ? `${record.percent}% (${formatTokens(record.threshold)})` : `the ${formatTokens(record.tokens)}-token cap`;
 			const where = `context at ${formatTokens(record.contextTokens)}, past ${mark}`;

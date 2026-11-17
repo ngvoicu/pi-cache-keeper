@@ -13,9 +13,11 @@ export interface CacheKeeperConfig {
 	compactAtTokens: number;
 	/** Keep the prompt cache warm for this many minutes after Pi goes idle, 0 = off. */
 	keepWarmMinutes: number;
+	/** Read each model's input window, cache lifetimes and prices from providers.dev and put them into pi's models.json. */
+	modelData: boolean;
 }
 
-const DEFAULTS: CacheKeeperConfig = { cacheRetention: "long", compactBeforeExpiry: true, minContextTokens: 140_000, compactAtPercent: 90, compactAtTokens: 0, keepWarmMinutes: 0 };
+const DEFAULTS: CacheKeeperConfig = { cacheRetention: "long", compactBeforeExpiry: true, minContextTokens: 140_000, compactAtPercent: 90, compactAtTokens: 0, keepWarmMinutes: 0, modelData: true };
 
 /** The values `/cache-keeper-settings` offers for compactAtPercent; 0 is "off". */
 export const COMPACT_AT_PERCENTS = [0, 50, 60, 70, 75, 80, 85, 90, 95];
@@ -64,6 +66,7 @@ export function loadConfig(): CacheKeeperConfig {
 		compactAtPercent = DEFAULTS.compactAtPercent,
 		compactAtTokens = DEFAULTS.compactAtTokens,
 		keepWarmMinutes = DEFAULTS.keepWarmMinutes,
+		modelData = DEFAULTS.modelData,
 	} = raw;
 	if (cacheRetention !== "short" && cacheRetention !== "long") throw new Error(`${key}.cacheRetention in ${path} must be "short" or "long"`);
 	if (typeof compactBeforeExpiry !== "boolean") throw new Error(`${key}.compactBeforeExpiry in ${path} must be true or false`);
@@ -79,7 +82,8 @@ export function loadConfig(): CacheKeeperConfig {
 	if (typeof keepWarmMinutes !== "number" || !Number.isInteger(keepWarmMinutes) || keepWarmMinutes < 0 || keepWarmMinutes > 1440) {
 		throw new Error(`${key}.keepWarmMinutes in ${path} must be a whole number of minutes from 0 (off) to 1440`);
 	}
-	return { cacheRetention, compactBeforeExpiry, minContextTokens, compactAtPercent, compactAtTokens, keepWarmMinutes };
+	if (typeof modelData !== "boolean") throw new Error(`${key}.modelData in ${path} must be true or false`);
+	return { cacheRetention, compactBeforeExpiry, minContextTokens, compactAtPercent, compactAtTokens, keepWarmMinutes, modelData };
 }
 
 /**
