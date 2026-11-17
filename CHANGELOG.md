@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.0] - 2026-11-17
+
+### Changed
+- **No proxy is known to this extension any more** — Where a proxy's models come from is asked over pi's event bus (`model-upstreams:request`), and the proxy's own extension answers (`model-upstreams`, `model-upstreams:answered`; see the README). Everything about CLIProxyAPI (its model list, credentials, priorities, hosts, the `X-CPA-AUTH-KIND` header) moved to pi-cliproxyapi-provider 1.4.26. The answer is saved for the next start; one that adds something to look up is fetched at once.
+- **The cache tier in use counts only the model's own answers** — Another model's 1-hour cache write no longer shows as this model's.
+
 ## [0.3.4] - 2026-11-17
 
 ### Changed

@@ -57,6 +57,15 @@ test("the cache tier in use is the one the latest write reported, else the one P
 		// A read writes nothing and says nothing; a compaction starts over.
 		assert.equal(cacheTier([reply("a", 1, { cacheWrite: 500, cacheWrite1h: 500 }), reply("b", 2, { cacheRead: 500, cacheWrite1h: 0 })]), "long");
 		assert.equal(cacheTier([reply("a", 1, { cacheWrite: 500, cacheWrite1h: 500 }), compaction]), "short");
+		// Only the model's own answers: another model's 1-hour write says nothing about this one's cache.
+		const from = (provider: string, model: string, cacheWrite1h: number) => {
+			const entry = reply("a", 1, { cacheWrite: 500, cacheWrite1h }) as SessionEntry & { message: Record<string, unknown> };
+			return { ...entry, message: { ...entry.message, provider, model } } as SessionEntry;
+		};
+		const opus = { provider: "cliproxyapi", id: "claude-opus-5-5" };
+		assert.equal(cacheTier([from("cliproxyapi", "claude-opus-5-5", 500)], opus), "long");
+		assert.equal(cacheTier([from("cliproxyapi", "claude-opus-5-5", 500)], { provider: "cliproxyapi", id: "gpt-6.1-sol" }), "short");
+		assert.equal(cacheTier([from("anthropic", "claude-opus-5-5", 500)], opus), "short");
 	} finally {
 		if (before === undefined) delete process.env.PI_CACHE_RETENTION;
 		else process.env.PI_CACHE_RETENTION = before;

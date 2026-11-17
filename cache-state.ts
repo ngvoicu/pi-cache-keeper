@@ -24,11 +24,13 @@ export interface CacheState {
  * The cache tier in use: the one the latest cache write reported (Anthropic says which it wrote), else the one Pi asks
  * for. A compaction starts over.
  */
-export function cacheTier(entries: SessionEntry[]): "short" | "long" {
+export function cacheTier(entries: SessionEntry[], model?: { provider: string; id: string }): "short" | "long" {
 	let reported: "short" | "long" | undefined;
 	for (const entry of entries) {
 		if (entry.type === "compaction") reported = undefined;
 		else if (entry.type === "message" && entry.message.role === "assistant") {
+			// Given a model, only its own answers: another model's cache is another cache.
+			if (model && (entry.message.provider !== model.provider || entry.message.model !== model.id)) continue;
 			const { cacheWrite, cacheWrite1h } = entry.message.usage;
 			if (cacheWrite > 0 && cacheWrite1h !== undefined) reported = cacheWrite1h > 0 ? "long" : "short";
 		}

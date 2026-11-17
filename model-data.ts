@@ -13,9 +13,6 @@ const PAGE_SIZE = 200;
 const REQUEST_TIMEOUT_MS = 20_000;
 /** A shorter lifetime cannot carry a countdown or a refresh, so it is treated as "no safe lifetime". */
 const MIN_LIFETIME_SECONDS = 60;
-/** The provider id pi-cliproxyapi-provider registers by default, and the name it shows. */
-const PROXY_PROVIDER_ID = "cliproxyapi";
-const PROXY_PROVIDER_NAME = "CLIProxyAPI";
 
 const storePath = () => join(getAgentDir(), "cache-keeper-models.json");
 const modelsPath = () => join(getAgentDir(), "models.json");
@@ -70,15 +67,13 @@ export interface DataStore {
 	datasetVersion?: string;
 	/** providers.dev provider id → model id → facts. */
 	providers: Record<string, Record<string, Facts>>;
-	/** pi provider id of a proxy → model id → the lab the proxy says owns the model. */
-	owners: Record<string, Record<string, string>>;
-	/** pi provider id of a proxy → model id → the credentials that serve it, when the proxy lists them. */
-	accounts: Record<string, Record<string, ProxyAccount[]>>;
+	/** pi provider id → model id → where the model really comes from, as the extension serving it last said. */
+	upstreams: Record<string, Record<string, Route>>;
 	/** pi provider id → model id → what this extension wrote into models.json. */
 	written: Record<string, Record<string, Written>>;
 }
 
-export const emptyStore = (): DataStore => ({ version: 1, providers: {}, owners: {}, accounts: {}, written: {} });
+export const emptyStore = (): DataStore => ({ version: 1, providers: {}, upstreams: {}, written: {} });
 
 const positive = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined);
 const atLeastZero = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined);
@@ -241,28 +236,38 @@ export interface Lookup {
 	model: string;
 }
 
-/** A credential a proxy serves a model from, as CLIProxyAPI's `/v1/models?include=accounts` lists it. */
-export interface ProxyAccount {
-	/** CLIProxyAPI's provider name: claude, codex, meta, devin, antigravity, openai-compatible-<name> … */
+ /**
+ * Where a model reached through a proxy really comes from. An extension that serves models through a proxy says it with
+ * the UPSTREAMS_EVENT event (see the README); this extension knows no proxy itself.
+ */
+export interface Upstream {
+	/**
+	 * The pi provider the model would come from if used directly (anthropic, openai-codex, openai, meta, openrouter …),
+	 * or a providers.dev provider pi has none for (devin, antigravity).
+	 */
 	provider: string;
-	/** "oauth" for a subscription login, "apikey" for an API key. */
-	kind: string;
-	priority: number;
-	/** The host of an API key's base URL, when the proxy names it (CLIProxyAPI#7634). */
-	host?: string;
+	/** The model's id there, when it differs from the proxy's. */
+	model?: string;
+	/** Reached with a subscription login (true) or an API key (false); absent when not known. */
+	subscription?: boolean;
 }
+
+/** What may serve a proxy model: one of `upstreams` (several: not known which), else, when they fail, one of `fallbacks`. */
+export interface Route {
+	upstreams: Upstream[];
+	fallbacks?: Upstream[];
+}
+
+/** The events: this extension asks proxy extensions where their models come from; they answer with the routes, and say what answered a request. */
+export const REQUEST_EVENT = "model-upstreams:request";
+export const UPSTREAMS_EVENT = "model-upstreams";
+export const ANSWERED_EVENT = "model-upstreams:answered";
 
 export interface Access {
 	/** The login in use is a subscription (pi marks its own OAuth logins as one or not). */
 	subscription?: boolean;
-	/** The provider is CLIProxyAPI. */
-	proxy?: boolean;
-	/** For a proxy model: the lab the proxy's model list names as its owner. */
-	ownedBy?: string;
-	/** For a proxy model: the credentials that serve it, in the order the proxy tries them. Absent on a proxy that does not list them. */
-	accounts?: ProxyAccount[];
-	/** For a proxy model: the kind of credential that answered the last request ("oauth" or "apikey"), when the proxy said. */
-	servedKind?: string;
+	/** For a proxy model: what may serve it, as the proxy's extension said. Empty: not known. */
+	upstreams?: Upstream[];
 }
 
 /** The providers.dev provider that holds a pi provider's subscription login. */
@@ -273,89 +278,36 @@ const SUBSCRIPTION_PROVIDERS: Record<string, string[]> = {
 	openai: ["openai-codex", "openai"],
 };
 
-/** Which labs a proxy can serve from a subscription login as well as an API key. */
-const PROXY_OWNERS: Record<string, string[]> = {
-	anthropic: ["claude-subscription", "anthropic"],
-	openai: ["openai-codex", "openai"],
-	meta: ["meta-subscription", "meta"],
-};
-
-/** The providers.dev provider of a CLIProxyAPI credential, by its provider and kind. */
-const PROXY_CREDENTIALS: Record<string, { oauth?: string; apikey?: string }> = {
-	claude: { oauth: "claude-subscription", apikey: "anthropic" },
-	codex: { oauth: "openai-codex", apikey: "openai" },
-	meta: { oauth: "meta-subscription", apikey: "meta" },
-	devin: { oauth: "devin", apikey: "devin" },
-	antigravity: { oauth: "antigravity" },
-	gemini: { oauth: "google", apikey: "google" },
-	"openai-compatible-openrouter": { apikey: "openrouter" },
-};
-
-/** The providers.dev provider of an API key, by the host it is sent to. */
-const API_HOSTS: Record<string, string> = {
-	"openrouter.ai": "openrouter",
-	"api.openai.com": "openai",
-	"api.anthropic.com": "anthropic",
-	"generativelanguage.googleapis.com": "google",
-};
-
-/**
- * An API key whose host the proxy names goes by the host: an OpenAI-compatible entry is called whatever the operator
- * chose, and a Claude or OpenAI key can be sent to another service. Otherwise by the proxy's provider name.
- */
-const providerOfAccount = (account: ProxyAccount): string | undefined =>
-	account.kind === "apikey" && account.host ? API_HOSTS[account.host] : PROXY_CREDENTIALS[account.provider]?.[account.kind as "oauth" | "apikey"];
-
-/**
- * The credentials a proxy may answer with: those at the highest priority (CLIProxyAPI uses the highest priority that is
- * free and picks among the credentials sharing it, round-robin by default), or of the kind that answered.
- */
-function likelyAccounts(access: Access): ProxyAccount[] {
-	const accounts = access.servedKind ? (access.accounts ?? []).filter((one) => one.kind === access.servedKind) : (access.accounts ?? []);
-	if (accounts.length === 0) return [];
-	const top = Math.max(...accounts.map((one) => one.priority));
-	return accounts.filter((one) => one.priority === top);
+/** The providers.dev entries for a model used directly: by subscription login, by API key, or (not known) both. */
+function directLookups(provider: string, model: string, subscription: boolean | undefined): Lookup[] {
+	const login = SUBSCRIPTION_PROVIDERS[provider] ?? [provider];
+	const providers = subscription === true ? login : subscription === false ? [provider] : [...new Set([...login, provider])];
+	return providers.map((one) => ({ provider: one, model }));
 }
 
 /**
  * The providers.dev entries that can describe a pi model. One entry means the access method is known; several mean
- * it is one of them (see mergeFacts).
- *
- * Through CLIProxyAPI the model's name says nothing about who serves it (any OpenAI-compatible entry can use
- * `lab/model`, a login can have an alias), so it goes by the proxy's credential list: the credentials it may answer
- * with (see likelyAccounts). A proxy that does not list them leaves `devin/…` (CLIProxyAPI's own prefix for Devin) and,
- * for a plain name, the lab its model list names, by subscription login and by API key.
+ * it is one of them (see mergeFacts). A proxy model is looked up where its extension says it comes from; a proxy model
+ * whose source is not known has none.
  */
 export function lookupsFor(model: { provider: string; id: string }, access: Access = {}): Lookup[] {
-	if (!access.proxy) {
-		const providers = (access.subscription ? SUBSCRIPTION_PROVIDERS[model.provider] : undefined) ?? [model.provider];
-		return providers.map((provider) => ({ provider, model: model.id }));
-	}
-	if (access.accounts && access.accounts.length > 0) {
-		const providers = likelyAccounts(access).map(providerOfAccount);
-		// A credential providers.dev has no provider for may answer: nothing is known.
-		if (providers.length === 0 || providers.some((provider) => provider === undefined)) return [];
-		// OpenRouter's names are `lab/model`; nobody else's have a slash, so one there is a prefix the proxy added.
-		const unprefixed = model.id.slice(model.id.lastIndexOf("/") + 1);
-		return [...new Set(providers as string[])].map((provider) => ({ provider, model: provider === "openrouter" ? model.id : unprefixed }));
-	}
-	if (model.id.startsWith("devin/")) return [{ provider: "devin", model: model.id.slice("devin/".length) }];
-	if (model.id.includes("/") || !access.ownedBy) return [];
-	return (PROXY_OWNERS[access.ownedBy] ?? [access.ownedBy]).map((provider) => ({ provider, model: model.id }));
+	if (!access.upstreams) return directLookups(model.provider, model.id, access.subscription === true);
+	const seen = new Set<string>();
+	return access.upstreams
+		.flatMap((upstream) => directLookups(upstream.provider, upstream.model ?? model.id, upstream.subscription))
+		.filter((lookup) => !seen.has(`${lookup.provider}\n${lookup.model}`) && seen.add(`${lookup.provider}\n${lookup.model}`));
 }
 
 /** How a model is reached: a subscription login ("sub"), an API key ("api"), or either (a proxy that does not say). */
 export type Via = "sub" | "api" | "sub or api";
 
-/** For a proxy model: the kind that answered, else the kinds it may answer with; a proxy that does not list them says nothing. */
-export function accessVia(_model: { provider: string; id: string }, access: Access = {}): Via {
-	if (!access.proxy) return access.subscription ? "sub" : "api";
-	const kinds = new Set(likelyAccounts(access).map((one) => one.kind));
-	if (kinds.size !== 1) return "sub or api";
-	return kinds.has("apikey") ? "api" : "sub";
+/** Subscription login, API key, or either (a proxy model whose sources mix them or are not known). */
+export function accessVia(access: Access = {}): Via {
+	if (!access.upstreams) return access.subscription ? "sub" : "api";
+	const kinds = new Set(access.upstreams.map((upstream) => upstream.subscription));
+	if (kinds.size !== 1 || kinds.has(undefined)) return "sub or api";
+	return kinds.has(true) ? "sub" : "api";
 }
-
-export const isProxyProvider = (providerId: string, displayName?: string): boolean => providerId === PROXY_PROVIDER_ID || displayName === PROXY_PROVIDER_NAME;
 
 export interface Found {
 	facts: Facts;
@@ -402,7 +354,7 @@ const MARKS: Record<FieldState, string> = { found: "✓", assumed: "⚠", unsure
 export const UNKNOWN_ACCESS_WARNING = "⚠ login or API key unknown: shorter values";
 /** The same, when the login is known but providers.dev has no entry of its own for it (Pi's ChatGPT login on OpenAI). */
 export const NO_LOGIN_ENTRY_WARNING = "⚠ no entry for this login: shorter values";
-const servedWarning = (kind: string) => `⚠ answered by ${kind === "apikey" ? "an API key" : "a login"}`;
+const servedWarning = (via: Via) => `⚠ answered by ${via === "api" ? "an API key" : via === "sub" ? "a login" : "another account"}`;
 
 /**
  * The footer text: "· window ✓ · cache short ✓ · long ✗ · price ✓", led by a dot that sets it apart from what the
@@ -412,7 +364,7 @@ const servedWarning = (kind: string) => `⚠ answered by ${kind === "apikey" ? "
 export function formatFieldStates(
 	found: Found,
 	paint: (text: string, state: FieldState) => string = (text) => text,
-	{ served, tier, via }: { served?: string; tier?: "short" | "long"; via?: Via } = {},
+	{ served, tier, via }: { served?: Via; tier?: "short" | "long"; via?: Via } = {},
 ): string {
 	const warnings = served ? [paint(servedWarning(served), "assumed")] : [];
 	const lead = via ? [via] : [];
@@ -582,8 +534,7 @@ export function loadStore(): DataStore {
 			checkedAt: positive(parsed.checkedAt),
 			datasetVersion: typeof parsed.datasetVersion === "string" ? parsed.datasetVersion : undefined,
 			providers: part("providers") as DataStore["providers"],
-			owners: part("owners") as DataStore["owners"],
-			accounts: part("accounts") as DataStore["accounts"],
+			upstreams: part("upstreams") as DataStore["upstreams"],
 			written: part("written") as DataStore["written"],
 		};
 	} catch {
@@ -677,39 +628,48 @@ export async function fetchDataset(providerIds: string[], saved: DataStore, fetc
 	return { datasetVersion, providers, downloaded: true };
 }
 
-export interface ProxyModels {
-	/** Model id → the lab the proxy names as its owner. */
-	owners: Record<string, string>;
-	/** Model id → the credentials that serve it; empty when the proxy does not list them. */
-	accounts: Record<string, ProxyAccount[]>;
+
+const parseUpstream = (value: unknown): Upstream | undefined => {
+	if (!isPlainObject(value) || typeof value.provider !== "string" || !value.provider) return undefined;
+	return {
+		provider: value.provider,
+		...(typeof value.model === "string" && value.model ? { model: value.model } : {}),
+		...(typeof value.subscription === "boolean" ? { subscription: value.subscription } : {}),
+	};
+};
+
+const parseUpstreams = (value: unknown): Upstream[] | undefined => {
+	if (!Array.isArray(value)) return undefined;
+	const list = value.map(parseUpstream);
+	// One that cannot be read may still serve the model: the whole list is not known.
+	return list.every((one) => one !== undefined) ? (list as Upstream[]) : [];
+};
+
+/** A proxy model's route as an event gives it; undefined when it is not one. */
+export function parseRoute(value: unknown): Route | undefined {
+	if (!isPlainObject(value)) return undefined;
+	const upstreams = parseUpstreams(value.upstreams);
+	if (!upstreams) return undefined;
+	const fallbacks = parseUpstreams(value.fallbacks);
+	return { upstreams, ...(fallbacks && fallbacks.length > 0 ? { fallbacks } : {}) };
 }
 
-/**
- * A proxy's model list (`/v1/models?include=accounts`): the lab that owns each model, and, on a CLIProxyAPI that
- * supports it, the credentials that serve it. A proxy that does not know the parameter answers the plain list.
- */
-export async function fetchProxyModels(origin: string, headers: Record<string, string>, fetchImpl: Fetch, signal?: AbortSignal): Promise<ProxyModels> {
-	const body = await getJson(fetchImpl, `${origin}/v1/models?include=accounts`, headers, signal);
-	const owners: Record<string, string> = {};
-	const accounts: Record<string, ProxyAccount[]> = {};
-	if (!isPlainObject(body) || !Array.isArray(body.data)) throw new Error(`${origin}/v1/models answered without a list`);
-	for (const model of body.data) {
-		if (!isPlainObject(model) || typeof model.id !== "string") continue;
-		if (typeof model.owned_by === "string") owners[model.id] = model.owned_by;
-		if (!Array.isArray(model.accounts)) continue;
-		const list: ProxyAccount[] = [];
-		for (const account of model.accounts) {
-			if (!isPlainObject(account) || typeof account.provider !== "string" || typeof account.kind !== "string") continue;
-			list.push({
-				provider: account.provider,
-				kind: account.kind,
-				priority: typeof account.priority === "number" ? account.priority : 0,
-				...(typeof account.host === "string" && account.host ? { host: account.host.toLowerCase() } : {}),
-			});
-		}
-		if (list.length > 0) accounts[model.id] = list;
+/** The UPSTREAMS_EVENT payload: `{ provider, models: { [modelId]: Route } }`, every model of that provider. */
+export function parseUpstreamsEvent(value: unknown): { provider: string; models: Record<string, Route> } | undefined {
+	if (!isPlainObject(value) || typeof value.provider !== "string" || !value.provider || !isPlainObject(value.models)) return undefined;
+	const models: Record<string, Route> = {};
+	for (const [id, route] of Object.entries(value.models)) {
+		const parsed = parseRoute(route);
+		if (parsed) models[id] = parsed;
 	}
-	return { owners, accounts };
+	return { provider: value.provider, models };
+}
+
+/** The ANSWERED_EVENT payload: `{ provider, model, upstreams }`, what served the last request to a proxy model. */
+export function parseAnsweredEvent(value: unknown): { provider: string; model: string; upstreams: Upstream[] } | undefined {
+	if (!isPlainObject(value) || typeof value.provider !== "string" || typeof value.model !== "string") return undefined;
+	const upstreams = parseUpstreams(value.upstreams);
+	return upstreams && upstreams.length > 0 ? { provider: value.provider, model: value.model, upstreams } : undefined;
 }
 
 const lifetimeLabel = (seconds: number): string => (seconds % 3600 === 0 ? `${seconds / 3600} h` : seconds % 60 === 0 ? `${seconds / 60} min` : `${seconds} s`);

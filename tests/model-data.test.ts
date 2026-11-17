@@ -11,12 +11,12 @@ import {
 	emptyStore,
 	factsOf,
 	fetchDataset,
-	fetchProxyModels,
 	fieldStates,
 	findFacts,
 	accessVia,
 	formatFieldStates,
-	isProxyProvider,
+	parseAnsweredEvent,
+	parseUpstreamsEvent,
 	loadStore,
 	lookupsFor,
 	mergeFacts,
@@ -100,22 +100,29 @@ test("a pi model is looked up under the provider and access method it is reached
 	// pi's ChatGPT login on the OpenAI API has no entry of its own.
 	assert.deepEqual(lookupsFor({ provider: "openai", id: "gpt-6.1-sol" }, { subscription: true }).map((one) => one.provider), ["openai-codex", "openai"]);
 
-	assert.equal(isProxyProvider("cliproxyapi"), true);
-	assert.equal(isProxyProvider("my-proxy", "CLIProxyAPI"), true);
-	assert.equal(isProxyProvider("openai", "OpenAI"), false);
-	const proxy = (id: string, ownedBy?: string) => lookupsFor({ provider: "cliproxyapi", id }, { proxy: true, ownedBy });
-	assert.deepEqual(proxy("devin/swe-2", "cognition"), [{ provider: "devin", model: "swe-2" }]);
-	// A name with a slash says nothing about who serves it: any OpenAI-compatible entry, a login with an alias...
-	assert.deepEqual(proxy("openai/gpt-6.1-sol", "openai"), []);
-	// A plain name: the lab's subscription login or its API key; the proxy's model list does not say which.
-	assert.deepEqual(proxy("claude-opus-5-5", "anthropic").map((one) => one.provider), ["claude-subscription", "anthropic"]);
-	assert.deepEqual(proxy("gpt-6.1-sol", "openai").map((one) => one.provider), ["openai-codex", "openai"]);
-	assert.deepEqual(proxy("gemini-3.8-flash-high", "antigravity"), [{ provider: "antigravity", model: "gemini-3.8-flash-high" }]);
-	assert.deepEqual(proxy("mystery"), []);
+	// A proxy model is looked up where its extension says it comes from.
+	const via = (upstreams: Access["upstreams"]) => lookupsFor({ provider: "my-proxy", id: "team/claude-opus-5-5" }, { upstreams });
+	assert.deepEqual(via([{ provider: "anthropic", model: "claude-opus-5-5", subscription: true }]), [{ provider: "claude-subscription", model: "claude-opus-5-5" }]);
+	assert.deepEqual(via([{ provider: "anthropic", model: "claude-opus-5-5", subscription: false }]), [{ provider: "anthropic", model: "claude-opus-5-5" }]);
+	// Login or key not known: both. Several possible: all of them, once each.
+	assert.deepEqual(via([{ provider: "anthropic", model: "claude-opus-5-5" }]).map((one) => one.provider), ["claude-subscription", "anthropic"]);
+	assert.deepEqual(
+		via([
+			{ provider: "anthropic", model: "claude-opus-5-5", subscription: true },
+			{ provider: "anthropic", model: "claude-opus-5-5", subscription: true },
+			{ provider: "anthropic", model: "claude-opus-5-5", subscription: false },
+		]).map((one) => one.provider),
+		["claude-subscription", "anthropic"],
+	);
+	// The proxy's own id when no other is given; a provider pi has none for is looked up as it is.
+	assert.deepEqual(via([{ provider: "devin", subscription: true }]), [{ provider: "devin", model: "team/claude-opus-5-5" }]);
+	// A proxy model whose source is not known: nothing.
+	assert.deepEqual(via([]), []);
 });
 
 test("when two entries can describe a model, only what both say is kept, and the window is the smaller one", () => {
-	const claude = findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, { proxy: true, ownedBy: "anthropic" }), providers);
+	const unknown = (provider: string) => ({ upstreams: [{ provider }] });
+	const claude = findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, unknown("anthropic")), providers);
 	assert.deepEqual(claude.refs, ["claude-subscription/claude-opus-5-5", "anthropic/claude-opus-5-5"]);
 	// The login keeps a cache for 1 h, the API key for 5 min by default. Without knowing which serves the model, the
 	// shorter is taken: a wrong guess then costs an early refresh, not a cache that expires unnoticed.
@@ -126,7 +133,7 @@ test("when two entries can describe a model, only what both say is kept, and the
 	assert.deepEqual(claude.unsure, []);
 	assert.deepEqual(fieldStates(claude), { window: "found", short: "assumed", long: "found", price: "found" });
 
-	const gpt = findFacts(lookupsFor({ provider: "cliproxyapi", id: "gpt-6-astra" }, { proxy: true, ownedBy: "openai" }), providers);
+	const gpt = findFacts(lookupsFor({ provider: "cliproxyapi", id: "gpt-6-astra" }, { upstreams: [{ provider: "openai-codex", subscription: true }, { provider: "openai", subscription: false }] }), providers);
 	assert.equal(gpt.facts.window, 915_011);
 	assert.equal(gpt.facts.windowAtLeast, true);
 	// Codex login 2 h, API key 30 min: the shorter. Only the API key has a long lifetime: not used.
@@ -163,7 +170,7 @@ test("the footer says what was found: a lifetime evaluations found unsafe counts
 	assert.equal(formatFieldStates(exact("devin", "swe-2")), "· window ✓ · cache short ✗ · long ✗ · price ✗");
 	assert.equal(formatFieldStates(exact("openai-codex", "gpt-6.1-terra")), "· window ✓ · cache short ✗ · long ✗ · price ✓");
 	assert.equal(formatFieldStates(exact("antigravity", "gemini-3.8-flash-high")).startsWith("· window ✗ · cache short ✓"), true);
-	const unsure = findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, { proxy: true, ownedBy: "anthropic" }), providers);
+	const unsure = findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, { upstreams: [{ provider: "anthropic" }] }), providers);
 	assert.equal(
 		formatFieldStates(unsure, (mark, state) => `<${state}:${mark}>`),
 		"· window <found:✓> · cache short <assumed:⚠> · long <found:✓> · price <found:✓> · <assumed:⚠ login or API key unknown: shorter values>",
@@ -335,84 +342,43 @@ test("providers.dev is asked once whether the dataset changed, then per provider
 	await assert.rejects(fetchDataset(["openai-codex"], saved, async () => { throw new Error("offline"); }), /offline/);
 });
 
-test("a proxy's model list names the lab behind each model and the credentials serving it, and it is asked with the proxy's own key", async () => {
-	const login = { provider: "claude", kind: "oauth", priority: -15 };
-	const key = { provider: "claude", kind: "apikey", priority: -25 };
-	const fetchImpl: Fetch = async (url, init) => {
-		assert.equal(url, "http://127.0.0.1:8317/v1/models?include=accounts");
-		assert.equal(init.headers.authorization, "Bearer k");
-		return {
-			ok: true,
-			status: 200,
-			json: async () => ({
-				data: [
-					{ id: "claude-opus-5-5", owned_by: "anthropic", accounts: [login, key, { kind: "oauth" }] },
-					{ id: "openai/gpt-6.1-sol", owned_by: "openai", accounts: [{ provider: "openai-compatible-x", kind: "apikey", priority: 0, host: "openrouter.ai" }] },
-					{ id: "claude-sonnet-4-6", owned_by: "antigravity", accounts: [] },
-					{ id: "nameless" },
-					"junk",
-				],
-			}),
-		};
-	};
-	assert.deepEqual(await fetchProxyModels("http://127.0.0.1:8317", { authorization: "Bearer k" }, fetchImpl), {
-		owners: { "claude-opus-5-5": "anthropic", "openai/gpt-6.1-sol": "openai", "claude-sonnet-4-6": "antigravity" },
-		accounts: { "claude-opus-5-5": [login, key], "openai/gpt-6.1-sol": [{ provider: "openai-compatible-x", kind: "apikey", priority: 0, host: "openrouter.ai" }] },
-	});
-	// A proxy without the parameter answers the plain list: no accounts.
-	const plain: Fetch = async () => ({ ok: true, status: 200, json: async () => ({ data: [{ id: "claude-opus-5-5", owned_by: "anthropic" }] }) });
-	assert.deepEqual(await fetchProxyModels("http://127.0.0.1:8317", {}, plain), { owners: { "claude-opus-5-5": "anthropic" }, accounts: {} });
-	await assert.rejects(fetchProxyModels("http://127.0.0.1:8317", {}, async () => ({ ok: true, status: 200, json: async () => ({ models: [] }) })), /without a list/);
+test("a proxy extension's events: every model's route, and what answered a request; what cannot be read is not known", () => {
+	const login = { provider: "anthropic", model: "claude-opus-5-5", subscription: true };
+	const key = { provider: "anthropic", model: "claude-opus-5-5", subscription: false };
+	assert.deepEqual(
+		parseUpstreamsEvent({
+			provider: "cliproxyapi",
+			models: {
+				"claude-opus-5-5": { upstreams: [login], fallbacks: [key] },
+				"gpt-6.1-sol": { upstreams: [{ provider: "openai-codex", subscription: true, extra: 1 }], fallbacks: [] },
+				// One upstream that cannot be read: the model's source is not known.
+				odd: { upstreams: [login, { subscription: true }] },
+				junk: "x",
+			},
+		}),
+		{
+			provider: "cliproxyapi",
+			models: {
+				"claude-opus-5-5": { upstreams: [login], fallbacks: [key] },
+				"gpt-6.1-sol": { upstreams: [{ provider: "openai-codex", subscription: true }] },
+				odd: { upstreams: [] },
+			},
+		},
+	);
+	assert.equal(parseUpstreamsEvent({ provider: "cliproxyapi" }), undefined);
+	assert.equal(parseUpstreamsEvent("x"), undefined);
+	assert.deepEqual(parseAnsweredEvent({ provider: "cliproxyapi", model: "claude-opus-5-5", upstreams: [key] }), { provider: "cliproxyapi", model: "claude-opus-5-5", upstreams: [key] });
+	assert.equal(parseAnsweredEvent({ provider: "cliproxyapi", model: "claude-opus-5-5", upstreams: [] }), undefined);
 });
 
-test("with the proxy's credential list, a plain name is looked up under the credential it tries first, or the kind that answered", () => {
-	const accounts = [
-		{ provider: "claude", kind: "oauth", priority: -15 },
-		{ provider: "claude", kind: "apikey", priority: -25 },
-	];
-	const proxy = (id: string, extra: Partial<Access> = {}) => lookupsFor({ provider: "cliproxyapi", id }, { proxy: true, ownedBy: "anthropic", accounts, ...extra });
-	assert.deepEqual(proxy("claude-opus-5-5"), [{ provider: "claude-subscription", model: "claude-opus-5-5" }]);
-	assert.deepEqual(proxy("claude-opus-5-5", { servedKind: "apikey" }), [{ provider: "anthropic", model: "claude-opus-5-5" }]);
-	assert.deepEqual(proxy("claude-opus-5-5", { accounts: [accounts[1]] }), [{ provider: "anthropic", model: "claude-opus-5-5" }], "an alias on API keys only");
-	assert.deepEqual(proxy("gpt-6.1-sol", { accounts: [{ provider: "codex", kind: "oauth", priority: -17 }] }), [{ provider: "openai-codex", model: "gpt-6.1-sol" }]);
-	assert.deepEqual(proxy("muse-ember-1.0", { accounts: [{ provider: "meta", kind: "oauth", priority: -20 }] }), [{ provider: "meta-subscription", model: "muse-ember-1.0" }]);
-	assert.deepEqual(proxy("x", { accounts: [{ provider: "something-new", kind: "oauth", priority: 0 }] }), [], "a credential with no providers.dev provider");
-	// Prefixed names keep their own provider.
-	assert.deepEqual(proxy("devin/swe-2", { accounts: [{ provider: "devin", kind: "oauth", priority: -20 }] }), [{ provider: "devin", model: "swe-2" }]);
-	// The list decides, not the name: a slash name a Claude login serves, an OpenRouter model.
-	// A prefix CLIProxyAPI puts before a credential's models ("team/claude-opus-5-5") is not part of the model's name.
-	assert.deepEqual(proxy("team/claude-opus-5-5", { accounts: [accounts[0]] }), [{ provider: "claude-subscription", model: "claude-opus-5-5" }]);
-	assert.deepEqual(proxy("anthropic/claude-opus-5-5", { accounts: [accounts[0]] }), [{ provider: "claude-subscription", model: "claude-opus-5-5" }]);
-	const openrouter = { provider: "openai-compatible-openrouter", kind: "apikey", priority: 0 };
-	assert.deepEqual(proxy("openai/gpt-6.1-sol", { accounts: [openrouter] }), [{ provider: "openrouter", model: "openai/gpt-6.1-sol" }]);
-	// A proxy that names the host of an API key's base URL: the host decides, whatever the entry is called.
-	const at = (host: string, provider = "openai-compatible-mine") => ({ provider, kind: "apikey", priority: 0, host });
-	assert.deepEqual(proxy("openai/gpt-6.1-sol", { accounts: [at("openrouter.ai")] }), [{ provider: "openrouter", model: "openai/gpt-6.1-sol" }]);
-	assert.deepEqual(proxy("gpt-6.1-sol", { accounts: [at("api.openai.com", "codex")] }), [{ provider: "openai", model: "gpt-6.1-sol" }]);
-	assert.deepEqual(proxy("claude-opus-5-5", { accounts: [at("api.anthropic.com", "claude")] }), [{ provider: "anthropic", model: "claude-opus-5-5" }]);
-	// A Claude key sent somewhere else, or an entry named openrouter on another host: not what the name says.
-	assert.deepEqual(proxy("claude-opus-5-5", { accounts: [at("llm.example.com", "claude")] }), []);
-	assert.deepEqual(proxy("openai/gpt-6.1-sol", { accounts: [at("llm.example.com", "openai-compatible-openrouter")] }), []);
-
-	// CPA uses the highest priority that is free, and picks among the credentials sharing it (round-robin by default).
-	// Nothing set means every credential sits at 0: a login and a key then take turns, so both are possible.
-	const login0 = { ...accounts[0], priority: 0 };
-	const key0 = { ...accounts[1], priority: 0 };
-	assert.deepEqual(proxy("claude-opus-5-5", { accounts: [login0, key0] }).map((one) => one.provider), ["claude-subscription", "anthropic"]);
-	assert.deepEqual(proxy("claude-opus-5-5", { accounts: [login0, key0], servedKind: "apikey" }), [{ provider: "anthropic", model: "claude-opus-5-5" }]);
-	// Two logins at the top: one entry. A lower tier only counts when the proxy said that kind answered.
-	assert.deepEqual(proxy("claude-opus-5-5", { accounts: [accounts[0], { ...accounts[0], priority: -15 }, accounts[1]] }), [{ provider: "claude-subscription", model: "claude-opus-5-5" }]);
-	// A credential at the top with no providers.dev provider: it may answer, so nothing is known.
-	assert.deepEqual(proxy("claude-opus-5-5", { accounts: [login0, { provider: "openai-compatible-mine", kind: "apikey", priority: 0 }] }), []);
-	const mixed = findFacts(proxy("claude-opus-5-5", { accounts: [login0, key0] }), providers);
-	assert.equal(mixed.facts.short, 300, "the shorter of the login's hour and the key's 5 minutes");
-
-	const exact = findFacts(proxy("claude-opus-5-5"), providers);
+test("the footer: values, a warning for a guess or for an answer from elsewhere, the tier in use, and login or key first", () => {
+	const login = { provider: "anthropic", model: "claude-opus-5-5", subscription: true };
+	const exact = findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, { upstreams: [login] }), providers);
 	assert.deepEqual({ short: exact.facts.short, long: exact.facts.long, assumed: exact.assumed, unsure: exact.unsure }, { short: 3600, long: 3600, assumed: [], unsure: [] });
 	assert.equal(formatFieldStates(exact), "· window ✓ · cache short ✓ · long ✓ · price ✓");
 	// The answer came from an API key while the values are the login's: said at the end of the footer.
-	assert.equal(formatFieldStates(exact, undefined, { served: "apikey" }), "· window ✓ · cache short ✓ · long ✓ · price ✓ · ⚠ answered by an API key");
-	assert.equal(formatFieldStates(findFacts([], providers), undefined, { served: "apikey" }), "· providers.dev: no data for this model · ⚠ answered by an API key");
+	assert.equal(formatFieldStates(exact, undefined, { served: "api" }), "· window ✓ · cache short ✓ · long ✓ · price ✓ · ⚠ answered by an API key");
+	assert.equal(formatFieldStates(findFacts([], providers), undefined, { served: "sub" }), "· providers.dev: no data for this model · ⚠ answered by a login");
 	// The tier in use is named after its mark, or on its own when there is no data.
 	assert.equal(formatFieldStates(exact, undefined, { tier: "short" }), "· window ✓ · cache short ✓ (in use) · long ✓ · price ✓");
 	assert.equal(formatFieldStates(exact, (text, state) => `<${state}:${text}>`, { tier: "long" }), "· window <found:✓> · cache short <found:✓> · long <found:✓> (in use) · price <found:✓>");
@@ -421,7 +387,7 @@ test("with the proxy's credential list, a plain name is looked up under the cred
 	assert.equal(formatFieldStates(exact, undefined, { via: "sub", tier: "short" }), "· sub · window ✓ · cache short ✓ (in use) · long ✓ · price ✓");
 	assert.equal(formatFieldStates(findFacts([], providers), undefined, { via: "api" }), "· api · providers.dev: no data for this model");
 	assert.equal(
-		formatFieldStates(findFacts(proxy("claude-opus-5-5", { accounts: undefined }), providers), undefined, { via: "sub or api" }),
+		formatFieldStates(findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, { upstreams: [{ provider: "anthropic" }] }), providers), undefined, { via: "sub or api" }),
 		"· sub or api · window ✓ · cache short ⚠ · long ✓ · price ✓ · ⚠ login or API key unknown: shorter values",
 	);
 	// Pi knows it is the ChatGPT login, but providers.dev has no entry for that login on the OpenAI API.
@@ -431,20 +397,16 @@ test("with the proxy's credential list, a plain name is looked up under the cred
 	);
 });
 
-test("a model is served by a subscription login or an API key: pi's own sign-in, or the credential the proxy answers with", () => {
-	assert.equal(accessVia({ provider: "anthropic", id: "claude-opus-5-5" }, { subscription: true }), "sub");
-	assert.equal(accessVia({ provider: "anthropic", id: "claude-opus-5-5" }, {}), "api");
-	const login = { provider: "claude", kind: "oauth", priority: -15 };
-	const key = { provider: "claude", kind: "apikey", priority: -25 };
-	const proxy = (id: string, extra: Partial<Access> = {}) => accessVia({ provider: "cliproxyapi", id }, { proxy: true, ...extra });
-	assert.equal(proxy("claude-opus-5-5", { accounts: [login, key] }), "sub", "the highest priority");
-	assert.equal(proxy("claude-opus-5-5", { accounts: [login, key], servedKind: "apikey" }), "api", "the one that answered");
-	assert.equal(proxy("claude-opus-5-5", { accounts: [key] }), "api");
-	assert.equal(proxy("claude-opus-5-5", { accounts: [{ ...login, priority: 0 }, { ...key, priority: 0 }] }), "sub or api", "both at the top take turns");
-	// A proxy that does not list its credentials: nothing is known, whatever the name.
-	assert.equal(proxy("claude-opus-5-5"), "sub or api");
-	assert.equal(proxy("devin/swe-2"), "sub or api");
-	assert.equal(proxy("anthropic/claude-opus-5-5"), "sub or api");
+test("a model is served by a subscription login or an API key: pi's own sign-in, or what the proxy's extension says", () => {
+	assert.equal(accessVia({ subscription: true }), "sub");
+	assert.equal(accessVia({}), "api");
+	const login = { provider: "anthropic", subscription: true };
+	const key = { provider: "anthropic", subscription: false };
+	assert.equal(accessVia({ upstreams: [login, login] }), "sub");
+	assert.equal(accessVia({ upstreams: [key] }), "api");
+	assert.equal(accessVia({ upstreams: [login, key] }), "sub or api", "either may answer");
+	assert.equal(accessVia({ upstreams: [{ provider: "anthropic" }] }), "sub or api", "not known");
+	assert.equal(accessVia({ upstreams: [] }), "sub or api", "a proxy model whose source is not known");
 });
 
 test("the facts of the fixture cover every field the extension reads", () => {

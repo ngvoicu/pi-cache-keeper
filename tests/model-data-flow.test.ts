@@ -38,15 +38,31 @@ const catalog: FakeModel[] = [
 	{ provider: "cliproxyapi", id: "devin/swe-2", baseUrl: "http://127.0.0.1:8317/backend-api/", contextWindow: 262_000, maxTokens: 128_000, cost: free },
 ];
 
-// The credentials a CLIProxyAPI with `include=accounts` lists: the Claude and Codex logins first, then API keys.
-const PROXY_ACCOUNTS: Record<string, unknown[]> = {
-	"gpt-6.1-sol": [{ provider: "codex", kind: "oauth", priority: -17 }, { provider: "codex", kind: "apikey", priority: -25 }],
-	"claude-opus-5-5": [{ provider: "claude", kind: "oauth", priority: -15 }, { provider: "claude", kind: "apikey", priority: -25 }],
-	"devin/claude-opus-5-5": [{ provider: "devin", kind: "oauth", priority: -20 }],
-	"devin/swe-2": [{ provider: "devin", kind: "oauth", priority: -20 }],
+// What a proxy extension says about its models when it can't tell a login from an API key: GPT-6.1 Sol through the
+// Codex login or an OpenAI key, Opus through a Claude login or key, Devin's models through Devin.
+const UNSURE_ROUTES = {
+	provider: "cliproxyapi",
+	models: {
+		"gpt-6.1-sol": { upstreams: [{ provider: "openai-codex", subscription: true }, { provider: "openai", subscription: false }] },
+		"claude-opus-5-5": { upstreams: [{ provider: "anthropic" }] },
+		"devin/claude-opus-5-5": { upstreams: [{ provider: "devin", model: "claude-opus-5-5", subscription: true }] },
+		"devin/swe-2": { upstreams: [{ provider: "devin", model: "swe-2", subscription: true }] },
+	},
+};
+// And when it can: the logins first, API keys when they fail.
+const login = (provider: string, model?: string) => ({ provider, subscription: true, ...(model ? { model } : {}) });
+const key = (provider: string) => ({ provider, subscription: false });
+const SURE_ROUTES = {
+	provider: "cliproxyapi",
+	models: {
+		"gpt-6.1-sol": { upstreams: [login("openai-codex")], fallbacks: [key("openai")] },
+		"claude-opus-5-5": { upstreams: [login("anthropic")], fallbacks: [key("anthropic")] },
+		"devin/claude-opus-5-5": { upstreams: [login("devin", "claude-opus-5-5")] },
+		"devin/swe-2": { upstreams: [login("devin", "swe-2")] },
+	},
 };
 
-function harness(options: { online?: boolean; extension?: typeof cacheKeeper; proxyAccounts?: boolean } = {}) {
+function harness(options: { online?: boolean; extension?: typeof cacheKeeper } = {}) {
 	const state = { online: options.online ?? true, idle: true };
 	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 	const commands = new Map<string, (args: string, ctx: unknown) => Promise<unknown>>();
@@ -78,18 +94,27 @@ function harness(options: { online?: boolean; extension?: typeof cacheKeeper; pr
 		requests.push({ url, headers: init.headers });
 		if (!state.online) throw new Error("offline");
 		const json = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
-		if (url.startsWith("http://127.0.0.1:8317/v1/models")) {
-			const owners: Record<string, string> = { "gpt-6.1-sol": "openai", "claude-opus-5-5": "anthropic", "devin/claude-opus-5-5": "anthropic", "devin/swe-2": "cognition" };
-			// A CLIProxyAPI without the parameter ignores it and answers the plain list.
-			const withAccounts = options.proxyAccounts && new URL(url).searchParams.get("include") === "accounts";
-			return json({ data: Object.entries(owners).map(([id, owned_by]) => ({ id, owned_by, ...(withAccounts ? { accounts: PROXY_ACCOUNTS[id] } : {}) })) });
-		}
+		// This extension asks nobody but providers.dev.
+		assert.ok(url.startsWith("https://providers.dev/"), `asked ${url}`);
 		if (url === "https://providers.dev/api/v1/meta") return json({ meta: { dataset_version: "d1" }, data: {} });
 		const provider = new URL(url).searchParams.get("provider");
 		return json({ meta: { dataset_version: "d1" }, next_offset: null, data: fixture.data.filter((entry) => entry.provider === provider) });
 	}) as never;
 
+	// pi's bus between extensions: a proxy extension's events reach this one.
+	const listeners = new Map<string, Array<(data: unknown) => void>>();
+	const emitted: string[] = [];
 	const pi = {
+		events: {
+			on: (channel: string, handler: (data: unknown) => void) => {
+				listeners.set(channel, [...(listeners.get(channel) ?? []), handler]);
+				return () => {};
+			},
+			emit: (channel: string, data: unknown) => {
+				emitted.push(channel);
+				for (const handler of listeners.get(channel) ?? []) handler(data);
+			},
+		},
 		on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(event, handler),
 		registerEntryRenderer: () => {},
 		registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => Promise<unknown> }) => commands.set(name, command.handler),
@@ -144,21 +169,27 @@ function harness(options: { online?: boolean; extension?: typeof cacheKeeper; pr
 	const reload = () => {
 		registered = effective();
 	};
-	return { handlers, commands, statuses, notices, requests, selected, refreshed, state, ctx, settle, overrides, reload, branch, model: () => current };
+	// What pi does when the user picks a model.
+	const select = (provider: string, id: string) => {
+		current = registered.find((model) => model.provider === provider && model.id === id) ?? ({ provider, id, cost: priced, contextWindow: 1, maxTokens: 1 } as FakeModel);
+		handlers.get("model_select")!({}, ctx);
+	};
+	return { handlers, commands, statuses, notices, requests, selected, refreshed, state, ctx, settle, overrides, reload, branch, select, emit: pi.events.emit, emitted, model: () => current };
 }
 
 test.after(() => rmSync(dir, { recursive: true }));
 
 test("a session start fetches the data, fills models.json, reloads the models and shows what was found in the footer", async () => {
 	const h = harness();
+	// The proxy extension may speak before this one's session starts.
+	h.emit("model-upstreams", UNSURE_ROUTES);
 	h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
 	assert.equal(h.statuses.get("cache-keeper-data"), undefined, "nothing is shown before any data was fetched");
+	assert.equal(h.emitted.at(-1), "model-upstreams:request", "proxy extensions are asked where their models come from");
 	await h.settle();
 
-	// The proxy is asked with its own key; providers.dev gets no credentials, only provider names.
-	const proxy = h.requests.find((request) => request.url.startsWith("http://127.0.0.1:8317"));
-	assert.equal(proxy?.headers.authorization, "Bearer proxy-key");
-	const public_ = h.requests.filter((request) => request.url.startsWith("https://providers.dev/"));
+	// providers.dev gets no credentials, only provider names.
+	const public_ = h.requests;
 	assert.ok(public_.length > 1);
 	for (const request of public_) assert.equal(Object.keys(request.headers).some((name) => name.toLowerCase() === "authorization"), false);
 	assert.deepEqual(
@@ -193,7 +224,7 @@ test("a session start fetches the data, fills models.json, reloads the models an
 	assert.match(h.notices.join("\n"), /Model data from https:\/\/providers\.dev: 5 models updated/);
 	const saved = JSON.parse(readFileSync(storePath, "utf8"));
 	assert.equal(saved.datasetVersion, "d1");
-	assert.deepEqual(saved.owners.cliproxyapi["claude-opus-5-5"], "anthropic");
+	assert.deepEqual(saved.upstreams.cliproxyapi["claude-opus-5-5"], { upstreams: [{ provider: "anthropic" }] });
 	assert.deepEqual(Object.keys(saved.written).sort(), ["cliproxyapi", "openai-codex"]);
 });
 
@@ -203,9 +234,9 @@ test("the next session start asks nothing while the data is fresh; changing the 
 	await h.settle();
 	assert.deepEqual(h.requests, []);
 	assert.equal(h.statuses.get("cache-keeper-data"), "· sub or api · window ✓ · cache short ⚠ · long ? (in use) · price ✓ · ⚠ login or API key unknown: shorter values", "the saved data is shown at once");
-	h.handlers.get("model_select")!({}, { ...h.ctx, model: h.ctx.modelRegistry.find("openai-codex", "gpt-6.1-sol") });
+	h.select("openai-codex", "gpt-6.1-sol");
 	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✗ (in use) · price ✓");
-	h.handlers.get("model_select")!({}, { ...h.ctx, model: { provider: "openai-codex", id: "unknown-model", cost: priced, contextWindow: 1, maxTokens: 1 } });
+	h.select("openai-codex", "unknown-model");
 	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · providers.dev: no data for this model · cache in use: long");
 });
 
@@ -248,45 +279,55 @@ test("with modelData set to false, the values this extension wrote are taken out
 	writeFileSync(settingsPath, JSON.stringify({ cacheKeeper: { compactBeforeExpiry: false } }));
 });
 
-test("a CLIProxyAPI that lists its credentials: the values of the one it tries first, and a warning when another kind answered", async () => {
+test("a proxy extension that knows what serves its models: their values, fetched as soon as it says, and a warning when something else answered", async () => {
 	rmSync(storePath);
 	writeFileSync(modelsPath, "{}");
-	const h = harness({ proxyAccounts: true });
-	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
+	const h = harness();
+	h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
+	await h.settle();
+	// Nobody said where the proxy's models come from: nothing for them.
+	assert.equal(h.overrides().cliproxyapi, undefined);
+	assert.equal(h.statuses.get("cache-keeper-data"), "· api · providers.dev: no data for this model · cache in use: long");
+
+	// Said during the session: what is new to look up is fetched, models.json follows.
+	h.requests.length = 0;
+	h.emit("model-upstreams", SURE_ROUTES);
+	await h.settle();
 	const proxy = h.overrides().cliproxyapi.modelOverrides;
 	// The Claude login keeps the cache for an hour, both tiers; the Codex login has a 5-minute short lifetime.
 	assert.deepEqual(proxy["claude-opus-5-5"], { promptCache: { short: 3600, long: 3600 } });
 	assert.deepEqual(proxy["gpt-6.1-sol"], { contextWindow: 922_000, promptCache: { short: 300 } });
 	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✗ (in use) · price ✓", "no guess, so no warning");
-	assert.ok(
-		h.requests.some((request) => request.url.includes("/entries?provider=anthropic")),
-		"the API key's values are fetched too, for when a key answers",
-	);
+	assert.ok(h.requests.some((request) => request.url.includes("/entries?provider=openai")), "what the proxy falls back to is fetched too");
+	// The same again changes nothing and asks nothing.
+	h.requests.length = 0;
+	h.emit("model-upstreams", JSON.parse(JSON.stringify(SURE_ROUTES)));
+	await h.settle();
+	assert.deepEqual(h.requests, []);
 
 	// Opus on the proxy: the login's hour.
-	const opus = h.ctx.modelRegistry.find("cliproxyapi", "claude-opus-5-5")!;
-	h.handlers.get("model_select")!({}, { ...h.ctx, model: opus });
-	const onOpus = { ...h.ctx, model: opus };
+	h.select("cliproxyapi", "claude-opus-5-5");
 	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✓ (in use) · price ✓");
 	// An answer from the login changes nothing; one from an API key (the login failed or is cooling down) is warned
 	// about, and the countdown follows the key's 5 minutes.
-	h.handlers.get("after_provider_response")!({ status: 200, headers: { "x-cpa-auth-kind": "oauth" } }, onOpus);
+	const answered = (upstreams: unknown[], model = "claude-opus-5-5", provider = "cliproxyapi") => h.emit("model-upstreams:answered", { provider, model, upstreams });
+	answered([login("anthropic")]);
 	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✓ (in use) · price ✓");
-	h.handlers.get("after_provider_response")!({ status: 200, headers: { "x-cpa-auth-kind": "apikey" } }, onOpus);
+	answered([key("anthropic")]);
 	assert.equal(h.statuses.get("cache-keeper-data"), "· api · window ✓ · cache short ✓ · long ✓ (in use) · price ✓ · ⚠ answered by an API key");
 	// With Pi's short retention the key's cache lasts 5 minutes, the login's an hour.
 	const retention = process.env.PI_CACHE_RETENTION;
 	process.env.PI_CACHE_RETENTION = "short";
 	try {
 		h.notices.length = 0;
-		await h.commands.get("cache-keeper")!("", onOpus);
+		await h.commands.get("cache-keeper")!("", h.ctx);
 		assert.match(h.notices.at(-1)!, /cache: .*\(lifetime 5 min, declared by the model\)/);
 		assert.match(h.notices.at(-1)!, /model data: claude-subscription\/claude-opus-5-5: .*; the last answer came from an API key: anthropic\/claude-opus-5-5: .*short cache 5 min/);
 	} finally {
 		if (retention === undefined) delete process.env.PI_CACHE_RETENTION;
 		else process.env.PI_CACHE_RETENTION = retention;
 	}
-	h.handlers.get("after_provider_response")!({ status: 200, headers: { "X-CPA-Auth-Kind": "oauth" } }, onOpus);
+	answered([login("anthropic")]);
 	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✓ (in use) · price ✓");
 	// Pi asks for the long tier (the default setting); Anthropic says it wrote the short one: the footer follows.
 	h.branch.push({
@@ -294,15 +335,49 @@ test("a CLIProxyAPI that lists its credentials: the values of the one it tries f
 		id: "r1",
 		parentId: null,
 		timestamp: "",
-		message: { role: "assistant", content: [], timestamp: 1, stopReason: "stop", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 500, cacheWrite1h: 0 } },
+		message: {
+			role: "assistant",
+			provider: "cliproxyapi",
+			model: "claude-opus-5-5",
+			content: [],
+			timestamp: 1,
+			stopReason: "stop",
+			usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 500, cacheWrite1h: 0 },
+		},
 	});
-	h.handlers.get("agent_settled")!({}, onOpus);
+	h.handlers.get("agent_settled")!({}, h.ctx);
 	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ (in use) · long ✓ · price ✓");
 	h.branch.length = 0;
-	h.handlers.get("agent_settled")!({}, onOpus);
-	// A model of another provider is not affected.
-	h.handlers.get("after_provider_response")!({ status: 200, headers: { "x-cpa-auth-kind": "apikey" } }, { ...h.ctx, model: h.ctx.modelRegistry.find("anthropic", "claude-opus-5-5") });
+	h.handlers.get("agent_settled")!({}, h.ctx);
+	// What answered for another model does not touch this one; a new model starts without one.
+	answered([key("anthropic")], "claude-opus-5-5", "anthropic");
 	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✓ (in use) · price ✓");
+	answered([key("anthropic")]);
+	h.select("cliproxyapi", "claude-opus-5-5");
+	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✓ (in use) · price ✓");
+});
+
+test("routes said while a refresh runs: what they add is fetched when it ends, once", async () => {
+	rmSync(storePath);
+	writeFileSync(modelsPath, "{}");
+	const h = harness();
+	h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
+	// The proxy extension answers the request while the first refresh is still asking providers.dev.
+	h.emit("model-upstreams", SURE_ROUTES);
+	await h.settle();
+	await h.settle();
+	const asked = h.requests.map((request) => new URL(request.url).searchParams.get("provider")).filter(Boolean);
+	assert.ok(asked.includes("devin") && asked.includes("openai"), `fetched: ${asked.join(", ")}`);
+	assert.deepEqual(h.overrides().cliproxyapi.modelOverrides["devin/swe-2"], { contextWindow: 300_499 });
+	assert.equal(h.notices.filter((notice) => notice.startsWith("Model data from")).length, 2, "one notice per refresh");
+	// Offline, a refresh that fails is not tried again and again.
+	h.requests.length = 0;
+	h.state.online = false;
+	h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
+	h.emit("model-upstreams", { provider: "cliproxyapi", models: { x: { upstreams: [{ provider: "nowhere", subscription: false }] } } });
+	await h.settle();
+	await h.settle();
+	assert.ok(h.requests.length <= 3, `asked ${h.requests.length} times`);
 });
 
 test("nothing is fetched on its own in PI_OFFLINE mode or without a UI, and models.json with comments is left alone", async () => {

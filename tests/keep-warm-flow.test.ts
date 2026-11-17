@@ -18,6 +18,7 @@ function harness() {
 	const pi = {
 		on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(event, handler),
 		registerEntryRenderer: () => {},
+		events: { on: () => () => {}, emit: () => {} },
 		registerCommand: () => {},
 		appendEntry: () => {},
 		getThinkingLevel: () => "high",
