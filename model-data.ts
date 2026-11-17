@@ -289,42 +289,55 @@ const PROXY_CREDENTIALS: Record<string, { oauth?: string; apikey?: string }> = {
 	"openai-compatible-openrouter": { apikey: "openrouter" },
 };
 
-const providerOfAccount = (account: ProxyAccount | undefined): string | undefined =>
-	account ? PROXY_CREDENTIALS[account.provider]?.[account.kind as "oauth" | "apikey"] : undefined;
+const providerOfAccount = (account: ProxyAccount): string | undefined => PROXY_CREDENTIALS[account.provider]?.[account.kind as "oauth" | "apikey"];
+
+/**
+ * The credentials a proxy may answer with: those at the highest priority (CLIProxyAPI uses the highest priority that is
+ * free and picks among the credentials sharing it, round-robin by default), or of the kind that answered.
+ */
+function likelyAccounts(access: Access): ProxyAccount[] {
+	const accounts = access.servedKind ? (access.accounts ?? []).filter((one) => one.kind === access.servedKind) : (access.accounts ?? []);
+	if (accounts.length === 0) return [];
+	const top = Math.max(...accounts.map((one) => one.priority));
+	return accounts.filter((one) => one.priority === top);
+}
 
 /**
  * The providers.dev entries that can describe a pi model. One entry means the access method is known; several mean
- * it is one of them (see mergeFacts). Through CLIProxyAPI: `devin/…` is Devin and `lab/model` is OpenRouter. A plain
- * name is looked up under the credential the proxy tries first (or, when `servedKind` is given, the first credential
- * of that kind); a proxy that does not list its credentials leaves both the lab's subscription login and its API key.
+ * it is one of them (see mergeFacts).
+ *
+ * Through CLIProxyAPI the model's name says nothing about who serves it (any OpenAI-compatible entry can use
+ * `lab/model`, a login can have an alias), so it goes by the proxy's credential list: the credentials it may answer
+ * with (see likelyAccounts). A proxy that does not list them leaves `devin/…` (CLIProxyAPI's own prefix for Devin) and,
+ * for a plain name, the lab its model list names, by subscription login and by API key.
  */
 export function lookupsFor(model: { provider: string; id: string }, access: Access = {}): Lookup[] {
 	if (!access.proxy) {
 		const providers = (access.subscription ? SUBSCRIPTION_PROVIDERS[model.provider] : undefined) ?? [model.provider];
 		return providers.map((provider) => ({ provider, model: model.id }));
 	}
-	const slash = model.id.indexOf("/");
-	if (model.id.startsWith("devin/")) return [{ provider: "devin", model: model.id.slice("devin/".length) }];
-	if (slash > 0) return [{ provider: "openrouter", model: model.id }];
 	if (access.accounts && access.accounts.length > 0) {
-		const account = access.servedKind ? access.accounts.find((one) => one.kind === access.servedKind) : access.accounts[0];
-		const provider = providerOfAccount(account);
-		return provider ? [{ provider, model: model.id }] : [];
+		const providers = likelyAccounts(access).map(providerOfAccount);
+		// A credential providers.dev has no provider for may answer: nothing is known.
+		if (providers.length === 0 || providers.some((provider) => provider === undefined)) return [];
+		// OpenRouter's names are `lab/model`; nobody else's have a slash, so one there is a prefix the proxy added.
+		const unprefixed = model.id.slice(model.id.lastIndexOf("/") + 1);
+		return [...new Set(providers as string[])].map((provider) => ({ provider, model: provider === "openrouter" ? model.id : unprefixed }));
 	}
-	if (!access.ownedBy) return [];
+	if (model.id.startsWith("devin/")) return [{ provider: "devin", model: model.id.slice("devin/".length) }];
+	if (model.id.includes("/") || !access.ownedBy) return [];
 	return (PROXY_OWNERS[access.ownedBy] ?? [access.ownedBy]).map((provider) => ({ provider, model: model.id }));
 }
 
 /** How a model is reached: a subscription login ("sub"), an API key ("api"), or either (a proxy that does not say). */
 export type Via = "sub" | "api" | "sub or api";
 
-/** For a proxy model, the credential that answered, else the one the proxy tries first. */
-export function accessVia(model: { provider: string; id: string }, access: Access = {}): Via {
+/** For a proxy model: the kind that answered, else the kinds it may answer with; a proxy that does not list them says nothing. */
+export function accessVia(_model: { provider: string; id: string }, access: Access = {}): Via {
 	if (!access.proxy) return access.subscription ? "sub" : "api";
-	const kind = access.servedKind ?? access.accounts?.[0]?.kind;
-	if (kind) return kind === "apikey" ? "api" : "sub";
-	if (model.id.startsWith("devin/")) return "sub";
-	return model.id.indexOf("/") > 0 ? "api" : "sub or api";
+	const kinds = new Set(likelyAccounts(access).map((one) => one.kind));
+	if (kinds.size !== 1) return "sub or api";
+	return kinds.has("apikey") ? "api" : "sub";
 }
 
 export const isProxyProvider = (providerId: string, displayName?: string): boolean => providerId === PROXY_PROVIDER_ID || displayName === PROXY_PROVIDER_NAME;

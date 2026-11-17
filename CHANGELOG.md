@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.3] - 2026-11-17
+
+### Changed
+- **Nothing is assumed about how a CLIProxyAPI is set up** — The values are those of all the credentials at the highest priority, not of the first one listed: CLIProxyAPI picks among the credentials sharing the highest free priority (round-robin by default; with no priority set, all share 0). When those mix logins and keys, the footer says `sub or api` and the smaller values are used. The warning for an answer from another kind compares with that group.
+- **Model names no longer decide** — Through a CLIProxyAPI that lists its credentials, only the list decides; a prefix the proxy puts before a credential's models is left out of the lookup. Through one that doesn't, the footer says `sub or api`, and names with a slash other than `devin/…` are no longer taken for OpenRouter.
+
 ## [0.3.2] - 2026-11-17
 
 ### Added

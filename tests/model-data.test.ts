@@ -105,7 +105,8 @@ test("a pi model is looked up under the provider and access method it is reached
 	assert.equal(isProxyProvider("openai", "OpenAI"), false);
 	const proxy = (id: string, ownedBy?: string) => lookupsFor({ provider: "cliproxyapi", id }, { proxy: true, ownedBy });
 	assert.deepEqual(proxy("devin/swe-2", "cognition"), [{ provider: "devin", model: "swe-2" }]);
-	assert.deepEqual(proxy("openai/gpt-6.1-sol", "openai"), [{ provider: "openrouter", model: "openai/gpt-6.1-sol" }]);
+	// A name with a slash says nothing about who serves it: any OpenAI-compatible entry, a login with an alias...
+	assert.deepEqual(proxy("openai/gpt-6.1-sol", "openai"), []);
 	// A plain name: the lab's subscription login or its API key; the proxy's model list does not say which.
 	assert.deepEqual(proxy("claude-opus-5-5", "anthropic").map((one) => one.provider), ["claude-subscription", "anthropic"]);
 	assert.deepEqual(proxy("gpt-6.1-sol", "openai").map((one) => one.provider), ["openai-codex", "openai"]);
@@ -377,6 +378,25 @@ test("with the proxy's credential list, a plain name is looked up under the cred
 	assert.deepEqual(proxy("x", { accounts: [{ provider: "something-new", kind: "oauth", priority: 0 }] }), [], "a credential with no providers.dev provider");
 	// Prefixed names keep their own provider.
 	assert.deepEqual(proxy("devin/swe-2", { accounts: [{ provider: "devin", kind: "oauth", priority: -20 }] }), [{ provider: "devin", model: "swe-2" }]);
+	// The list decides, not the name: a slash name a Claude login serves, an OpenRouter model.
+	// A prefix CLIProxyAPI puts before a credential's models ("team/claude-opus-5-5") is not part of the model's name.
+	assert.deepEqual(proxy("team/claude-opus-5-5", { accounts: [accounts[0]] }), [{ provider: "claude-subscription", model: "claude-opus-5-5" }]);
+	assert.deepEqual(proxy("anthropic/claude-opus-5-5", { accounts: [accounts[0]] }), [{ provider: "claude-subscription", model: "claude-opus-5-5" }]);
+	const openrouter = { provider: "openai-compatible-openrouter", kind: "apikey", priority: 0 };
+	assert.deepEqual(proxy("openai/gpt-6.1-sol", { accounts: [openrouter] }), [{ provider: "openrouter", model: "openai/gpt-6.1-sol" }]);
+
+	// CPA uses the highest priority that is free, and picks among the credentials sharing it (round-robin by default).
+	// Nothing set means every credential sits at 0: a login and a key then take turns, so both are possible.
+	const login0 = { ...accounts[0], priority: 0 };
+	const key0 = { ...accounts[1], priority: 0 };
+	assert.deepEqual(proxy("claude-opus-5-5", { accounts: [login0, key0] }).map((one) => one.provider), ["claude-subscription", "anthropic"]);
+	assert.deepEqual(proxy("claude-opus-5-5", { accounts: [login0, key0], servedKind: "apikey" }), [{ provider: "anthropic", model: "claude-opus-5-5" }]);
+	// Two logins at the top: one entry. A lower tier only counts when the proxy said that kind answered.
+	assert.deepEqual(proxy("claude-opus-5-5", { accounts: [accounts[0], { ...accounts[0], priority: -15 }, accounts[1]] }), [{ provider: "claude-subscription", model: "claude-opus-5-5" }]);
+	// A credential at the top with no providers.dev provider: it may answer, so nothing is known.
+	assert.deepEqual(proxy("claude-opus-5-5", { accounts: [login0, { provider: "openai-compatible-mine", kind: "apikey", priority: 0 }] }), []);
+	const mixed = findFacts(proxy("claude-opus-5-5", { accounts: [login0, key0] }), providers);
+	assert.equal(mixed.facts.short, 300, "the shorter of the login's hour and the key's 5 minutes");
 
 	const exact = findFacts(proxy("claude-opus-5-5"), providers);
 	assert.deepEqual({ short: exact.facts.short, long: exact.facts.long, assumed: exact.assumed, unsure: exact.unsure }, { short: 3600, long: 3600, assumed: [], unsure: [] });
@@ -408,12 +428,14 @@ test("a model is served by a subscription login or an API key: pi's own sign-in,
 	const login = { provider: "claude", kind: "oauth", priority: -15 };
 	const key = { provider: "claude", kind: "apikey", priority: -25 };
 	const proxy = (id: string, extra: Partial<Access> = {}) => accessVia({ provider: "cliproxyapi", id }, { proxy: true, ...extra });
-	assert.equal(proxy("claude-opus-5-5", { accounts: [login, key] }), "sub", "the one the proxy tries first");
+	assert.equal(proxy("claude-opus-5-5", { accounts: [login, key] }), "sub", "the highest priority");
 	assert.equal(proxy("claude-opus-5-5", { accounts: [login, key], servedKind: "apikey" }), "api", "the one that answered");
 	assert.equal(proxy("claude-opus-5-5", { accounts: [key] }), "api");
-	assert.equal(proxy("claude-opus-5-5"), "sub or api", "a proxy that does not list its credentials");
-	assert.equal(proxy("devin/swe-2"), "sub", "Devin is a login");
-	assert.equal(proxy("anthropic/claude-opus-5-5"), "api", "OpenRouter is a key");
+	assert.equal(proxy("claude-opus-5-5", { accounts: [{ ...login, priority: 0 }, { ...key, priority: 0 }] }), "sub or api", "both at the top take turns");
+	// A proxy that does not list its credentials: nothing is known, whatever the name.
+	assert.equal(proxy("claude-opus-5-5"), "sub or api");
+	assert.equal(proxy("devin/swe-2"), "sub or api");
+	assert.equal(proxy("anthropic/claude-opus-5-5"), "sub or api");
 });
 
 test("the facts of the fixture cover every field the extension reads", () => {

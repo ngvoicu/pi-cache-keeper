@@ -260,15 +260,18 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const foundFor = (ctx: ExtensionContext, model: Model<Api>, accessOf = accessReader(ctx)): Found => findFacts(lookupsFor(model, accessOf(model)), data.providers);
 
 	// The kind of credential ("oauth" or "apikey") that answered the last request to a proxy model, from CLIProxyAPI's
-	// X-CPA-AUTH-KIND response header. The values in models.json are those of the credential the proxy tries first;
-	// when another kind answered (the first one failed or is cooling down), its cache lifetime is the one that holds.
+	// X-CPA-AUTH-KIND response header. The values in models.json are those of the credentials at the highest priority;
+	// when they are not all of the kind that answered (they failed or are cooling down, or a login and a key take
+	// turns), the lifetime of the kind that answered is the one that holds.
 	let served: { provider: string; id: string; kind: string } | undefined;
 	const servedKindFor = (model: Model<Api> | undefined): string | undefined => {
 		if (!model || !served || served.provider !== model.provider || served.id !== model.id) return undefined;
-		const first = data.accounts[model.provider]?.[model.id]?.[0];
-		return first && first.kind !== served.kind ? served.kind : undefined;
+		const accounts = data.accounts[model.provider]?.[model.id];
+		if (!accounts || accounts.length === 0) return undefined;
+		const expected = accessVia(model, { proxy: true, accounts });
+		return expected !== (served.kind === "apikey" ? "api" : "sub") ? served.kind : undefined;
 	};
-	// The kind that answered the last request to this model, even when it is the one the proxy tries first.
+	// The kind that answered the last request to this model, even when it is one the values are for.
 	const servedOf = (model: Model<Api>): string | undefined => (served && served.provider === model.provider && served.id === model.id ? served.kind : undefined);
 	const servedModel = (model: Model<Api>): Model<Api> => {
 		const kind = servedKindFor(model);
