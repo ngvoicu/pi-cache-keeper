@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Documentation
+- **The README presents pi-cache-keeper as it is now** — It opens with what the extension does, a figure of the current card and footer, and a list of its features linking to their sections. A new section on the footer shows its states (the countdown, `sub` / `api` / `sub or api`, the model data marks, the ⚠ warnings) in one figure, and the commands section has figures of `/cache-keeper` and `/cache-keeper-settings` as they print today. The credit to Nico Bailon, his video and what was added since the fork are in their own section, "Origins and credit"; the card measured for the original extension stays under "What it costs", labelled as such. The figures are the extension's own output, from a run of the current code with sample data.
+- **Corrections** — The footer with no providers.dev entry reads `providers.dev: no data for this model · cache in use: …`, not only `cache in use: short`; `/cache-keeper` shows no `⏱` before the time left; Pi's ChatGPT login on `openai` gets the smaller of the login's and the API's values, marked `⚠`; keeping the cache warm doesn't work for Claude through pi-claude-bridge, which has no request to re-send.
+
 ## [0.4.0] - 2026-11-17
 
 ### Changed

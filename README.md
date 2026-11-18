@@ -1,47 +1,19 @@
 # pi-cache-keeper
 
-A Pi extension that makes the prompt cache pay off. It compacts by reading the prompt cache your session already built, so on big sessions it costs a fraction of Pi's compaction, and the summary is written from the full tool output instead of 2,000-character excerpts. It compacts when the context gets full or just before the cache expires, and it can keep the cache warm through a break. It also fills in what Pi doesn't know about a model (how much input it takes, how long its cache lasts, what it costs) from [providers.dev](https://providers.dev).
+A Pi extension that makes the prompt cache pay off. It compacts a session by reading the prompt cache the session already built, so on big sessions the summary costs a fraction of Pi's compaction and is written from the full tool output instead of 2,000-character excerpts. It compacts when the context gets full and just before the cache expires, it can keep the cache warm through a break, and it fills in what Pi doesn't know about a model (how much input it takes, how long its cache lasts, what it costs) from [providers.dev](https://providers.dev). The footer shows how long the cache stays warm, whether a subscription login or an API key serves the model, and what is known about it.
 
-pi-cache-keeper is based on [pi-cached-compaction](https://github.com/nicobailon/pi-cached-compaction) by Nico Bailon, released under the MIT licence. Compaction from the warm cache, the compaction card, the cache countdown, compacting before the cache expires and the longer cache are his work, and his commits are kept in this repository's history. Added here since then: compacting when the context is full (`compactAtPercent`) or at a token cap (`compactAtTokens`), a summary sized to the model's window, a settings menu, a cache countdown that says what it means for cost, keeping the cache warm while Pi is idle (`keepWarmMinutes`, off unless you set it), and each model's input window, cache lifetimes and prices from [providers.dev](https://providers.dev). This is a separate project; it is not maintained by Nico Bailon.
+![Pi after a compaction with pi-cache-keeper. The card reads "cached compaction (ctrl+o for details). 15:05:52 compact when full: cached, 99% of 904k from cache, 5k out, 41.6s, summary 9840 chars. vs Pi's compaction: 75% less, $0.59 instead of ~$2.4 (it sends ~451k tokens, none from cache). 15:06:34 saved, 903k tokens summarized." Below the editor, Pi's footer reads "~/project (main)", then the token totals and "claude-opus-5-5 • high", and on its last line "cache warm · 59m left · sub · window ✓ · cache short ✓ · long ✓ (in use) · price ✗".](media/overview.png)
 
-Nico Bailon's 78-second explainer of the original extension (it uses the old name):
+What it does:
 
-https://github.com/user-attachments/assets/04cec926-4eaa-411b-ad1c-33aba6109323
+- **Compacts from the warm cache.** The summary request repeats your conversation as it is and reads about 99% of it from the cache, and the summary sees all the tool output. [Compacting from the cache](#compacting-from-the-cache), [what it costs](#what-it-costs).
+- **Compacts when the context is full,** at 90% of the model's window by default or at a token cap you set, while a summary still fits. [More](#compacting-when-the-context-is-full).
+- **Compacts just before the cache expires** when you step away, so your next message doesn't pay to write the whole session again. [More](#compacting-before-the-cache-expires).
+- **Keeps the cache warm through a break,** for as long as you choose (off until you set it). [More](#keeping-the-cache-warm).
+- **Fills in model data from providers.dev:** input window, cache lifetimes and prices, written where Pi reads them. [More](#model-data-from-providersdev).
+- **Shows it in the footer:** the cache countdown, `sub` / `api`, what is known about the model, and a ⚠ when an answer came from another credential or a value is a guess. [The footer](#the-footer).
 
-![The cached compaction card in Pi: "07:42:48 /compact: cached, 99% of 667k from cache, 3k out, 29.5s, summary 5791 chars. vs Pi's compaction: 86% less, $0.19 instead of ~$1.4 (it sends ~328k tokens, none from cache). 07:42:48 saved, 666k tokens summarized." The footer below it reads "~/pi-subagents-app ⏱ 59m · claude-opus-5-5 · high".](media/card-667k.png)
-
-A real card from a 667k-token Opus 5.5 session, measured for the original extension: a subagent implementing a GitHub issue over 393 responses, replayed through pi-claude-bridge. Claude Code bills by subscription, so the bridge's own card compares tokens; the dollars here are the same token counts at Anthropic's API prices for Opus 5.5. Two things the card doesn't show:
-
-- **The summary saw all the tool output.** Pi's compaction would have cut 109 of the session's 521 tool results to 2,000 characters, which drops 61% of the tool output before the model reads it. That output was already in the cache, so reading all of it is part of the $0.19.
-- **The footer counts down to the expensive part.** At this size, letting the cache expire means your next message rewrites all 667k tokens, $5.33 at the 1-hour rate. If Pi is idle, the extension compacts 20 seconds before that.
-
-## Why this exists
-
-Pi's compaction swaps the system prompt, drops the tools, and flattens the messages into text. None of that matches what the provider has cached, so every token of the summary request is billed at full price.
-
-It also cuts every tool result down to its first 2,000 characters, and the bigger the session, the more that throws away. Long sessions do their work in long outputs: whole files, test runs, build logs. The summarizer sees only the start of each one, so it misses the bottom of the file and the failures listed at the end of the test run. In eleven sessions that passed 700k tokens, measured for the original extension, Pi's compaction would have shown it 35–57% of the tool output, leaving out 300k to 1M characters per session.
-
-![One 40 KB test run, as the summarizer sees it. Pi's compaction shows it the first 2,000 characters, and the failures are down at the end. pi-cache-keeper shows all of it, read from the cache.](media/test-run.png)
-
-This extension keeps the system prompt, the tools, and the messages as they are, and appends one instruction instead, as the next turn of the same conversation:
-
-![What each compaction sends. Pi's compaction: a summarizer prompt, then the older messages as text with tool output cut; nothing from cache. pi-cache-keeper: the tools, the system prompt and messages 1 to N, the same bytes as your last turn, plus a new "summarize this" instruction; about 99% from cache.](media/what-it-sends.png)
-
-The provider reads nearly all of it from the cache at about a tenth of the input price, and the model writing the summary sees the whole conversation, tool output included. The result looks like Pi's: its checkpoint format, its window of recent messages kept as they are, and the read and modified file lists carried forward.
-
-## vs Pi's compaction
-
-| | Pi's compaction | pi-cache-keeper |
-|---|---|---|
-| What it sends | the older messages as text, under its own system prompt | your conversation as it is, plus one instruction |
-| Prompt cache | not used | about 99% read from it at normal compaction sizes |
-| Tool output the summary sees | the first 2,000 characters of each result | all of it, read from the cache |
-| Cost | full price, for the older messages only | 0.1× for the whole session: less once there's a lot to summarize, more on small sessions ([numbers](#what-it-costs)) |
-| After a long break | your next message rewrites the whole expired cache | it compacts just before the cache expires, so there's much less to rewrite |
-| Cache lifetime | Pi's default (5 minutes on Anthropic) | 1 hour in interactive sessions, which Anthropic bills at 2× per write instead of 1.25× ([why](#compacting-before-the-cache-expires)) |
-| What you see | the summary | the summary, a card comparing the cost with Pi's compaction, and a cache countdown in the footer |
-
-Before sending, the extension checks that the request repeats your last one byte for byte up to the new part. When it can't prove that, Pi's own compaction runs as usual. (Claude through pi-claude-bridge is checked by the bridge instead; see [Providers](#providers).)
+pi-cache-keeper is based on pi-cached-compaction by Nico Bailon (MIT). Compaction from the warm cache, the compaction card, the countdown, compacting before expiry and the longer cache are his work; see [Origins and credit](#origins-and-credit).
 
 ## Install
 
@@ -58,26 +30,78 @@ Then run `/reload` (Pi loads extensions only at startup or on `/reload`). It nee
 - The commands are `/cache-keeper` and `/cache-keeper-settings` instead of `/cached-compaction` and `/cached-compaction-settings`.
 - The log is `~/.pi/agent/cache-keeper.jsonl`; the old `cached-compaction.jsonl` is left where it is and not read. Cards from earlier compactions still show in old sessions.
 
-## What you'll see
+## The footer
 
-**The card** at the top appears under the summary after each compaction. It's shown to you only, never sent to the model, and stays in the session after a resume. Its second line compares this compaction with what Pi's would have cost for the same messages: green when this one cost at least 5% less, amber when it cost at least 5% more, and "about the same" in between. Models with no price, like Claude Code's subscription models through pi-claude-bridge, get the comparison in tokens not read from the cache instead of dollars.
+The extension adds to the last line of Pi's footer: first the cache countdown, then what is known about the current model. In powerline-footer it shows in the `extension_statuses` segment.
 
-**Pi's side is an estimate,** since Pi's compaction never runs. The extension serializes the messages exactly as Pi's compaction would, then counts tokens at the rate the provider counted for this summary request, so it follows each model's tokenizer. In the original author's tests it came within 2–12% of what Pi's compaction actually sent, always a little high, so the card slightly overstates the saving.
+![The last line of Pi's footer in seven states. Warm: "cache warm · 59m left · sub · window ✓ · cache short ✓ · long ✓ (in use) · price ✗". The last 30 seconds, in the warning color: "cache warm · 0:25 left · api · window ✓ · cache short ✓ (in use) · long ✗ · price ✓". Expired, dimmed: "cache cold · next message full price". While a request runs, dimmed: "cache in use". No entry at providers.dev: "cache warm · 58m left · api · providers.dev: no data for this model · cache in use: long". Through a proxy that may use a login or an API key: "cache warm · 55m left · sub or api · window ✓ · cache short ⚠ · long ✓ (in use) · price ? · ⚠ login or API key unknown: shorter values". Through a proxy where an API key answered for a login's values: "cache warm · 4m left · api · window ✓ · cache short ✓ (in use) · long ✓ · price ✗ · ⚠ answered by an API key".](media/footer-states.png)
 
-**When the cache can't be used,** the card says why and what Pi's compaction did instead. Expand it with ctrl+o to see what the decision rested on:
+**The countdown** shows how long the cache has left. Sending a message restarts it. It reads `cache warm · 59m left` down to `cache warm · 0:25 left` (minutes, then minutes and seconds for the last two; in the warning color for the last 30 seconds), then `cache cold · next message full price`. A message sent while the cache is warm reads the conversation from the cache at a fraction of the price and restarts the countdown; after it goes cold, the next message pays full price to write the conversation again. While a request runs it reads `cache in use`, so the status keeps its place in the footer, and while [keeping the cache warm](#keeping-the-cache-warm) refreshes it, `cache warm · refreshing`.
 
-![The expanded card: "13:48:54 /compact: Pi's compaction, request field "reasoning" differs. cache: lifetime 30 min (OpenAI's minimum), 30 min left. last request: 4 s ago, 20 messages, 2k prompt tokens, 1 new since. request: thinking low, shared 12h prefix. last request had: {"effort":"high","summary":"auto"}. summary request had: {"effort":"low","summary":"auto"}. 13:48:59 Pi's compaction saved: 0% of 923 from cache, 384 out, $0.0003, summary 1243 chars. log: ~/.pi/agent/cache-keeper.jsonl"](media/card-fallback.png)
+The lifetime is the model's declared one (which [providers.dev](#model-data-from-providersdev) fills in for many models), else the cache tier the provider reports writing (Anthropic and pi-claude-bridge report it), else OpenAI's 30-minute minimum for GPT-5.6 and later, else Kimi K3's 5-minute or 1-hour option. Models with none of those show no countdown. `/cache-keeper` says which one it is.
 
-**The countdown** in the footer shows how long the cache has left. Sending a message restarts it, and it reads `cache warm · 59m left … cache warm · 0:25 left` (in the warning color for the last 30 seconds), then `cache cold · next message full price`. A message sent while the cache is warm reads the conversation from the cache at a fraction of the price and restarts the countdown; after it goes cold, the next message pays full price to write the conversation again. While a request runs it reads `cache in use`, so the status keeps its place in the footer. In powerline-footer it shows in the `extension_statuses` segment. The lifetime is the model's declared one, else the cache tier the provider reports writing (Anthropic and pi-claude-bridge report it), else OpenAI's 30-minute minimum for GPT-5.6 and later, else Kimi K3's 5-minute or 1-hour option. Models with none of those show no countdown.
+**What is known about the model** follows, while [model data](#model-data-from-providersdev) is on: `· sub · window ✓ · cache short ✓ · long ✓ (in use) · price ✗`.
 
-**`/cache-keeper`** shows the cache right now, whether the next compaction would take the cached path, the model data in use, and this session's log:
+| Part | Meaning |
+|---|---|
+| `sub`, `api`, `sub or api` | how the model is reached: a subscription login, an API key, or not known (either may answer). Through a proxy it is what answered last, else what the proxy's extension says serves the model ([below](#through-a-proxy)). Claude through pi-claude-bridge shows none |
+| `window`, `cache short`, `long`, `price` | the input window, the two cache lifetimes and the prices |
+| `✓` (green) | found |
+| `✗` (dim) | not in the data |
+| `⚠` (warning color) | a guess: the smaller of values that differ, because it isn't known whether a login or an API key serves the model |
+| `?` (warning color) | found for some of the possible credentials but not all, or prices that differ: not used |
+| `(in use)` | the cache tier in use: the one the model's last answer says it wrote (Anthropic tells), else the one Pi asks for (`cacheRetention`) |
+| `providers.dev: no data for this model · cache in use: long` | providers.dev has no entry for the model; the tier in use is still shown |
 
-![The output of /cache-keeper: "pi-cache-keeper · opencode-go/gpt-6-luna. cache: ⏱ 29m left (lifetime 30 min, OpenAI's minimum). next compaction: cached path; last request 4 s ago with 186 messages, 1 since. The request prefix is checked when it runs. before expiry: on, from 50k tokens of context · retention long. log: ~/.pi/agent/cache-keeper.jsonl. This session: 23:43:49 /compact: cached, 99% of 50k from cache, 2k out, 11.3s, summary 3263 chars. vs Pi's compaction: 62% less, $0.0013 instead of ~$0.0035 (it sends ~27k tokens, none from cache). 23:43:49 saved, 49k tokens summarized."](media/status-command.png)
+A warning at the end of the line says when the values may not hold:
 
-**The log.** Every decision is also appended to `~/.pi/agent/cache-keeper.jsonl`, which moves to `.1` past 5 MB. Each line records what triggered the compaction, the path it took and why, the request settings, the provider's cache usage, the estimate for Pi's compaction, and the timing. When the request didn't match, it includes up to 200 characters of each version around the first difference. The log stays on your machine.
+- `⚠ login or API key unknown: shorter values`: some values are guesses (`⚠`), because the model may be served by a login or an API key.
+- `⚠ no entry for this login: shorter values`: the same for a login providers.dev has no entry of its own for (Pi's ChatGPT login on `openai`).
+- `⚠ answered by an API key` (or `a login`, or `another account`): through a proxy, the last answer came from another kind of credential than the values are for. The countdown then follows the lifetime of what answered.
 
-```sh
-jq -c 'select(.event == "compact") | {at, trigger, outcome, reason, cacheRead: .response.usage.cacheRead, piEstimate}' ~/.pi/agent/cache-keeper.jsonl
+## Commands
+
+| Command | What it does |
+|---|---|
+| `/cache-keeper` | shows the cache right now, whether the next compaction would read it, the settings in effect, the model data in use, and this session's log |
+| `/cache-keeper-settings` | opens the settings menu; outside the TUI it lists the settings |
+| `/cache-keeper-refresh` | fetches the model data from providers.dev now, puts it into Pi's `models.json`, and says how many models changed and what the current model got (see [Model data](#model-data-from-providersdev)) |
+| `/compact` | Pi's own command; it goes through the cached path too |
+
+**`/cache-keeper`**:
+
+![The output of /cache-keeper: "pi-cache-keeper · anthropic/claude-opus-5-5. cache: 59m left (lifetime 60 min, declared by the model). next compaction: cached path; last request 4 s ago with 185 messages, 1 since. The request prefix is checked when it runs. when full: at 90%: 900k of 1000k on anthropic/claude-opus-5-5, leaving 96k for the summary. keep warm: for 2 h after Pi goes idle, from 140k tokens of context. before expiry: on, from 140k tokens of context · retention long. model data: claude-subscription/claude-opus-5-5: window 1,000,000, short cache 1 h, long cache 1 h (https://providers.dev, checked 180 min ago; /cache-keeper-refresh fetches it again). settings: /cache-keeper-settings. log: ~/.pi/agent/cache-keeper.jsonl. This session: 15:05:52 compact when full: cached, 99% of 904k from cache, 5k out, 41.6s, summary 9840 chars. vs Pi's compaction: 75% less, $0.59 instead of ~$2.4 (it sends ~451k tokens, none from cache). 15:06:34 saved, 903k tokens summarized. 16:36:52 kept the cache warm, idle 57 min: 99% of 411k from cache, 1 out, $0.21."](media/status-command.png)
+
+The `model data` line names the providers.dev entry that describes the model and what it gave. When a guess is in use it says which values are the smaller of the login's and the API key's, and which were not used; when another kind of credential answered, it gives that one's values too.
+
+**`/cache-keeper-settings`**:
+
+![The settings menu: "pi-cache-keeper saved to cacheKeeper in ~/.pi/agent/settings.json". Rows: Compact when the context is 90%, Or once it holds off, Compact before the cache expires on, Keep the cache warm when idle 2 h, Before expiry, only from 140k, Cache retention long, Model data from providers.dev on. Under them, the description of the selected row: "After a turn, once the context fills this share of the model's window, compact from the warm cache so the summary still fits beside it. Now at 90%: 900k of 1000k on anthropic/claude-opus-5-5, leaving 96k for the summary." Then "Enter/Space to change · Esc to cancel".](media/settings-menu.png)
+
+Each row maps to a setting below. The menu describes the selected row, and for "Compact when the context is" it works out where that falls on the current model.
+
+The figures on this page are the extension's own output, from a run of the current code with sample sessions and sample providers.dev values.
+
+## Settings
+
+Run `/cache-keeper-settings` to change them in a menu; changes are saved to the `cacheKeeper` key in `~/.pi/agent/settings.json` and apply right away. You can also edit that key by hand. When there is no `cacheKeeper` key, the `cachedCompaction` key of pi-cached-compaction is read instead, unchanged. Project settings files don't apply to it, and an unknown key is an error.
+
+| Setting | Menu | Default | What it does |
+|---|---|---|---|
+| `compactAtPercent` | Compact when the context is | `90` | after a turn, compact once the context fills this share of the model's window; `0` turns it off |
+| `compactAtTokens` | Or once it holds | `0` | also compact once the context holds this many tokens, on any model, whichever comes first; `0` turns it off |
+| `compactBeforeExpiry` | Compact before the cache expires | `true` | compact 20 s before the cache expires, when idle |
+| `minContextTokens` | Before expiry, only from | `140000` | the smallest context worth keeping warm or compacting before expiry |
+| `keepWarmMinutes` | Keep the cache warm when idle | `0` | keep the cache warm for this many minutes after Pi goes idle (up to 1440); `0` turns it off |
+| `cacheRetention` | Cache retention | `"long"` | ask for the longer cache in interactive sessions (2× writes on Anthropic and Kimi); `"short"` keeps Pi's default |
+| `modelData` | Model data from providers.dev | `true` | read each model's input window, cache lifetimes and prices from providers.dev and put them into Pi's `models.json`; `false` takes them out again |
+
+```json
+{
+  "cacheKeeper": {
+    "compactBeforeExpiry": false
+  }
+}
 ```
 
 ## Common tasks
@@ -93,40 +117,51 @@ jq -c 'select(.event == "compact") | {at, trigger, outcome, reason, cacheRead: .
 | Compact before expiry only on bigger sessions | raise `minContextTokens` |
 | Keep the cache warm through a long break | "Keep the cache warm when idle" (`keepWarmMinutes`), see [Keeping the cache warm](#keeping-the-cache-warm) |
 | Keep Pi's 5-minute cache and its 1.25× writes on Anthropic | `"cacheRetention": "short"` |
-| See what is known about the current model | the footer: `· window ✓ · cache short ✓ · long ✗ · price ✓` (see [Model data](#model-data-from-providersdev)) |
+| See what is known about the current model | the footer (see [The footer](#the-footer)), or the `model data` line of `/cache-keeper` |
 | Fetch the model data again now | `/cache-keeper-refresh` |
 | Get the countdown on a model providers.dev has no lifetime for | declare one with Pi's `modelOverrides.promptCache` |
-| Look through past decisions | the `jq` line under [What you'll see](#what-youll-see) |
+| Look through past decisions | the `jq` line under [The compaction card and the log](#the-compaction-card-and-the-log) |
 
-## Commands
+## Compacting from the cache
 
-| Command | What it does |
-|---|---|
-| `/cache-keeper` | shows the cache right now, whether the next compaction would read it, the settings in effect, the model data in use, and this session's log |
-| `/cache-keeper-settings` | opens the settings menu; outside the TUI it lists the settings |
-| `/cache-keeper-refresh` | fetches the model data from providers.dev now and puts it into Pi's `models.json` (see [Model data](#model-data-from-providersdev)) |
-| `/compact` | Pi's own command; it goes through the cached path too |
+Pi's compaction swaps the system prompt, drops the tools, and flattens the messages into text. None of that matches what the provider has cached, so every token of the summary request is billed at full price.
 
-## Settings
+It also cuts every tool result down to its first 2,000 characters, and the bigger the session, the more that throws away. Long sessions do their work in long outputs: whole files, test runs, build logs. The summarizer sees only the start of each one, so it misses the bottom of the file and the failures listed at the end of the test run. In eleven sessions that passed 700k tokens, measured for the original extension, Pi's compaction would have shown it 35–57% of the tool output, leaving out 300k to 1M characters per session.
 
-Run `/cache-keeper-settings` to change them in a menu; changes are saved to the `cacheKeeper` key in `~/.pi/agent/settings.json` and apply right away. You can also edit that key by hand. When there is no `cacheKeeper` key, the `cachedCompaction` key of pi-cached-compaction is read instead, unchanged. Project settings files don't apply to it, and an unknown key is an error.
+![One 40 KB test run, as the summarizer sees it. Pi's compaction shows it the first 2,000 characters, and the failures are down at the end. pi-cache-keeper shows all of it, read from the cache.](media/test-run.png)
 
-| Setting | Default | What it does |
+This extension keeps the system prompt, the tools, and the messages as they are, and appends one instruction instead, as the next turn of the same conversation:
+
+![What each compaction sends. Pi's compaction: a summarizer prompt, then the older messages as text with tool output cut; nothing from cache. pi-cache-keeper: the tools, the system prompt and messages 1 to N, the same bytes as your last turn, plus a new "summarize this" instruction; about 99% from cache.](media/what-it-sends.png)
+
+The provider reads nearly all of it from the cache at about a tenth of the input price, and the model writing the summary sees the whole conversation, tool output included. The result looks like Pi's: its checkpoint format, its window of recent messages kept as they are, and the read and modified file lists carried forward.
+
+| | Pi's compaction | pi-cache-keeper |
 |---|---|---|
-| `compactAtPercent` | `90` | after a turn, compact once the context fills this share of the model's window; `0` turns it off |
-| `compactAtTokens` | `0` | also compact once the context holds this many tokens, on any model, whichever comes first; `0` turns it off |
-| `compactBeforeExpiry` | `true` | compact 20 s before the cache expires, when idle |
-| `minContextTokens` | `140000` | the smallest context worth keeping warm or compacting before expiry |
-| `keepWarmMinutes` | `0` | keep the cache warm for this many minutes after Pi goes idle; `0` turns it off |
-| `cacheRetention` | `"long"` | ask for the longer cache in interactive sessions (2× writes on Anthropic and Kimi); `"short"` keeps Pi's default |
-| `modelData` | `true` | read each model's input window, cache lifetimes and prices from providers.dev and put them into Pi's `models.json`; `false` takes them out again |
+| What it sends | the older messages as text, under its own system prompt | your conversation as it is, plus one instruction |
+| Prompt cache | not used | about 99% read from it at normal compaction sizes |
+| Tool output the summary sees | the first 2,000 characters of each result | all of it, read from the cache |
+| Cost | full price, for the older messages only | 0.1× for the whole session: less once there's a lot to summarize, more on small sessions ([numbers](#what-it-costs)) |
+| After a long break | your next message rewrites the whole expired cache | it compacts just before the cache expires, so there's much less to rewrite |
+| Cache lifetime | Pi's default (5 minutes on Anthropic) | 1 hour in interactive sessions, which Anthropic bills at 2× per write instead of 1.25× ([why](#compacting-before-the-cache-expires)) |
+| What you see | the summary | the summary, a card comparing the cost with Pi's compaction, and a cache countdown in the footer |
 
-```json
-{
-  "cacheKeeper": {
-    "compactBeforeExpiry": false
-  }
-}
+Before sending, the extension checks that the request repeats your last one byte for byte up to the new part. When it can't prove that, Pi's own compaction runs as usual. (Claude through pi-claude-bridge is checked by the bridge instead; see [Providers](#providers).) [How it works](#how-it-works) has the details.
+
+## The compaction card and the log
+
+**The card** appears under the summary after each compaction (see the figure at the top). It's shown to you only, never sent to the model, and stays in the session after a resume. Its second line compares this compaction with what Pi's would have cost for the same messages: green when this one cost at least 5% less, amber when it cost at least 5% more, and "about the same" in between. Models with no price, like Claude Code's subscription models through pi-claude-bridge, get the comparison in tokens not read from the cache instead of dollars.
+
+**Pi's side is an estimate,** since Pi's compaction never runs. The extension serializes the messages exactly as Pi's compaction would, then counts tokens at the rate the provider counted for this summary request, so it follows each model's tokenizer. In the original author's tests it came within 2–12% of what Pi's compaction actually sent, always a little high, so the card slightly overstates the saving.
+
+**When the cache can't be used,** the card says why and what Pi's compaction did instead. Expand it with ctrl+o to see what the decision rested on:
+
+![The expanded card: "13:48:54 /compact: Pi's compaction, request field "reasoning" differs. cache: lifetime 30 min (OpenAI's minimum), 30 min left. last request: 4 s ago, 20 messages, 2k prompt tokens, 1 new since. request: thinking low, shared 12h prefix. last request had: {"effort":"high","summary":"auto"}. summary request had: {"effort":"low","summary":"auto"}. 13:48:59 Pi's compaction saved: 0% of 923 from cache, 384 out, $0.0003, summary 1243 chars. log: ~/.pi/agent/cache-keeper.jsonl"](media/card-fallback.png)
+
+**The log.** Every decision is also appended to `~/.pi/agent/cache-keeper.jsonl`, which moves to `.1` past 5 MB: compactions, compacting when full or before expiry (or why not), cache refreshes, and model data fetches. Each compaction line records what triggered it, the path it took and why, the request settings, the provider's cache usage, the estimate for Pi's compaction, and the timing. When the request didn't match, it includes up to 200 characters of each version around the first difference. The log stays on your machine.
+
+```sh
+jq -c 'select(.event == "compact") | {at, trigger, outcome, reason, cacheRead: .response.usage.cacheRead, piEstimate}' ~/.pi/agent/cache-keeper.jsonl
 ```
 
 ## Compacting when the context is full
@@ -148,7 +183,7 @@ If you step away, the cache expires and your next message pays to write the whol
 - the context holds at least 140k tokens (`minContextTokens`),
 - and the cached path is available.
 
-Otherwise it does nothing and the cache cools. Models without a [countdown](#what-youll-see) never compact before expiry.
+Otherwise it does nothing and the cache cools. Models without a [countdown](#the-footer) never compact before expiry.
 
 The threshold is in tokens rather than percent because rewriting an expired cache costs in proportion to its size, and on 1M-token models a percentage would almost never trigger.
 
@@ -163,6 +198,7 @@ Pi can keep an idle cache warm itself (`cacheWarming: "idle"`), but only until 3
 - Pi is idle with nothing queued,
 - the context holds at least `minContextTokens`,
 - the cached path is available (the same check as compacting from the cache),
+- the last request can be re-sent as it was: Claude through pi-claude-bridge can't, since the extension never sees its request,
 - and the request doesn't use Claude's budget-based thinking, which keys the cache on the output limit. Adaptive thinking is fine.
 
 Each refresh reads the whole context from the cache: about a tenth of the input price on Anthropic. In one measured session, a refresh of a 692k-token Claude context cost $0.14, against about $6.90 to write it again at that model's cache-write price. On a subscription it is free but counts toward your usage. If a refresh fails, or reads less than 90% from the cache (the route behind a proxy may not cache), refreshing stops until your next message, and Pi shows a warning. A new message cancels a refresh in flight. Refreshes are listed in `/cache-keeper` and the log, and the footer shows `cache warm · refreshing` while one runs.
@@ -173,7 +209,7 @@ Pi's footer totals don't include these refreshes, since an extension can't add u
 
 Pi's model catalog doesn't say how long most providers keep a prompt cache, and for some models its input window is smaller than what the provider accepts. Without a lifetime there is no countdown, no compacting before expiry and no warming; with a window that is too small, Pi compacts long before it has to.
 
-[providers.dev](https://providers.dev) publishes both, with prices, for each model at each provider and access method (API key or subscription login), from the providers' documentation and from evaluations. The extension reads that and puts it into the `modelOverrides` of `~/.pi/agent/models.json`, the place Pi has for it. Pi's own warming and compaction then use the same numbers as the countdown here.
+[providers.dev](https://providers.dev) publishes both, with prices, for each model at each provider and access method (API key or subscription login), from the providers' documentation and from evaluations. The extension reads that and puts it into the `modelOverrides` of `~/.pi/agent/models.json`, the place Pi has for it. Pi's own warming and compaction then use the same numbers as the countdown here. [The footer](#the-footer) shows what was found for the current model, and `/cache-keeper` names the entry and the values.
 
 | Value | What is written |
 |---|---|
@@ -181,31 +217,33 @@ Pi's model catalog doesn't say how long most providers keep a prompt cache, and 
 | Cache lifetimes (`promptCache.short`, `promptCache.long`) | only for a tier Pi has no lifetime for. "No safe lifetime" is never declared |
 | Prices (`cost`, with a tier per context size) and output limit (`maxTokens`) | only where Pi has none |
 
-**The footer** shows what was found for the current model: `· sub · window ✓ · cache short ✓ (in use) · long ✗ · price ✓`. It starts with how the model is reached: `sub` (a subscription login), `api` (an API key), or `sub or api` (not known, or either may answer). Through a proxy that is what answered last, else what its extension says serves the model (below). `✓` is found, `✗` is not in the data, `⚠` is a guess (below) and `?` is found but not used. `(in use)` follows the cache tier in use: the one the last answer says it wrote (Anthropic tells), else the one Pi asks for (`cacheRetention`); with no data the footer says `cache in use: short`. A guess ends the footer with `⚠ login or API key unknown: shorter values` (or `⚠ no entry for this login: shorter values` for Pi's ChatGPT login on `openai`); an answer from another kind of credential than the values are for ends it with `⚠ answered by an API key` (or `a login`). `/cache-keeper` names the entry and the values.
-
 **What you should know before it changes how Pi behaves:**
 
 - A model that gets a cache lifetime also gets what comes with one: Pi's own warming (`cacheWarming` in Pi's settings) and this extension's countdown and compacting before expiry. A model with a 5-minute lifetime and a context over `minContextTokens` is compacted after about 5 idle minutes, unless Pi's warming or `keepWarmMinutes` keeps it warm.
 - A larger window means larger, more expensive requests before anything compacts. `compactAtTokens` caps that on every model.
 - Values you set in `models.json` yourself are never touched. The extension keeps a note of what it wrote (in `~/.pi/agent/cache-keeper-models.json`) and only updates or removes those values. If `models.json` has comments, it is left alone.
 
-**How a model is looked up.** A provider you signed in to with a subscription is looked up as that subscription (the Claude and Meta logins have entries of their own); with an API key, as the API. Pi's ChatGPT sign-in on the `openai` provider has no entry of its own, so it is treated like an unknown login or key (below).
+**How a model is looked up.** A provider you signed in to with a subscription is looked up as that subscription (the Claude and Meta logins have entries of their own); with an API key, as the API. Pi's ChatGPT sign-in on the `openai` provider has no entry of its own, so the login's and the API's values are both possible: the smaller is used and marked `⚠` (`⚠ no entry for this login: shorter values`).
 
-**Through a proxy** (one pi provider that serves models of many labs), a model can come from a subscription login or an API key, and the two can differ: a Claude login keeps a cache for an hour, a Claude API key for 5 minutes by default. This extension knows no proxy. At the start of a session it asks over pi's event bus (`pi.events`), and a proxy's own extension answers where each of its models comes from:
+### Through a proxy
+
+Through a proxy (one pi provider that serves models of many labs), a model can come from a subscription login or an API key, and the two can differ: a Claude login keeps a cache for an hour, a Claude API key for 5 minutes by default. This extension knows no proxy. At the start of a session it asks over pi's event bus (`pi.events`), and a proxy's own extension answers where each of its models comes from:
 
 - **`model-upstreams:request`** is sent by this extension.
-- **`model-upstreams`**: `{ provider, models: { [modelId]: { upstreams, fallbacks? } } }`. `upstreams` are what may serve the model (several: not known which), `fallbacks` what may answer when those fail. An upstream is `{ provider, model?, subscription? }`: the pi provider the model would come from if used directly (`anthropic`, `openai-codex`, `openrouter` …) or a providers.dev provider pi has none for (`devin`, `antigravity`); the model's id there when it differs; `true` for a subscription login, `false` for an API key, absent when not known. The last answer is saved, for the next start.
+- **`model-upstreams`**: `{ provider, models: { [modelId]: { upstreams, fallbacks? } } }`. `upstreams` are what may serve the model (several: not known which), `fallbacks` what may answer when those fail. An upstream is `{ provider, model?, subscription? }`: the pi provider the model would come from if used directly (`anthropic`, `openai-codex`, `openrouter` …) or a providers.dev provider pi has none for (`devin`, `antigravity`); the model's id there when it differs; `true` for a subscription login, `false` for an API key, absent when not known. The last answer is saved, for the next start; one that adds something to look up is fetched at once.
 - **`model-upstreams:answered`**: `{ provider, model, upstreams }`, what answered a request. When that is not what the values are for (the login failed or is cooling down, or a login and a key take turns), the footer warns (`⚠ answered by an API key`) and the countdown follows the lifetime of what answered. Pi's own warming keeps the values in `models.json`.
 
 A model is then looked up like the same model used directly. When several upstreams may serve it and their values differ, the smaller one is used (marked `⚠`); a value only some have is not used (`?`). A proxy model nobody spoke for gets no data. A shorter lifetime than the real one costs an early refresh or compaction; a longer one would let the cache expire unnoticed.
 
 [pi-cliproxyapi-provider](https://github.com/ngvoicu/pi-cliproxyapi-provider) answers for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
 
+### Fetching, privacy, turning it off
+
 **When it fetches.** At the start of an interactive session, when the saved data is a day old or Pi can use a provider there is no data for. One small request asks whether the dataset changed; only then are the providers you can use downloaded (a few dozen kilobytes). A failed fetch keeps the saved data. Nothing is fetched on its own in print or JSON mode or with `PI_OFFLINE` set. `/cache-keeper-refresh` fetches now.
 
 **What is sent.** The names of the providers Pi has credentials for, as query parameters to a public read-only API. No key, no account, nothing about your sessions or prompts.
 
-**Turning it off.** Set "Model data from providers.dev" to off in `/cache-keeper-settings` (`"modelData": false`). The values the extension wrote are taken out of `models.json`, which brings Pi's own back.
+**Turning it off.** Set "Model data from providers.dev" to off in `/cache-keeper-settings` (`"modelData": false`). The values the extension wrote are taken out of `models.json`, which brings Pi's own back, and the footer no longer shows the model data.
 
 ## Providers
 
@@ -259,7 +297,14 @@ Pi's compaction keeps the last 20k tokens as they are and sends only what's olde
 
 The part that isn't cached is the instruction (about 400–600 tokens, depending on the model) plus anything added since the last request. That stays about the same size, so the cached share grows with the session: in the original author's tests 83% on a 2k-token session, 95% at 10k and 99% at 44k. For auto-compaction on a 200k model it works out to 99.7%. Auto-compaction can also fire in the middle of a run. Then the latest tool results are new too, but at that size they're still a small share.
 
-Measured for the original extension, at the prices in Pi's model catalog. The Opus row is the session at the top, priced at Anthropic's API rates, and its Pi column is the card's estimate. The rest are GPT through opencode-go, where Pi's compaction was run too:
+![The cached compaction card as pi-cached-compaction showed it, measured for the original extension: "07:42:48 /compact: cached, 99% of 667k from cache, 3k out, 29.5s, summary 5791 chars. vs Pi's compaction: 86% less, $0.19 instead of ~$1.4 (it sends ~328k tokens, none from cache). 07:42:48 saved, 666k tokens summarized." The footer below it shows the original's countdown, "⏱ 59m", and "claude-opus-5-5 · high".](media/card-667k.png)
+
+A real card from a 667k-token Opus 5.5 session, measured for the original extension (the footer is the original's): a subagent implementing a GitHub issue over 393 responses, replayed through pi-claude-bridge. Claude Code bills by subscription, so the bridge's own card compares tokens; the dollars here are the same token counts at Anthropic's API prices for Opus 5.5. Two things the card doesn't show:
+
+- **The summary saw all the tool output.** Pi's compaction would have cut 109 of the session's 521 tool results to 2,000 characters, which drops 61% of the tool output before the model reads it. That output was already in the cache, so reading all of it is part of the $0.19.
+- **The footer counts down to the expensive part.** At this size, letting the cache expire means your next message rewrites all 667k tokens, $5.33 at the 1-hour rate. If Pi is idle, the extension compacts 20 seconds before that.
+
+Measured for the original extension, at the prices in Pi's model catalog. The Opus row is the session above, priced at Anthropic's API rates, and its Pi column is the card's estimate. The rest are GPT through opencode-go, where Pi's compaction was run too:
 
 | Session at compaction | Pi's compaction | pi-cache-keeper |
 |---|---|---|
@@ -274,7 +319,7 @@ Where the two cost about the same, the difference is in what the summary was wri
 
 ## How it works
 
-`/compact`, Pi's automatic compaction, and compacting before expiry all go through the same checks. The cached path is taken only when all four hold:
+`/compact`, Pi's automatic compaction, compacting when full and compacting before expiry all go through the same checks. The cached path is taken only when all four hold:
 
 1. Same model as the last request, and the conversation only grew since then. New messages and extension notices are fine. Edits, `/tree`, a model switch, or a context overflow are not.
 2. The last request used the cache, and the cache hasn't expired.
@@ -294,10 +339,29 @@ So the instruction quotes the first kept message as the model sees it (and says 
 ## Limitations
 
 - Without a known cache lifetime, the extension can't tell a cold cache from a warm one. A compaction after a long break then pays to rewrite the whole session. providers.dev fills in a lifetime where it has one ([Model data](#model-data-from-providersdev)); for other models, declare one with Pi's `modelOverrides.promptCache`.
-- Through pi-claude-bridge the extension can't check the request. If the bridge can't copy the whole Claude Code conversation, the summary is still correct but reads less from the cache, and the card shows the low cache share.
+- Through pi-claude-bridge the extension can't check the request. If the bridge can't copy the whole Claude Code conversation, the summary is still correct but reads less from the cache, and the card shows the low cache share. Keeping the cache warm doesn't work there.
 - Fields that extensions loaded before this one add to provider requests are copied into the summary request, such as codex-fast's `service_tier`. Changes from extensions loaded after it aren't seen, so the request can miss the cache. The summary is still correct, it just costs about what Pi's compaction would, and the card shows the low cache share.
 - When a later compaction falls back to Pi's own, its read and modified file lists start over. Pi doesn't carry the lists forward from an extension's compaction.
 - Right after a compaction, the card is the session's last entry. A second `/compact` then says "Nothing to compact (session too small)" instead of "Already compacted". Both mean there's nothing new to compact.
+
+## Origins and credit
+
+pi-cache-keeper is based on [pi-cached-compaction](https://github.com/nicobailon/pi-cached-compaction) by Nico Bailon, released under the MIT licence, starting from its 0.2.0 release. Compaction from the warm cache, the compaction card, the cache countdown, compacting before the cache expires and the longer cache are his work, and his commits are kept in this repository's history. His releases are kept in [CHANGELOG.md](CHANGELOG.md) as he wrote them, and [LICENSE](LICENSE) carries his copyright line beside this project's. This is a separate project; it is not maintained by Nico Bailon.
+
+Nico Bailon's 78-second explainer of the original extension (it uses the old name):
+
+https://github.com/user-attachments/assets/04cec926-4eaa-411b-ad1c-33aba6109323
+
+Added here since the fork (see [CHANGELOG.md](CHANGELOG.md)):
+
+- compacting when the context is full (`compactAtPercent`) or at a token cap (`compactAtTokens`), with a summary sized to the model's window
+- a settings menu (`/cache-keeper-settings`)
+- a cache countdown that says what it means for cost (`cache warm · 59m left`, `cache cold · next message full price`) and keeps its place during a request
+- keeping the cache warm while Pi is idle (`keepWarmMinutes`, off unless you set it)
+- each model's input window, cache lifetimes and prices from providers.dev, `/cache-keeper-refresh`, and the `modelData` setting
+- in the footer: what is known about the model, `sub` / `api` / `sub or api`, and the cache tier in use
+- warnings when an answer came from another kind of credential or values are guesses
+- the `model-upstreams` events a proxy's extension answers, such as pi-cliproxyapi-provider
 
 ## Documentation
 

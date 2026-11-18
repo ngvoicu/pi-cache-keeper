@@ -18,6 +18,10 @@ figure{margin:0 0 40px;width:960px}
 .term .bar span{margin-left:10px;font:12px/1 -apple-system,"Segoe UI",sans-serif;color:#7e888e}
 .term pre{margin:0;padding:14px 18px 16px;font:12px/1.6 "SF Mono",ui-monospace,Menlo,monospace;color:#dee0e1;white-space:pre}
 .acc{color:#a798d7}.mut{color:#9da5a9}.dim{color:#7e888e}.ok{color:#68b78d}.warn{color:#cd9a22}.rule{color:#5a6369}
+/* The footer's states: one caption and one status line each */
+.term .states{padding:6px 18px 14px}
+.term .states .cap{margin:10px 0 3px;font:11px/1.3 -apple-system,"Segoe UI",sans-serif;color:#7e888e}
+.term .states pre{padding:0;font-size:11px}
 
 /* Concept figures: the video's paper, type and colors */
 .paper{border-radius:8px;border:1px solid rgba(139,132,125,.5);padding:28px 36px 30px;color:#252f3d;font:16px/1 Departure,monospace;background-color:#ebe7e4;
@@ -46,6 +50,51 @@ figure{margin:0 0 40px;width:960px}
 .quote .mono{font:15px Departure,monospace;color:#8a5a12}
 </style></head>
 <body>
+
+<figure id="overview">
+<div class="term"><div class="bar"><i></i><i></i><i></i><span>pi</span></div>
+<pre> <span class="acc">cached compaction</span>  <span class="mut">(</span><span class="dim">ctrl+o</span><span class="mut"> for details</span><span class="mut">)</span>
+ 15:05:52 compact when full: cached, 99% of 904k from cache, 5k out, 41.6s, summary 9840 chars
+ <span class="ok">         vs Pi's compaction: 75% less, $0.59 instead of ~$2.4 (it sends ~451k tokens, none from cache)</span>
+ 15:06:34   saved, 903k tokens summarized
+
+<span class="rule"> ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</span>
+ <span class="acc">›</span> _
+<span class="rule"> ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</span>
+<span class="dim">~/project (main)</span>
+<span class="dim">↑900 ↓1.2k R411k W2.1k CH99.3% $0.260 (sub) 41.2%/1.0M (auto)</span><span class="dim">                                   claude-opus-5-5 • high</span>
+cache warm · 59m left · sub · window <span class="ok">✓</span> · cache short <span class="ok">✓</span> · long <span class="ok">✓</span> (in use) · price <span class="dim">✗</span></pre></div>
+</figure>
+
+<figure id="footer-states">
+<div class="term"><div class="bar"><i></i><i></i><i></i><span>pi · the footer's last line</span></div>
+<div class="states">
+<p class="cap">warm: a message now reads the conversation from the cache</p><pre>cache warm · 59m left · sub · window <span class="ok">✓</span> · cache short <span class="ok">✓</span> · long <span class="ok">✓</span> (in use) · price <span class="dim">✗</span></pre>
+<p class="cap">the last 30 seconds, in the warning color</p><pre><span class="warn">cache warm · 0:25 left</span> · api · window <span class="ok">✓</span> · cache short <span class="ok">✓</span> (in use) · long <span class="dim">✗</span> · price <span class="ok">✓</span></pre>
+<p class="cap">expired</p><pre><span class="dim">cache cold · next message full price</span> · sub · window <span class="ok">✓</span> · cache short <span class="ok">✓</span> · long <span class="ok">✓</span> (in use) · price <span class="dim">✗</span></pre>
+<p class="cap">while a request runs</p><pre><span class="dim">cache in use</span> · sub · window <span class="ok">✓</span> · cache short <span class="ok">✓</span> · long <span class="ok">✓</span> (in use) · price <span class="dim">✗</span></pre>
+<p class="cap">providers.dev has no entry for the model</p><pre>cache warm · 58m left · api · providers.dev: no data for this model · cache in use: long</pre>
+<p class="cap">through a proxy that may use a login or an API key: the smaller values</p><pre>cache warm · 55m left · sub or api · window <span class="ok">✓</span> · cache short <span class="warn">⚠</span> · long <span class="ok">✓</span> (in use) · price <span class="warn">?</span> · <span class="warn">⚠ login or API key unknown: shorter values</span></pre>
+<p class="cap">through a proxy: an API key answered for a login's values</p><pre>cache warm · 4m left · api · window <span class="ok">✓</span> · cache short <span class="ok">✓</span> (in use) · long <span class="ok">✓</span> · price <span class="dim">✗</span> · <span class="warn">⚠ answered by an API key</span></pre>
+</div></div>
+</figure>
+
+<figure id="settings-menu">
+<div class="term"><div class="bar"><i></i><i></i><i></i><span>pi · /cache-keeper-settings</span></div>
+<pre><span class="acc">pi-cache-keeper</span> <span class="dim">saved to cacheKeeper in ~/.pi/agent/settings.json</span>
+<span class="acc">→ </span><span class="acc">Compact when the context is     </span>  <span class="acc">90%</span>
+  Or once it holds                  <span class="mut">off</span>
+  Compact before the cache expires  <span class="mut">on</span>
+  Keep the cache warm when idle     <span class="mut">2 h</span>
+  Before expiry, only from          <span class="mut">140k</span>
+  Cache retention                   <span class="mut">long</span>
+  Model data from providers.dev     <span class="mut">on</span>
+
+<span class="dim">  After a turn, once the context fills this share of the model's window, compact from the warm cache so the summary</span>
+<span class="dim">  still fits beside it. Now at 90%: 900k of 1000k on anthropic/claude-opus-5-5, leaving 96k for the summary.</span>
+
+<span class="dim">  Enter/Space to change · Esc to cancel</span></pre></div>
+</figure>
 
 <figure id="card-667k">
 <div class="term"><div class="bar"><i></i><i></i><i></i><span>pi</span></div>
@@ -93,17 +142,24 @@ figure{margin:0 0 40px;width:960px}
 </figure>
 
 <figure id="status-command">
-<div class="term"><div class="bar"><i></i><i></i><i></i><span>pi</span></div>
-<pre class="dim"> pi-cache-keeper · opencode-go/gpt-6-luna
- cache: ⏱ 29m left (lifetime 30 min, OpenAI's minimum)
- next compaction: cached path; last request 4 s ago with 186 messages, 1 since. The request prefix is checked when it runs.
- before expiry: on, from 50k tokens of context · retention long
- log: ~/.pi/agent/cache-keeper.jsonl
-
- This session:
- 23:43:49 /compact: cached, 99% of 50k from cache, 2k out, 11.3s, summary 3263 chars
-          vs Pi's compaction: 62% less, $0.0013 instead of ~$0.0035 (it sends ~27k tokens, none from cache)
- 23:43:49   saved, 49k tokens summarized</pre></div>
+<div class="term"><div class="bar"><i></i><i></i><i></i><span>pi · /cache-keeper</span></div>
+<pre> <span class="dim">pi-cache-keeper · anthropic/claude-opus-5-5</span>
+ <span class="dim">cache: 59m left (lifetime 60 min, declared by the model)</span>
+ <span class="dim">next compaction: cached path; last request 4 s ago with 185 messages, 1 since. The request prefix is checked when it</span>
+ <span class="dim">runs.</span>
+ <span class="dim">when full: at 90%: 900k of 1000k on anthropic/claude-opus-5-5, leaving 96k for the summary</span>
+ <span class="dim">keep warm: for 2 h after Pi goes idle, from 140k tokens of context</span>
+ <span class="dim">before expiry: on, from 140k tokens of context · retention long</span>
+ <span class="dim">model data: claude-subscription/claude-opus-5-5: window 1,000,000, short cache 1 h, long cache 1 h</span>
+ <span class="dim">(https://providers.dev, checked 180 min ago; /cache-keeper-refresh fetches it again)</span>
+ <span class="dim">settings: /cache-keeper-settings</span>
+ <span class="dim">log: ~/.pi/agent/cache-keeper.jsonl</span>
+ 
+ <span class="dim">This session:</span>
+ <span class="dim">15:05:52 compact when full: cached, 99% of 904k from cache, 5k out, 41.6s, summary 9840 chars</span>
+ <span class="dim">         vs Pi's compaction: 75% less, $0.59 instead of ~$2.4 (it sends ~451k tokens, none from cache)</span>
+ <span class="dim">15:06:34   saved, 903k tokens summarized</span>
+ <span class="dim">16:36:52 kept the cache warm, idle 57 min: 99% of 411k from cache, 1 out, $0.21</span></pre></div>
 </figure>
 
 <figure id="summary-boundary">
