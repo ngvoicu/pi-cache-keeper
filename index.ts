@@ -81,7 +81,7 @@ import {
 	payloadThinking,
 	payloadTier,
 	REPLAYABLE_APIS,
-	statedLifetimes,
+	requestCache,
 	reserveFor,
 	spendingText,
 	wantsWarm,
@@ -129,16 +129,30 @@ interface CapturedRequest {
 	/** The timestamp of the answer to this request, when that answer read or wrote the cache (message_end). */
 	answeredAt?: number;
 	/**
-	 * The cache tier the request was sent for, recorded when it was captured: from the payload where it shows it
-	 * (payloadTier), else the retention in force at that instant. A setting changed later does not change it.
+	 * The cache tier the request was sent for, recorded when it was captured. On the APIs the extension re-sends, the
+	 * tier the request's own cache markers ask for (requestCache; none: the default cache, short); elsewhere, or when the
+	 * markers can't be read as one tier, from the payload where it shows it (payloadTier), else the retention in force at
+	 * that instant. A setting changed later does not change it.
 	 */
 	tier: "short" | "long";
+	/** What the request's cache markers ask for (requestCache), where the payload was seen. */
+	cache?: ReturnType<typeof requestCache>;
 	/** The extension's shared-prefix cache (a 12-hour prefix) was applied: the request carries two cache lifetimes. */
 	sharedPrefix?: boolean;
 }
 
 /** A cache lifetime under this cannot carry a refresh: Pi's own warming keeps such a session, if anything does. */
 const MIN_OWNED_LIFETIME_MS = 60_000;
+
+/**
+ * Lifetimes `cacheState` assumes for a model family rather than reads from the model's data, with the provider's own
+ * API they hold on. Elsewhere (a proxy, a gateway, a custom base URL) a period is owned only with a declared lifetime.
+ */
+const ASSUMED_LIFETIMES: Record<string, RegExp | undefined> = {
+	"OpenAI's minimum": /^https:\/\/api\.openai\.com(\/|$)/,
+	"Kimi's 1-hour option": /^https:\/\/api\.moonshot\.(ai|cn)\//,
+	"Kimi's default": /^https:\/\/api\.moonshot\.(ai|cn)\//,
+};
 
 /**
  * One idle period, from one real answer (an answer that read or wrote the cache) to the next. With keep-warm on, either
@@ -271,8 +285,17 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		warmMinutes() > 0
 			? cacheState(servedModel(model), entries, warmedAt, true, requested ?? period?.fixed?.requested ?? answerRequest?.tier)
 			: cacheState(servedModel(model), entries, warmedAt);
+	// R9: models whose refresh missed the cache in this Pi window, with when. Kept in memory only: their idle periods are
+	// left to Pi's own warming until Pi is restarted or reloaded, so a lifetime that is wrong for a provider or gateway
+	// costs one missed refresh per window.
+	const missedModels = new Map<string, number>();
+	const missedLine = (at: number) =>
+		`a refresh missed the cache at ${new Date(at).toTimeString().slice(0, 5)}, so this model is left to Pi's own warming until Pi is restarted or reloaded`;
+	const missedFor = (model: Model<Api> | undefined) => (model ? missedModels.get(`${model.provider}/${model.id}`) : undefined);
 	// Why the extension cannot keep a period warm itself, from facts that last for the period; undefined when it can.
-	const whyNotOwned = (state: CacheState | undefined): string | undefined => {
+	const whyNotOwned = (state: CacheState | undefined, model: Model<Api> | undefined): string | undefined => {
+		const missedAt = missedFor(model);
+		if (missedAt !== undefined) return missedLine(missedAt);
 		if (state?.answeredAt === undefined) return "no answer has read or written the prompt cache yet";
 		if (!state.lifetime) return "the cache lifetime is unknown";
 		if (state.lifetime.ms < MIN_OWNED_LIFETIME_MS) return `the cache lifetime (${formatDuration(state.lifetime.ms)}) is under a minute`;
@@ -287,10 +310,22 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (!messageArrayKey(request.payload)) return `the ${request.model.api} request has no message list the extension can check`;
 		if (!outputLimitKey(request.payload)) return "the request carries no output limit the extension can cap";
 		if (!canReplay(request.payload)) return "Claude's budget-based thinking changes the cache key when the answer is capped";
-		// One lifetime for the whole request, the one the period would fix; no attempt to work out another.
-		const stated = statedLifetimes(request.payload);
-		if (request.sharedPrefix || stated.parts.some((ms) => ms !== state.lifetime?.ms)) return "the request carries more than one cache lifetime";
-		if (stated.conversation !== undefined && stated.conversation !== state.lifetime.ms) return "the request's cache lifetime does not match the model data";
+		// R8: the tier is the one the request as sent asks for, never the setting. One lifetime for the whole request, the
+		// one the period would fix; no attempt to work out another.
+		const cache = request.cache ?? requestCache(request.payload);
+		if (cache.unreadable) return `the request carries a cache marker the extension does not read (${cache.unreadable})`;
+		if (request.sharedPrefix || cache.mixed) return "the request carries more than one cache lifetime";
+		// The answer's own report wins: writes in the other tier, or in both, and the request is not what was cached.
+		const answered = state.answerTiers;
+		if (answered && answered.length > 1) return "the answer reports cache writes in both tiers (5 min and 1 h)";
+		if (answered?.length === 1 && answered[0] !== cache.tier) return `the answer reports cache writes in the ${answered[0]} tier, the request asked for the ${cache.tier} one`;
+		if (state.tier !== cache.tier) return `the cache tier reported earlier (${state.tier}) does not match the one the request asked for (${cache.tier})`;
+		if (cache.markers.some((m) => m.ms !== undefined && m.ms !== state.lifetime?.ms)) return "the request's cache lifetime does not match the model data";
+		// A lifetime assumed for a model family holds only on that provider's own API.
+		const ownApi = ASSUMED_LIFETIMES[state.lifetime.source];
+		if (ownApi && !ownApi.test(request.model.baseUrl)) {
+			return `the cache lifetime (${state.lifetime.source}) is only assumed on the provider's own API, not at ${request.model.baseUrl}; declare one with modelOverrides.promptCache`;
+		}
 		return undefined;
 	};
 	// Pi is idle. After a run that brought a new real answer (or at a session's start) a new period starts; after one that
@@ -300,7 +335,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const state = ctx.model ? stateOf(ctx.model, ctx.sessionManager.getBranch(), answerRequest?.tier) : undefined;
 		const answeredAt = state?.answeredAt;
 		if (!fresh && period && (answeredAt === undefined || answeredAt === period.answeredAt)) return;
-		const notOwned = whyNotOwned(state);
+		const notOwned = whyNotOwned(state, answerRequest?.model ?? ctx.model);
 		const request = notOwned === undefined ? answerRequest : undefined;
 		const model = ctx.model;
 		period = {
@@ -940,7 +975,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 							: after !== undefined && !wantsWarm(after, p.idleSince, warmMinutes())
 								? endWarm(p, "limit", limitReason())
 								: {});
-					trace(ctx, { ...base, action: missed ? "missed" : "warm", seconds, ...ended, usage, budget: budgetRecord(p) });
+					// R9: one miss is enough; this model's later periods are left to Pi for the rest of the window.
+					const firstMiss = missed && !missedModels.has(p.fixed.model);
+					if (firstMiss) missedModels.set(p.fixed.model, started);
+					const leftToPi = firstMiss ? { leftToPi: missedLine(started) } : {};
+					trace(ctx, { ...base, action: missed ? "missed" : "warm", seconds, ...ended, usage, budget: budgetRecord(p), ...leftToPi });
 					if (missed && ctx.hasUI) {
 						ctx.ui.notify(`Keeping the cache warm read only ${Math.floor(100 * share)}% from the cache, so it wrote the context again. Stopped until your next message.`, "warning");
 					}
@@ -1020,8 +1059,12 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const sharedPrefix = payload !== event.payload;
 		if (isKimiOnMoonshot(ctx.model)) payload = withKimiLongCache(payload);
 		if (transcript) {
-			const tier = payloadTier(ctx.model.api, payload) ?? (process.env.PI_CACHE_RETENTION === "long" ? "long" : "short");
-			captured = { transcript, payload, model: ctx.model, at: Date.now(), tier, sharedPrefix };
+			const cache = requestCache(payload);
+			const tier =
+				REPLAYABLE_APIS.has(ctx.model.api) && !cache.unreadable && !cache.mixed
+					? cache.tier
+					: (payloadTier(ctx.model.api, payload) ?? (process.env.PI_CACHE_RETENTION === "long" ? "long" : "short"));
+			captured = { transcript, payload, model: ctx.model, at: Date.now(), tier, cache, sharedPrefix };
 		}
 		return payload === event.payload ? undefined : payload;
 	});
@@ -1323,9 +1366,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const p = period;
 		const rule = keepWarmRule(minutes, p?.budget ? p.budget.priced : !model || hasPrices(model));
 		if (!p || running) return rule;
-		if (p.notOwned !== undefined) return `${rule}; this session is left to Pi's own warming: ${p.notOwned}`;
+		const missedAt = missedFor(model);
+		if (p.notOwned !== undefined) return `${rule}; ${missedAt !== undefined && p.notOwned === missedLine(missedAt) ? p.notOwned : `this session is left to Pi's own warming: ${p.notOwned}`}`;
 		if (!owns(p)) return rule;
-		if (p.ended) return `${rule}; ${endedStatus(p)}, until your next message (${p.ended.reason})`;
+		const window = missedAt === undefined ? "" : `; ${missedLine(missedAt)}`;
+		if (p.ended) return `${rule}; ${endedStatus(p)}, until your next message (${p.ended.reason})${window}`;
 		return `${rule}; so far ${spendingText(p.budget, p.spending)}`;
 	};
 

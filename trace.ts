@@ -109,6 +109,11 @@ export interface WarmTrace extends TimerContext {
 	budget?: { unit: "usd" | "refreshes"; spent: number; limit: number; next?: number };
 	/** Set on the one record where keeping warm ended for the rest of the idle period. */
 	stop?: WarmStop;
+	/**
+	 * Set on the first refresh of a model that missed the cache: from then on, until Pi is restarted or reloaded, this
+	 * model's idle periods are left to Pi's own warming. The line `/cache-keeper` shows.
+	 */
+	leftToPi?: string;
 }
 
 export interface DataTrace {
@@ -261,7 +266,7 @@ export function describeTrace(record: TraceRecord): string {
 			const budget = record.budget ? `; ${budgetText(record.budget)}` : "";
 			const ended = record.stop ? `; keep-warm ended (${stopLabel(record.stop)})` : "";
 			if (record.action === "warm") return `${time} kept the cache warm${idle}${used}${budget}${ended}`;
-			if (record.action === "missed") return `${time} keeping the cache warm missed the cache${idle}${used}${budget}${ended || "; stopped until your next message"}`;
+			if (record.action === "missed") return `${time} keeping the cache warm missed the cache${idle}${used}${budget}${ended || "; stopped until your next message"}${record.leftToPi ? `; ${record.leftToPi}` : ""}`;
 			if (record.action === "failed") return `${time} keeping the cache warm failed: ${record.reason}${used}${budget}${ended}`;
 			if (record.action === "pi-stopped") return `${time} told Pi's own idle warming to stop: ${record.reason}${budget}`;
 			if (record.action === "cancelled") return `${time} a refresh of the cache was cancelled: ${record.reason}${used}${budget}${ended}`;

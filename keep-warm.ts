@@ -76,27 +76,71 @@ export function ttlMs(value: unknown): number | null {
 	return Number(match[1]) * { s: 1_000, m: 60_000, h: 3_600_000 }[match[2] as "s" | "m" | "h"];
 }
 
+/** One cache marker found in a request: the tier it asks for, where it says, and the lifetime it states, if any. */
+export interface CacheMarker {
+	/** Where it sits, as a path: `cache_control`, `system[0].cache_control`, `prompt_cache_options.ttl` … */
+	at: string;
+	/** The tier it asks for; absent for a marker that states only a lifetime (an OpenAI breakpoint with its own `ttl`). */
+	tier?: "short" | "long";
+	/** The lifetime it states, in milliseconds. */
+	ms?: number;
+}
+
 /**
- * The cache lifetimes a payload states itself: the conversation's (`prompt_cache_options.ttl`, OpenAI Responses and
- * Kimi), and each one given to a part of the request (an explicit `ttl` on a `prompt_cache_breakpoint` or a
- * `cache_control`). A lifetime written in a way the extension does not read is null.
+ * What a request asks the provider's cache for, read from every cache marker in the payload as it was sent, wherever
+ * it sits; never from a setting:
+ * - Anthropic's `cache_control` (top level, system blocks, tools, message content): without `ttl` it asks for the
+ *   default cache, 5 minutes; `ttl: "5m"` the same; `ttl: "1h"` the extended cache.
+ * - OpenAI's `prompt_cache_retention`: `"24h"` is the extended cache (also Kimi's long option), `"in_memory"` the
+ *   default; `prompt_cache_options.ttl` (OpenAI's explicit mode, Kimi's 1-hour option as `"1h"`): `"1h"` is the
+ *   extended cache, any other duration the default cache with that lifetime; a `prompt_cache_breakpoint` with its own
+ *   `ttl` states a lifetime for a part of the request.
+ * A request with no marker at all asks for the provider's default (automatic) cache: tier `short`.
+ * `unreadable` names a marker written in a way the extension does not read; `mixed` says the markers ask for different
+ * tiers or state different lifetimes. Either way the request is not one the extension keeps warm.
  */
-export function statedLifetimes(payload: Payload): { conversation?: number | null; parts: (number | null)[] } {
-	const parts: (number | null)[] = [];
-	const visit = (value: unknown): void => {
-		if (Array.isArray(value)) value.forEach(visit);
+export function requestCache(payload: Payload): { tier: "short" | "long"; markers: CacheMarker[]; unreadable?: string; mixed: boolean } {
+	const markers: CacheMarker[] = [];
+	let unreadable: string | undefined;
+	const bad = (at: string, value: unknown) => (unreadable ??= `${at}: ${JSON.stringify(value)}`);
+	const visit = (value: unknown, path: string): void => {
+		if (Array.isArray(value)) value.forEach((item, i) => visit(item, `${path}[${i}]`));
 		else if (isPlainObject(value)) {
 			for (const [key, field] of Object.entries(value)) {
-				if ((key === "prompt_cache_breakpoint" || key === "cache_control") && isPlainObject(field)) {
-					if (field.ttl !== undefined) parts.push(ttlMs(field.ttl));
-				} else visit(field);
+				const at = path ? `${path}.${key}` : key;
+				if (key === "cache_control") {
+					if (!isPlainObject(field)) bad(at, field);
+					else if (field.ttl === undefined || field.ttl === "5m") markers.push({ at, tier: "short", ms: 300_000 });
+					else if (field.ttl === "1h") markers.push({ at, tier: "long", ms: 3_600_000 });
+					else bad(at, field);
+				} else if (key === "prompt_cache_breakpoint") {
+					if (!isPlainObject(field)) bad(at, field);
+					else if (field.ttl !== undefined) {
+						const ms = ttlMs(field.ttl);
+						if (ms === null) bad(at, field);
+						else markers.push({ at, ms });
+					}
+				} else if (key === "prompt_cache_retention") {
+					if (field === "24h") markers.push({ at, tier: "long" });
+					else if (field === "in_memory") markers.push({ at, tier: "short" });
+					else if (field !== undefined && field !== null) bad(at, field);
+				} else if (key === "prompt_cache_options") {
+					if (!isPlainObject(field)) {
+						if (field !== undefined && field !== null) bad(at, field);
+					} else if (field.ttl !== undefined) {
+						const ms = ttlMs(field.ttl);
+						if (ms === null) bad(at, field);
+						else markers.push({ at: `${at}.ttl`, tier: field.ttl === "1h" ? "long" : "short", ms });
+					}
+				} else visit(field, at);
 			}
 		}
 	};
-	for (const [key, field] of Object.entries(payload)) if (key !== "prompt_cache_options") visit(field);
-	const options = payload.prompt_cache_options;
-	const conversation = isPlainObject(options) && options.ttl !== undefined ? ttlMs(options.ttl) : undefined;
-	return conversation === undefined ? { parts } : { conversation, parts };
+	visit(payload, "");
+	const tiers = new Set(markers.flatMap((m) => (m.tier ? [m.tier] : [])));
+	const lifetimes = new Set(markers.flatMap((m) => (m.ms === undefined ? [] : [m.ms])));
+	const tier = tiers.has("long") && !tiers.has("short") ? "long" : "short";
+	return { tier, markers, ...(unreadable ? { unreadable } : {}), mixed: tiers.size > 1 || lifetimes.size > 1 };
 }
 
 const THINKING_LEVELS: ReadonlySet<string> = new Set(["minimal", "low", "medium", "high", "xhigh"]);

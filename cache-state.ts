@@ -29,6 +29,10 @@ export interface CacheState {
 	answeredAt?: number;
 	/** That answer's prompt: input + cache read + cache write tokens. */
 	answerPrompt?: number;
+	/** With keep-warm on: the tiers that answer reports writing the cache in, where it reports them (Anthropic). */
+	answerTiers?: ("short" | "long")[];
+	/** With keep-warm on: the tier the lifetime is for, the one the latest write reported, else the requested one. */
+	tier?: "short" | "long";
 }
 
 /**
@@ -66,7 +70,7 @@ export function cacheTier(entries: SessionEntry[], model?: { provider: string; i
 export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?: number, keepWarmOn = false, requested?: "short" | "long"): CacheState {
 	let refreshedAt: number | undefined;
 	let latestWarm: number | undefined;
-	let answer: { at: number; prompt: number } | undefined;
+	let answer: { at: number; prompt: number; tiers?: ("short" | "long")[] } | undefined;
 	let reported: "short" | "long" | undefined;
 	let replied = false;
 	for (const entry of entries) {
@@ -78,7 +82,13 @@ export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?
 			const own = !keepWarmOn || (entry.message.provider === model.provider && entry.message.model === model.id);
 			if (own && cacheWrite > 0 && cacheWrite1h !== undefined) reported = cacheWrite1h > 0 ? "long" : "short";
 			const failed = entry.message.stopReason === "error" || entry.message.stopReason === "aborted";
-			if (cacheRead + cacheWrite > 0 || !failed) answer = { at: entry.message.timestamp, prompt: input + cacheRead + cacheWrite };
+			if (cacheRead + cacheWrite > 0 || !failed) {
+				const tiers: ("short" | "long")[] | undefined =
+					cacheWrite > 0 && cacheWrite1h !== undefined
+						? [...(cacheWrite > cacheWrite1h ? (["short"] as const) : []), ...(cacheWrite1h > 0 ? (["long"] as const) : [])]
+						: undefined;
+				answer = { at: entry.message.timestamp, prompt: input + cacheRead + cacheWrite, ...(tiers ? { tiers } : {}) };
+			}
 			// A failed request may not have reached the cache.
 			if (entry.message.stopReason === "error" || entry.message.stopReason === "aborted") {
 				if (keepWarmOn && cacheRead + cacheWrite > 0) refreshedAt = entry.message.timestamp;
@@ -96,7 +106,8 @@ export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?
 	// A refresh before the latest real request (or before a compaction, which leaves refreshedAt unset) is stale.
 	if (refreshedAt !== undefined && warmedAt !== undefined) refreshedAt = Math.max(refreshedAt, warmedAt);
 	const asked = requested ?? (process.env.PI_CACHE_RETENTION === "long" ? "long" : "short");
-	const declared = model.promptCache?.[reported ?? asked];
+	const tier = reported ?? asked;
+	const declared = model.promptCache?.[tier];
 	let lifetime: CacheState["lifetime"];
 	if (declared !== undefined) lifetime = { ms: declared * 1000, source: "declared by the model" };
 	else if (reported) lifetime = { ms: REPORTED_TIER_SECONDS[reported] * 1000, source: "reported by the provider" };
@@ -106,5 +117,5 @@ export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?
 		lifetime = { ms: KIMI_TTL_SECONDS[long ? "long" : "short"] * 1000, source: long ? "Kimi's 1-hour option" : "Kimi's default" };
 	}
 	const expiresAt = lifetime && refreshedAt !== undefined ? refreshedAt + lifetime.ms : undefined;
-	return { lifetime, cached: refreshedAt !== undefined, expiresAt, ...(refreshedAt === undefined ? {} : { refreshedAt }), replied, ...(answer ? { answeredAt: answer.at, answerPrompt: answer.prompt } : {}) };
+	return { lifetime, cached: refreshedAt !== undefined, expiresAt, ...(refreshedAt === undefined ? {} : { refreshedAt }), replied, ...(keepWarmOn ? { tier } : {}), ...(answer ? { answeredAt: answer.at, answerPrompt: answer.prompt, ...(keepWarmOn && answer.tiers ? { answerTiers: answer.tiers } : {}) } : {}) };
 }

@@ -49,6 +49,8 @@ interface Options {
 	params?: unknown;
 	/** Replaces the fake transport: given the extension's stream options, returns the stream (a real adapter). */
 	stream?: (options: Record<string, unknown> & { onPayload: (p: unknown) => unknown; signal: AbortSignal }) => { result: () => Promise<unknown> };
+	/** The first answer's usage, over a full read of the cache (cacheWrite1h: the 1-hour writes Anthropic reports). */
+	answer?: Fields & { cacheWrite1h?: number };
 	/** Entries on the branch before the first request. */
 	before?: unknown[];
 	/** Pi's thinking level when the first request is sent (later changed through `thinkingLevel.value`). */
@@ -84,7 +86,7 @@ function harness(options: Options = {}) {
 	} as Record<string, unknown> & { provider: string; id: string; api: string };
 	const user = { role: "user", content: [{ type: "text", text: "hi" }], timestamp: 0 };
 	const by = { provider: model.provider, model: model.id };
-	const reply = { role: "assistant", content: [{ type: "text", text: "hello" }], timestamp: 1_000, stopReason: "stop", ...by, usage: { input: 2, output: 5, cacheRead: cached, cacheWrite: 0 } };
+	const reply = { role: "assistant", content: [{ type: "text", text: "hello" }], timestamp: 1_000, stopReason: "stop", ...by, usage: { input: 2, output: 5, cacheRead: cached, cacheWrite: 0, ...options.answer } };
 	const branch = [
 		...((options.before ?? []) as { type: string; id: string; parentId: null; timestamp: string; message: unknown }[]),
 		{ type: "message", id: "u", parentId: null, timestamp: new Date(0).toISOString(), message: user },
@@ -1419,7 +1421,7 @@ test("R7c/1: a payload that states its own lifetime: owned only where it matches
 		["the conversation's lifetime differs from the model data", { prompt_cache_options: { ttl: "30m" } }, { short: 3600, long: 3600 }, /the request's cache lifetime does not match the model data/],
 		["the conversation's lifetime matches", { prompt_cache_options: { ttl: "60m" } }, { short: 3600, long: 3600 }, undefined],
 		["a part with its own lifetime", { prompt_cache_options: { ttl: "60m" }, input: [{ role: "developer", content: [{ type: "input_text", text: "s", prompt_cache_breakpoint: { mode: "explicit", ttl: "12h" } }] }, { role: "user", content: "hi" }] }, { short: 3600, long: 3600 }, /the request carries more than one cache lifetime/],
-		["a lifetime the extension does not read", { prompt_cache_options: { ttl: "1d" } }, { short: 3600, long: 3600 }, /does not match the model data/],
+		["a lifetime the extension does not read", { prompt_cache_options: { ttl: "1d" } }, { short: 3600, long: 3600 }, /carries a cache marker the extension does not read \(prompt_cache_options/],
 	];
 	for (const [label, extra, promptCache, reason] of cases) {
 		clock();
@@ -1510,6 +1512,264 @@ test("R7c/3: a refresh limit must be a positive integer: -1 never leaves", async
 	const stop = traces().find((r) => r.stop);
 	assert.deepEqual([stop.stop, stop.budget.spent], ["unable", 0]);
 	assert.match(stop.reason, /up to -1 output tokens/);
+});
+
+// --------------------------------------------- R8 and R9: the request as sent, never the setting; one miss is enough
+
+const FIVE_AND_HOUR = { short: 300, long: 3600 };
+// Pi's real warmer beside the extension, keep-warm off and on: what Pi decided, what the handler answered, what the
+// extension sent, and what /cache-keeper says.
+async function besidePi(make: () => ReturnType<typeof harness>, keepWarmMinutes: number, span: number) {
+	clock();
+	fresh({ keepWarmMinutes, compactBeforeExpiry: false });
+	const h = make();
+	const pi = withPiWarmer(h);
+	pi.start();
+	h.emit("agent_settled");
+	pi.warmer.onAgentSettled();
+	const decided = h.decide();
+	await pi.advance(span);
+	const shown = await h.command("cache-keeper");
+	pi.warmer.cancel();
+	mock.timers.reset();
+	return { pi: pi.piRefreshes, answers: pi.decisions.map((d) => d.answer), decided, attempts: h.state.attempts, shown };
+}
+async function leftToPi(make: () => ReturnType<typeof harness>, reason: RegExp, span = 2 * HOUR) {
+	const off = await besidePi(make, 0, span);
+	const on = await besidePi(make, 120, span);
+	assert.equal(on.decided, undefined, "the handler returns nothing");
+	assert.ok(on.answers.every((a) => a === undefined));
+	assert.deepEqual(on.pi, off.pi, "Pi decides as with keep-warm off");
+	assert.equal(on.attempts, 0, "the extension sends nothing");
+	assert.match(on.shown, new RegExp(`left to Pi's own warming: ${reason.source}`));
+}
+// Owned, and when the first refresh goes out (the answer is at 1 s).
+async function ownedRefresh(h: ReturnType<typeof harness>, within = 2 * HOUR) {
+	h.emit("agent_settled");
+	assert.deepEqual(h.decide(), { action: "stop" }, "owned");
+	await h.idle(within);
+	await flush();
+	return h.warms[0]?.at;
+}
+const claude = () => MODELS.anthropic["claude-sonnet-4-6"];
+// The reviewer's request: 1 hour on the system prompt, Anthropic's default marker (no ttl: 5 minutes) on the conversation.
+async function mixedClaude() {
+	const sent = await adapterPayload(claude(), { maxTokens: 8192, cacheRetention: "long" }, systemAndUser);
+	const last = (sent.messages as { content: { cache_control?: Record<string, unknown> }[] }[]).at(-1)!.content.at(-1)!;
+	assert.deepEqual(last.cache_control, { type: "ephemeral", ttl: "1h" });
+	last.cache_control = { type: "ephemeral" };
+	return sent;
+}
+const openRouterClaude = (control: Record<string, unknown>) => ({
+	...MODELS.openrouter["anthropic/claude-sonnet-5.5"],
+	api: "openai-responses",
+	baseUrl: "https://openrouter.ai/api/v1",
+	compat: { supportsLongCacheRetention: false },
+	samplingParams: { cache_control: control },
+	promptCache: FIVE_AND_HOUR,
+	cost: WITH_WRITE,
+});
+
+test("R8: the reviewer's Claude request (1 h on the system prompt, the default marker on the conversation) is Pi's, whatever the answer reports", { skip: noCatalog || noWarmer }, async (t) => {
+	t.after(() => mock.timers.reset());
+	noNetwork(t);
+	withRetention(t, "long");
+	const sent = await mixedClaude();
+	for (const answer of [{ cacheWrite: 120_000, cacheWrite1h: 8_000 }, {}]) {
+		await leftToPi(() => harness({ model: { ...claude(), cost: WITH_WRITE }, sent, answer, stream: viaRealAdapter(claude()) }), /the request carries more than one cache lifetime/);
+	}
+});
+
+test("R8: variants of mixed Claude markers are Pi's: the default on the system prompt with 1 h on the conversation; a tools marker", { skip: noCatalog || noWarmer }, async (t) => {
+	t.after(() => mock.timers.reset());
+	noNetwork(t);
+	withRetention(t, "long");
+	const flipped = await adapterPayload(claude(), { maxTokens: 8192, cacheRetention: "long" }, systemAndUser);
+	(flipped.system as { cache_control?: unknown }[])[0].cache_control = { type: "ephemeral" };
+	await leftToPi(() => harness({ model: { ...claude(), cost: WITH_WRITE }, sent: flipped, stream: viaRealAdapter(claude()) }), /the request carries more than one cache lifetime/);
+	const tools = { ...(await adapterPayload(claude(), { maxTokens: 8192, cacheRetention: "long" }, systemAndUser)), tools: [{ name: "read", description: "d", input_schema: { type: "object" }, cache_control: { type: "ephemeral", ttl: "5m" } }] };
+	await leftToPi(() => harness({ model: { ...claude(), cost: WITH_WRITE }, sent: tools, stream: viaRealAdapter(claude()) }), /the request carries more than one cache lifetime/);
+});
+
+test("R8: the reviewer's OpenRouter Claude on Responses with a top-level default marker is the 5-minute cache, refreshed before it expires; with 1 h it is the 1-hour one", { skip: noCatalog }, async (t) => {
+	t.after(() => mock.timers.reset());
+	noNetwork(t);
+	withRetention(t, "long");
+	for (const [control, at, lifetime] of [
+		[{ type: "ephemeral" }, 276_000, 300],
+		[{ type: "ephemeral", ttl: "5m" }, 276_000, 300],
+		[{ type: "ephemeral", ttl: "1h" }, 3_421_000, 3600],
+	] as const) {
+		clock();
+		fresh({ compactBeforeExpiry: false });
+		const model = openRouterClaude(control);
+		const sent = await adapterPayload(model, { maxTokens: 8192, cacheRetention: "long" }, systemAndUser);
+		assert.deepEqual(sent.cache_control, control, "the adapter put the marker at the top level");
+		const h = harness({ model, sent, stream: viaRealAdapter(model) });
+		assert.equal(await ownedRefresh(h), at, JSON.stringify(control));
+		assert.equal(h.warms.length, 1);
+		assert.equal(traces().find((r) => r.event === "warm" && r.action !== "pi-stopped").lifetimeSeconds, lifetime);
+	}
+});
+
+test("R8: the tier is the one the request asks for, not the setting", { skip: noCatalog }, async (t) => {
+	t.after(() => mock.timers.reset());
+	noNetwork(t);
+	const cases: [string, string | undefined, string, number][] = [
+		["setting long, default markers only", "long", "short", 276_000],
+		["setting short, 1-hour markers", undefined, "long", 3_421_000],
+	];
+	for (const [label, setting, built, at] of cases) {
+		withRetention(t, setting);
+		clock();
+		fresh({ compactBeforeExpiry: false });
+		const sent = await adapterPayload(claude(), { maxTokens: 8192, cacheRetention: built }, systemAndUser);
+		const h = harness({ model: { ...claude(), cost: WITH_WRITE, promptCache: FIVE_AND_HOUR }, sent, stream: viaRealAdapter(claude()) });
+		assert.equal(await ownedRefresh(h), at, label);
+	}
+	// No marker at all, model data for both tiers, the setting long: the default cache.
+	withRetention(t, "long");
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const plain = harness({ lifetime: 300, cost: WITH_WRITE, model: { promptCache: FIVE_AND_HOUR } });
+	assert.equal(await ownedRefresh(plain), 276_000, "no marker: short");
+});
+
+test("R8: an answer that reports cache writes in both tiers, or in the other one, is Pi's", async (t) => {
+	t.after(() => mock.timers.reset());
+	withRetention(t, "long");
+	const oneHour = { model: "claude", max_tokens: 64_000, system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "1h" } }], messages: [{ role: "user", content: "hi" }], thinking: { type: "adaptive" } };
+	const cases: [string, Record<string, unknown> | undefined, Record<string, number>, RegExp][] = [
+		["both tiers", oneHour, { cacheWrite: 120_000, cacheWrite1h: 8_000 }, /the answer reports cache writes in both tiers/],
+		["the 5-minute tier for a 1-hour request", oneHour, { cacheWrite: 120_000, cacheWrite1h: 0 }, /the answer reports cache writes in the short tier, the request asked for the long one/],
+		["the 1-hour tier for a request with no marker", undefined, { cacheWrite: 120_000, cacheWrite1h: 120_000 }, /the answer reports cache writes in the long tier, the request asked for the short one/],
+	];
+	for (const [label, sent, answer, reason] of cases) {
+		clock();
+		fresh({ compactBeforeExpiry: false });
+		const h = harness({ cost: WITH_WRITE, model: { promptCache: FIVE_AND_HOUR }, sent, answer });
+		h.emit("agent_settled");
+		assert.equal(h.decide(), undefined, label);
+		assert.match(await h.command("cache-keeper"), reason, label);
+		await h.idle(2 * HOUR);
+		assert.equal(h.state.attempts, 0, label);
+	}
+	// The same tier reported: owned.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const same = harness({ cost: WITH_WRITE, model: { promptCache: FIVE_AND_HOUR }, sent: oneHour, answer: { cacheWrite: 120_000, cacheWrite1h: 120_000 } });
+	assert.equal(await ownedRefresh(same), 3_421_000);
+});
+
+test("R8: without declared data, the tier the answer reports gives the lifetime; owned when the request asked for that tier", async (t) => {
+	t.after(() => mock.timers.reset());
+	withRetention(t, "long");
+	const marked = (control: Record<string, unknown>) => ({ model: "claude", max_tokens: 64_000, system: [{ type: "text", text: "s", cache_control: control }], messages: [{ role: "user", content: "hi" }], thinking: { type: "adaptive" } });
+	for (const [control, answer, at] of [
+		[{ type: "ephemeral", ttl: "1h" }, { cacheWrite: 120_000, cacheWrite1h: 120_000 }, 3_421_000],
+		[{ type: "ephemeral" }, { cacheWrite: 120_000, cacheWrite1h: 0 }, 276_000],
+	] as const) {
+		clock();
+		fresh({ compactBeforeExpiry: false });
+		const h = harness({ cost: WITH_WRITE, model: { provider: "gateway", promptCache: undefined }, sent: marked(control), answer });
+		assert.equal(await ownedRefresh(h), at);
+		assert.equal(traces().find((r) => r.event === "warm" && r.action !== "pi-stopped").lifetimeSource, "reported by the provider");
+	}
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const other = harness({ cost: WITH_WRITE, model: { provider: "gateway", promptCache: undefined }, sent: marked({ type: "ephemeral" }), answer: { cacheWrite: 120_000, cacheWrite1h: 120_000 } });
+	other.emit("agent_settled");
+	assert.equal(other.decide(), undefined, "a 5-minute request whose answer reports 1-hour writes");
+});
+
+test("R8: a lifetime assumed for a model family is owned only on the provider's own API", { skip: noCatalog }, async (t) => {
+	t.after(() => mock.timers.reset());
+	noNetwork(t);
+	withRetention(t, undefined);
+	const real = MODELS.openai["gpt-6.1-sol"];
+	for (const baseUrl of ["https://gateway.example/v1", real.baseUrl]) {
+		clock();
+		fresh({ compactBeforeExpiry: false });
+		const model = { ...real, baseUrl, promptCache: undefined, cost: WITH_WRITE };
+		const sent = await adapterPayload(model, { maxTokens: 8192, cacheRetention: "short" }, systemAndUser);
+		const h = harness({ model, sent, stream: viaRealAdapter(model) });
+		if (baseUrl === real.baseUrl) {
+			assert.equal(await ownedRefresh(h), 1_711_000);
+			continue;
+		}
+		h.emit("agent_settled");
+		assert.equal(h.decide(), undefined);
+		assert.match(await h.command("cache-keeper"), /the cache lifetime \(OpenAI's minimum\) is only assumed on the provider's own API, not at https:\/\/gateway\.example\/v1/);
+		await h.idle(HOUR);
+		assert.equal(h.state.attempts, 0);
+	}
+});
+
+test("R9: after a refresh that missed, this model is left to Pi for the rest of the window; another model is still owned; a restart owns again", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, respond: () => ({ usage: { cacheRead: 0, cacheWrite: 600_000 } }) });
+	h.emit("agent_settled");
+	assert.deepEqual(h.decide(), { action: "stop" });
+	await h.idle(300_000);
+	assert.equal(h.warms.length, 1);
+	const at = new Date(h.warms[0].at).toTimeString().slice(0, 5);
+	const line = `a refresh missed the cache at ${at}, so this model is left to Pi's own warming until Pi is restarted or reloaded`;
+	const noted = traces().filter((r) => r.leftToPi);
+	assert.deepEqual(noted.map((r) => [r.action, r.leftToPi]), [["missed", line]], "a trace record notes it once");
+	assert.ok((await h.command("cache-keeper")).includes(line), "said while the missed period lasts");
+	// The next real answer: a period left to Pi from its start.
+	h.run(true);
+	assert.equal(h.decide(), undefined, "the handler returns nothing");
+	assert.ok((await h.command("cache-keeper")).includes(`keep warm: up to 2 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; ${line}`));
+	assert.ok((await h.command("cache-keeper-settings")).includes(line), "the settings line");
+	await h.idle(HOUR);
+	assert.equal(h.warms.length, 1, "nothing more is sent");
+	h.run(true);
+	assert.equal(h.decide(), undefined, "and the next");
+	assert.equal(traces().filter((r) => r.leftToPi).length, 1);
+	// Another model in the same window: still owned.
+	mock.timers.tick(1000);
+	h.ctx.model = { ...h.model, id: "sub/other" };
+	h.run(true);
+	assert.deepEqual(h.decide(), { action: "stop" }, "another model");
+	const keepWarmLine = (await h.command("cache-keeper")).split("\n").find((l) => l.startsWith("keep warm:"));
+	assert.equal(keepWarmLine, "keep warm: up to 2 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; so far $0 spent, a miss costs $2.07");
+	// A new extension instance (a restart or reload): owned again.
+	clock();
+	const again = harness({ lifetime: 300, cost: WITH_WRITE });
+	again.emit("agent_settled");
+	assert.deepEqual(again.decide(), { action: "stop" }, "after a restart");
+});
+
+test("R8: the ordinary cases with Pi's real adapters are unchanged: Claude and Kimi K3, long and short; GPT short owned at 30 min, GPT long left to Pi", { skip: noCatalog }, async (t) => {
+	t.after(() => mock.timers.reset());
+	noNetwork(t);
+	const cases: [string, string, "long" | "short", number | undefined][] = [
+		["anthropic", "claude-sonnet-4-6", "long", 3_421_000],
+		["anthropic", "claude-sonnet-4-6", "short", 276_000],
+		["moonshotai", "kimi-k3", "long", 3_421_000],
+		["moonshotai", "kimi-k3", "short", 276_000],
+		["openai", "gpt-6.1-sol", "short", 1_711_000],
+		["openai", "gpt-6.1-sol", "long", undefined],
+	];
+	for (const [provider, id, retention, at] of cases) {
+		withRetention(t, retention === "long" ? "long" : undefined);
+		clock();
+		fresh({ compactBeforeExpiry: false });
+		const real = MODELS[provider][id];
+		// Pi's catalog as it is: the lifetime from the model's data or the provider's own rule.
+		const model = { ...real, promptCache: real.promptCache, cost: WITH_WRITE };
+		const sent = await adapterPayload(model, { maxTokens: 8192, cacheRetention: retention }, systemAndUser);
+		const h = harness({ model, sent, stream: viaRealAdapter(model) });
+		const label = `${id} ${retention}`;
+		if (at === undefined) {
+			h.emit("agent_settled");
+			assert.equal(h.decide(), undefined, label);
+			assert.match(await h.command("cache-keeper"), /the request carries more than one cache lifetime/, label);
+		} else assert.equal(await ownedRefresh(h), at, label);
+	}
 });
 
 test("no file imports evaluateCacheWarming (missing before pi-ai 1.5.1)", () => {

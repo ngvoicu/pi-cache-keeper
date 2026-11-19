@@ -15,7 +15,7 @@ import {
 	payloadTier,
 	REFRESH_LIMITS,
 	reserveFor,
-	statedLifetimes,
+	requestCache,
 	ttlMs,
 	spendingText,
 	wantsWarm,
@@ -150,15 +150,46 @@ test("the thinking level of a refresh is read from the captured payload", () => 
 	assert.equal(payloadThinking("openai-responses", { reasoning: { effort: "medium" } }), "medium");
 });
 
-test("the cache lifetimes a payload states itself", () => {
+test("the cache a request asks for, from every marker wherever it sits (R8)", () => {
 	assert.deepEqual([ttlMs("30m"), ttlMs("1h"), ttlMs("12h"), ttlMs("300s"), ttlMs("1d"), ttlMs(30)], [1_800_000, 3_600_000, 43_200_000, 300_000, null, null]);
-	assert.deepEqual(statedLifetimes({ input: [] }), { parts: [] });
-	assert.deepEqual(statedLifetimes({ prompt_cache_options: { ttl: "30m" }, input: [{ role: "developer", content: [{ type: "input_text", text: "s", prompt_cache_breakpoint: { mode: "explicit", ttl: "12h" } }] }] }), {
-		conversation: 1_800_000,
-		parts: [43_200_000],
+	const read = (payload: Record<string, unknown>) => {
+		const r = requestCache(payload);
+		return { tier: r.tier, mixed: r.mixed, unreadable: r.unreadable, markers: r.markers.map((m) => `${m.at}=${m.tier ?? "-"}/${m.ms ?? "-"}`) };
+	};
+	const one = { type: "ephemeral", ttl: "1h" };
+	const five = { type: "ephemeral" };
+	assert.deepEqual(read({ input: [] }), { tier: "short", mixed: false, unreadable: undefined, markers: [] }, "no marker: the default cache");
+	// Anthropic: top level, system, tools, message content; without ttl it is the 5-minute cache.
+	assert.deepEqual(read({ cache_control: five }).markers, ["cache_control=short/300000"]);
+	assert.deepEqual(read({ cache_control: { type: "ephemeral", ttl: "5m" } }).markers, ["cache_control=short/300000"]);
+	const stock = { system: [{ type: "text", text: "s", cache_control: one }], tools: [{ name: "t", cache_control: one }], messages: [{ role: "user", content: [{ type: "text", text: "x", cache_control: one }] }] };
+	assert.deepEqual(read(stock), {
+		tier: "long",
+		mixed: false,
+		unreadable: undefined,
+		markers: ["system[0].cache_control=long/3600000", "tools[0].cache_control=long/3600000", "messages[0].content[0].cache_control=long/3600000"],
 	});
-	assert.deepEqual(statedLifetimes({ system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "1h" } }], messages: [{ role: "user", content: [{ type: "text", text: "x", cache_control: { type: "ephemeral" } }] }] }), { parts: [3_600_000] }, "a cache_control without a ttl states none");
-	assert.deepEqual(statedLifetimes({ prompt_cache_options: { mode: "implicit", ttl: "1h" } }), { conversation: 3_600_000, parts: [] }, "Kimi's long cache");
+	const mixed = read({ system: [{ type: "text", text: "s", cache_control: one }], messages: [{ role: "user", content: [{ type: "text", text: "x", cache_control: five }] }] });
+	assert.deepEqual([mixed.mixed, mixed.markers.length], [true, 2], "the reviewer's request: 1 h on the system prompt, the default on the conversation");
+	assert.equal(read({ tools: [{ name: "t", cache_control: five }], cache_control: one }).mixed, true, "a tools marker counts");
+	assert.match(read({ cache_control: { type: "ephemeral", ttl: "2h" } }).unreadable ?? "", /cache_control/);
+	assert.match(read({ cache_control: "ephemeral" }).unreadable ?? "", /cache_control/);
+	// OpenAI and Kimi.
+	assert.deepEqual(read({ prompt_cache_retention: "24h" }).markers, ["prompt_cache_retention=long/-"]);
+	assert.deepEqual(read({ prompt_cache_retention: "in_memory" }).tier, "short");
+	assert.match(read({ prompt_cache_retention: "7d" }).unreadable ?? "", /prompt_cache_retention/);
+	assert.deepEqual(read({ prompt_cache_retention: "24h", prompt_cache_options: { mode: "implicit", ttl: "1h" } }), {
+		tier: "long",
+		mixed: false,
+		unreadable: undefined,
+		markers: ["prompt_cache_retention=long/-", "prompt_cache_options.ttl=long/3600000"],
+	}, "Kimi's long option");
+	assert.deepEqual(read({ prompt_cache_options: { ttl: "30m" } }).markers, ["prompt_cache_options.ttl=short/1800000"], "OpenAI's explicit mode: the default cache, 30 minutes");
+	const gpt = read({ prompt_cache_options: { ttl: "30m" }, input: [{ role: "developer", content: [{ type: "input_text", text: "s", prompt_cache_breakpoint: { mode: "explicit", ttl: "12h" } }] }] });
+	assert.deepEqual([gpt.mixed, gpt.markers], [true, ["prompt_cache_options.ttl=short/1800000", "input[0].content[0].prompt_cache_breakpoint=-/43200000"]]);
+	assert.deepEqual(read({ input: [{ prompt_cache_breakpoint: { mode: "explicit" } }] }).markers, [], "a breakpoint without its own ttl states nothing");
+	assert.match(read({ prompt_cache_options: { ttl: "1d" } }).unreadable ?? "", /prompt_cache_options/);
+	assert.equal(read({ prompt_cache_retention: "24h", cache_control: five }).mixed, true, "an extended and a default marker");
 });
 
 test("the cache tier a payload shows it was sent for", () => {
