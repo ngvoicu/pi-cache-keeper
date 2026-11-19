@@ -26,7 +26,7 @@ export const COMPACT_AT_TOKEN_CHOICES = [0, 150_000, 200_000, 300_000, 400_000, 
 /** The values `/cache-keeper-settings` offers for minContextTokens. */
 export const MIN_CONTEXT_CHOICES = [50_000, 100_000, 140_000, 200_000, 300_000, 500_000];
 /** The values `/cache-keeper-settings` offers for keepWarmMinutes; 0 is "off". */
-export const KEEP_WARM_CHOICES = [0, 30, 60, 120, 180, 240, 480];
+export const KEEP_WARM_CHOICES = [0, 30, 60, 120, 180, 240, 360, 480, 720, 1440];
 /** A cached summary request needs at least this many output tokens; with less room, Pi's compaction runs instead. */
 export const MIN_SUMMARY_TOKENS = 16_000;
 /** Room kept free for the summary instruction and token-count drift between Pi's estimate and the provider's count. */

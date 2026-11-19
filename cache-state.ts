@@ -18,6 +18,14 @@ export interface CacheState {
 	cached: boolean;
 	expiresAt?: number;
 	replied: boolean;
+	/**
+	 * When the latest real answer arrived: the latest assistant message whose usage reports a cache read or write, whatever
+	 * its stop reason (an aborted answer that read the cache counts). Refreshes (Pi's or this extension's) do not move it.
+	 * A new value means a real request has gone to the provider since: a new keep-warm period.
+	 */
+	answeredAt?: number;
+	/** That answer's prompt: input + cache read + cache write tokens. */
+	answerPrompt?: number;
 }
 
 /**
@@ -44,15 +52,17 @@ export function cacheTier(entries: SessionEntry[], model?: { provider: string; i
  */
 export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?: number): CacheState {
 	let refreshedAt: number | undefined;
+	let answer: { at: number; prompt: number } | undefined;
 	let reported: "short" | "long" | undefined;
 	let replied = false;
 	for (const entry of entries) {
 		if (entry.type === "compaction") {
-			refreshedAt = reported = undefined;
+			refreshedAt = reported = answer = undefined;
 			replied = false;
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
-			const { cacheRead, cacheWrite, cacheWrite1h } = entry.message.usage;
+			const { input, cacheRead, cacheWrite, cacheWrite1h } = entry.message.usage;
 			if (cacheWrite > 0 && cacheWrite1h !== undefined) reported = cacheWrite1h > 0 ? "long" : "short";
+			if (cacheRead + cacheWrite > 0) answer = { at: entry.message.timestamp, prompt: input + cacheRead + cacheWrite };
 			// A failed request may not have reached the cache.
 			if (entry.message.stopReason === "error" || entry.message.stopReason === "aborted") continue;
 			replied = true;
@@ -73,5 +83,5 @@ export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?
 		lifetime = { ms: KIMI_TTL_SECONDS[long ? "long" : "short"] * 1000, source: long ? "Kimi's 1-hour option" : "Kimi's default" };
 	}
 	const expiresAt = lifetime && refreshedAt !== undefined ? refreshedAt + lifetime.ms : undefined;
-	return { lifetime, cached: refreshedAt !== undefined, expiresAt, replied };
+	return { lifetime, cached: refreshedAt !== undefined, expiresAt, replied, ...(answer ? { answeredAt: answer.at, answerPrompt: answer.prompt } : {}) };
 }

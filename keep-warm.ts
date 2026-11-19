@@ -1,3 +1,4 @@
+import { calculateCost, type Api, type Model, type Usage } from "@earendil-works/pi-ai";
 import { isPlainObject, type Payload } from "./cached-request.ts";
 
 const OUTPUT_LIMIT_KEYS = ["max_tokens", "max_output_tokens", "max_completion_tokens"] as const;
@@ -50,6 +51,103 @@ export function warmPayload(params: unknown, captured: Payload): { payload: Payl
 export function cachedShare(usage: { input: number; cacheRead: number; cacheWrite: number }): number {
 	const prompt = usage.input + usage.cacheRead + usage.cacheWrite;
 	return prompt > 0 ? usage.cacheRead / prompt : 0;
+}
+
+/** Without prices the budget cannot be counted in money: at most this many refreshes per idle period. */
+export const MAX_UNPRICED_REFRESHES = 10;
+
+/**
+ * What a refresh and a cache miss cost for a prompt of `promptTokens` tokens, worked out as Pi's own warming does
+ * (`evaluateCacheWarming` in pi-ai 1.5.1 and later; computed here so older Pi loads the extension too): a refresh is the
+ * prompt at the cache-read price plus one output token; a miss is the prompt at the cache-write price (the input price
+ * when the model has none) minus the prompt at the cache-read price, not below 0. `priced` is false when the model has
+ * no prices (a subscription login) or the prompt size is unknown.
+ */
+export interface WarmBudget {
+	priced: boolean;
+	refreshCost: number;
+	missCost: number;
+}
+
+function price(model: Model<Api>, tokens: Partial<Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite">>): number {
+	const usage: Usage = {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		...tokens,
+	};
+	return calculateCost(model, usage).total;
+}
+
+export function warmBudget(model: Model<Api>, promptTokens: number): WarmBudget {
+	if (!model.cost) return { priced: false, refreshCost: 0, missCost: 0 };
+	const hit = price(model, { cacheRead: promptTokens });
+	const miss = price(model, model.cost.cacheWrite > 0 ? { cacheWrite: promptTokens } : { input: promptTokens });
+	return {
+		priced: promptTokens > 0 && (hit > 0 || miss > 0),
+		refreshCost: price(model, { cacheRead: promptTokens, output: 1 }),
+		missCost: Math.max(0, miss - hit),
+	};
+}
+
+/** Whether the model has any price; without one, the budget counts refreshes instead of money. */
+export function hasPrices(model: Model<Api>): boolean {
+	if (!model.cost) return false;
+	const { input, cacheRead, cacheWrite } = model.cost;
+	return input > 0 || cacheRead > 0 || cacheWrite > 0;
+}
+
+/**
+ * What the extension's refreshes have cost in one idle period (from one real answer to the next): in dollars, or, for a
+ * model without prices, in refreshes. `last` is what the period's last refresh really cost, once one reported it.
+ */
+export interface WarmSpending {
+	spent: number;
+	refreshes: number;
+	last?: number;
+}
+
+/** The period's limit: one cache miss, or `MAX_UNPRICED_REFRESHES` refreshes. */
+export function spendingLimit(budget: WarmBudget): number {
+	return budget.priced ? budget.missCost : MAX_UNPRICED_REFRESHES;
+}
+
+/** What the next refresh is reserved at: the larger of its expected cost and what the last refresh really cost (1 without prices). */
+export function reserveFor(budget: WarmBudget, spending: WarmSpending): number {
+	return budget.priced ? Math.max(budget.refreshCost, spending.last ?? 0) : 1;
+}
+
+/** The gate: a refresh may go out only if what has been spent plus what it is reserved at stays within the limit. */
+export function gateAllows(budget: WarmBudget, spending: WarmSpending): boolean {
+	return spending.spent + reserveFor(budget, spending) <= spendingLimit(budget);
+}
+
+/** Whether the period's spending has reached its limit: warming ends ("budget"), whatever the last refresh's outcome. */
+export function budgetReached(budget: WarmBudget, spending: WarmSpending): boolean {
+	return spending.spent >= spendingLimit(budget);
+}
+
+/** "$0.14", "$2.07", "$0.0031": enough digits to compare a refresh with a miss. */
+export function formatUsd(amount: number): string {
+	if (amount === 0) return "$0";
+	return amount >= 0.1 ? `$${amount.toFixed(2)}` : `$${Number(amount.toPrecision(2))}`;
+}
+
+/** The amounts as the footer, /cache-keeper and the log say them: "$1.98 spent, a miss costs $2.07", "10 of 10 refreshes". */
+export function spendingText(budget: WarmBudget, spending: WarmSpending): string {
+	return budget.priced
+		? `${formatUsd(spending.spent)} spent, a miss costs ${formatUsd(budget.missCost)}`
+		: `${spending.refreshes} of ${MAX_UNPRICED_REFRESHES} refreshes`;
+}
+
+/** The rule as the settings and /cache-keeper say it. */
+export function keepWarmRule(minutes: number, priced: boolean): string {
+	if (minutes <= 0) return "off";
+	const cap = priced ? "stops once refreshing has cost as much as one cache miss" : `at most ${MAX_UNPRICED_REFRESHES} refreshes (this model has no prices, so the cost of a miss is unknown)`;
+	return `up to ${keepWarmLabel(minutes)} after Pi goes idle; ${cap}`;
 }
 
 /** "off", "30 min", "1 h", "1.5 h". */

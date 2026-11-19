@@ -20,8 +20,13 @@ test("the cache expires a lifetime after the latest cached request or cache-warm
 	const warm = { type: "usage", id: "w", parentId: null, timestamp: new Date(200_000).toISOString(), kind: "cache_warm" } as SessionEntry;
 	const cached = reply("a", 1_000, { cacheRead: 500 });
 
-	assert.deepEqual(cacheState(declared, [cached]), { lifetime: { ms: 300_000, source: "declared by the model" }, cached: true, expiresAt: 301_000, replied: true });
+	assert.deepEqual(cacheState(declared, [cached]), { lifetime: { ms: 300_000, source: "declared by the model" }, cached: true, expiresAt: 301_000, replied: true, answeredAt: 1_000, answerPrompt: 501 });
 	assert.equal(cacheState(declared, [cached, warm]).expiresAt, 500_000);
+	assert.equal(cacheState(declared, [cached, warm], 400_000).answeredAt, 1_000, "refreshes (Pi's or the extension's) are no new answer");
+	assert.equal(cacheState(declared, [cached, reply("b", 9_000, {}, "error")]).answeredAt, 1_000, "nor is an answer that used no cache");
+	assert.equal(cacheState(declared, [cached, reply("b", 9_000, { cacheRead: 500 })]).answeredAt, 9_000);
+	const aborted = cacheState(declared, [cached, reply("b", 9_000, { cacheRead: 700, cacheWrite: 50 }, "aborted")]);
+	assert.deepEqual([aborted.answeredAt, aborted.answerPrompt, aborted.expiresAt], [9_000, 751, 301_000], "an aborted answer that used the cache is a real answer; the expiry is counted as before");
 	assert.deepEqual(cacheState(declared, [reply("a", 1_000, {})]), { lifetime: { ms: 300_000, source: "declared by the model" }, cached: false, expiresAt: undefined, replied: true });
 	assert.equal(cacheState(declared, [cached, reply("b", 9_000, {}, "error")]).expiresAt, 301_000);
 	assert.deepEqual(cacheState(declared, [cached, compaction]), { lifetime: { ms: 300_000, source: "declared by the model" }, cached: false, expiresAt: undefined, replied: false });
@@ -34,7 +39,7 @@ test("the lifetime is the tier the latest write reported, the model's figure for
 	assert.deepEqual(lifetime(claude, [long]), { ms: 3_600_000, source: "reported by the provider" });
 	assert.deepEqual(lifetime(claude, [long, reply("b", 2, { cacheWrite: 40, cacheWrite1h: 0 })]), { ms: 300_000, source: "reported by the provider" });
 	assert.deepEqual(lifetime(claude, [long, reply("b", 2, { cacheRead: 500 })]), { ms: 3_600_000, source: "reported by the provider" }, "a turn that only read keeps the tier");
-	assert.deepEqual(cacheState(claude, [reply("a", 1, { cacheWrite: 500 })]), { lifetime: undefined, cached: true, expiresAt: undefined, replied: true });
+	assert.deepEqual(cacheState(claude, [reply("a", 1, { cacheWrite: 500 })]), { lifetime: undefined, cached: true, expiresAt: undefined, replied: true, answeredAt: 1, answerPrompt: 501 });
 	assert.deepEqual(lifetime(claude, [reply("a", 1, { cacheWrite: 500, cacheWrite1h: 500 }, "error")]), { ms: 3_600_000, source: "reported by the provider" }, "a failed turn still reports the tier it wrote");
 	assert.equal(lifetime(claude, [long, compaction]), undefined);
 	const declared = { ...claude, promptCache: { short: 60, long: 7200 } } as Model<Api>;

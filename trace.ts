@@ -2,6 +2,7 @@ import { appendFileSync, readFileSync, renameSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { formatUsd } from "./keep-warm.ts";
 
 const TRACE_PATH = join(getAgentDir(), "cache-keeper.jsonl");
 export const TRACE_PATH_LABEL = TRACE_PATH.startsWith(homedir()) ? `~${TRACE_PATH.slice(homedir().length)}` : TRACE_PATH;
@@ -51,7 +52,16 @@ export interface FailedTrace {
 	error?: string;
 }
 
-export interface ExpiryTrace {
+/** The model and cache lifetime a timer decision was made for (records before 0.5 have none). */
+export interface TimerContext {
+	/** "provider/id". */
+	model?: string;
+	lifetimeSeconds?: number;
+	/** Where the lifetime came from: "declared by the model", "reported by the provider", … */
+	lifetimeSource?: string;
+}
+
+export interface ExpiryTrace extends TimerContext {
 	event: "expiry";
 	action: "compact" | "skip";
 	reason?: string;
@@ -70,16 +80,35 @@ export interface FullTrace {
 	tokens?: number;
 }
 
-export interface WarmTrace {
+/**
+ * Why keeping warm ended for the rest of an idle period: the budget (refreshing has cost as much as one cache miss, or
+ * 10 refreshes without prices), the time limit (the cache lasts to the end of the window), a refresh that missed the
+ * cache, a refresh that failed, or a request that can no longer be re-sent.
+ */
+export type WarmStop = "budget" | "limit" | "missed" | "failed" | "unable";
+
+export interface WarmTrace extends TimerContext {
 	event: "warm";
-	/** "warm": the cache was refreshed; "missed": the refresh wrote the cache again instead of reading it. */
-	action: "warm" | "missed" | "failed" | "skip";
+	/**
+	 * "warm": the cache was refreshed; "missed": the refresh wrote the cache again instead of reading it; "cancelled": a
+	 * new request (or a change of session) cancelled a refresh that had gone out, still counted; "skip": no refresh went
+	 * out (with `stop`: warming ended); "pi-stopped": Pi's own idle warming was told to stop, since the extension keeps
+	 * this idle period's cache warm.
+	 */
+	action: "warm" | "missed" | "failed" | "cancelled" | "skip" | "pi-stopped";
 	reason?: string;
 	secondsLeft: number;
 	contextTokens?: number;
 	idleMinutes?: number;
 	seconds?: number;
 	usage?: TraceUsage;
+	/**
+	 * What the extension's refreshes have cost in this idle period against what they may: in dollars against one cache
+	 * miss, or, for a model without prices, in refreshes. `next`: what one more refresh is reserved at.
+	 */
+	budget?: { unit: "usd" | "refreshes"; spent: number; limit: number; next?: number };
+	/** Set on the one record where keeping warm ended for the rest of the idle period. */
+	stop?: WarmStop;
 }
 
 export interface DataTrace {
@@ -138,6 +167,28 @@ function cacheShare(usage: TraceUsage): string {
 	const prompt = usage.input + usage.cacheRead + usage.cacheWrite;
 	const pct = prompt > 0 ? Math.floor((100 * usage.cacheRead) / prompt) : 0;
 	return `${pct}% of ${formatTokens(prompt)} from cache, ${formatTokens(usage.output)} out`;
+}
+
+function budgetText(budget: NonNullable<WarmTrace["budget"]>): string {
+	return budget.unit === "usd"
+		? `${formatUsd(budget.spent)} of ${formatUsd(budget.limit)} (one cache miss) spent`
+		: `${budget.spent} of at most ${budget.limit} refreshes (no prices)`;
+}
+
+/** Why keeping warm ended, in a few words; `limit` names the time limit when it is known ("2 h limit"). */
+export function stopLabel(stop: WarmStop, limit?: string): string {
+	switch (stop) {
+		case "budget":
+			return "budget reached";
+		case "limit":
+			return limit ? `${limit} limit` : "time limit";
+		case "missed":
+			return "a refresh missed the cache";
+		case "failed":
+			return "a refresh failed";
+		case "unable":
+			return "the request can't be re-sent";
+	}
 }
 
 function formatCost(cost: number): string {
@@ -207,9 +258,14 @@ export function describeTrace(record: TraceRecord): string {
 		case "warm": {
 			const idle = record.idleMinutes === undefined ? "" : `, idle ${record.idleMinutes} min`;
 			const used = record.usage ? `: ${cacheShare(record.usage)}, ${formatCost(record.usage.cost)}` : "";
-			if (record.action === "warm") return `${time} kept the cache warm${idle}${used}`;
-			if (record.action === "missed") return `${time} keeping the cache warm missed the cache${idle}${used}; stopped until your next message`;
-			if (record.action === "failed") return `${time} keeping the cache warm failed: ${record.reason}`;
+			const budget = record.budget ? `; ${budgetText(record.budget)}` : "";
+			const ended = record.stop ? `; keep-warm ended (${stopLabel(record.stop)})` : "";
+			if (record.action === "warm") return `${time} kept the cache warm${idle}${used}${budget}${ended}`;
+			if (record.action === "missed") return `${time} keeping the cache warm missed the cache${idle}${used}${budget}${ended || "; stopped until your next message"}`;
+			if (record.action === "failed") return `${time} keeping the cache warm failed: ${record.reason}${used}${budget}${ended}`;
+			if (record.action === "pi-stopped") return `${time} told Pi's own idle warming to stop: ${record.reason}${budget}`;
+			if (record.action === "cancelled") return `${time} a refresh of the cache was cancelled: ${record.reason}${used}${budget}${ended}`;
+			if (record.stop) return `${time} cache expires in ${record.secondsLeft}s: keep-warm ended (${stopLabel(record.stop)}), ${record.reason}${budget}`;
 			return `${time} cache expires in ${record.secondsLeft}s: not keeping it warm, ${record.reason}`;
 		}
 		case "data":
