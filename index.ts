@@ -147,17 +147,26 @@ interface CapturedRequest {
 const MIN_OWNED_LIFETIME_MS = 60_000;
 
 /**
- * R9: the models whose refresh missed the cache, with when, for the whole Pi process. Their idle periods are left to
- * Pi's own warming, so a lifetime that is wrong for a provider or gateway costs one missed refresh per process. Pi
- * loads the extension again (a new instance, its modules imported afresh) on /new, /resume, /fork and /reload, so the
- * store is kept on `globalThis` under a registered symbol: every instance in the process finds it, and it ends only
- * with the process. In memory only.
+ * R9: per model (provider/id), how many refreshes in a row missed the cache, and the models left to Pi's own warming
+ * after two in a row, with when. A hit sets the run back to zero; /cache-keeper-warm clears both. A wrong lifetime
+ * costs at most two missed refreshes, then nothing until the user starts warming again. Pi loads the extension again
+ * (a new instance, its modules imported afresh) on /new, /resume, /fork and /reload, so the store is kept on
+ * `globalThis` under a registered symbol: every instance in the process finds it, and it ends with the process. In
+ * memory only.
  */
-const MISSED_MODELS = Symbol.for("pi-cache-keeper.missed-models");
-function missedModelStore(): Map<string, number> {
+const WARM_MISSES = Symbol.for("pi-cache-keeper.warm-misses");
+const MISSES_IN_A_ROW = 2;
+/** The footer, after the countdown, while the current model is left to Pi after two misses in a row. */
+const FALLBACK_STATUS = "keep-warm: Pi's after 2 missed refreshes (/cache-keeper-warm)";
+interface WarmMisses {
+	counts: Map<string, number>;
+	fallback: Map<string, number>;
+}
+function warmMissStore(): WarmMisses {
 	const host = globalThis as Record<symbol, unknown>;
-	if (!(host[MISSED_MODELS] instanceof Map)) host[MISSED_MODELS] = new Map<string, number>();
-	return host[MISSED_MODELS] as Map<string, number>;
+	const found = host[WARM_MISSES] as Partial<WarmMisses> | undefined;
+	if (!(found?.counts instanceof Map) || !(found.fallback instanceof Map)) host[WARM_MISSES] = { counts: new Map(), fallback: new Map() };
+	return host[WARM_MISSES] as WarmMisses;
 }
 
 /**
@@ -224,10 +233,6 @@ const INTERACTIVE_OWNER = Symbol.for("pi-cache-keeper.interactive-long-retention
 // Only OpenAI keeps tool_choice out of the cached prefix; elsewhere changing it costs cache.
 function isOpenAiResponses(model: Model<Api>): boolean {
 	return model.provider === "openai" && model.api === "openai-responses";
-}
-
-function capitalize(text: string): string {
-	return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function sharedPrefixKey(model: Model<Api>, cwd: string): string | undefined {
@@ -309,15 +314,32 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const p = period;
 		return owns(p) ? keptState(model, entries, p.fixed.requested) : cacheState(servedModel(model), entries, warmedAt);
 	};
-	// R9: models whose refresh missed the cache in this Pi process, with when (see MISSED_MODELS).
-	const missedModels = missedModelStore();
-	const missedLine = (at: number) =>
-		`a refresh missed the cache at ${new Date(at).toTimeString().slice(0, 5)}, so this model is left to Pi's own warming until Pi is restarted`;
-	const missedFor = (model: Model<Api> | undefined) => (model ? missedModels.get(`${model.provider}/${model.id}`) : undefined);
+	// R9: each model's run of missed refreshes, and the models two misses in a row left to Pi (see WARM_MISSES).
+	const misses = warmMissStore();
+	const fallbackLine = (model: string, at: number) =>
+		`two refreshes in a row missed the cache for ${model} (the last at ${new Date(at).toTimeString().slice(0, 5)}), so it is left to Pi's own warming; /cache-keeper-warm starts keeping it warm again`;
+	const fallbackFor = (model: Model<Api> | undefined): { key: string; at: number } | undefined => {
+		const key = model && `${model.provider}/${model.id}`;
+		const at = key === undefined ? undefined : misses.fallback.get(key);
+		return key !== undefined && at !== undefined ? { key, at } : undefined;
+	};
+	// A refresh's evidence, counted per model: a miss adds one, a hit sets the run back to zero. The second miss in a
+	// row leaves the model to Pi (true once, when that happens). Touches no session context.
+	const recordRefresh = (model: string, verdict: "miss" | "hit", at: number): boolean => {
+		if (verdict === "hit") {
+			misses.counts.delete(model);
+			return false;
+		}
+		const count = (misses.counts.get(model) ?? 0) + 1;
+		misses.counts.set(model, count);
+		if (count < MISSES_IN_A_ROW || misses.fallback.has(model)) return false;
+		misses.fallback.set(model, at);
+		return true;
+	};
 	// Why the extension cannot keep a period warm itself, from facts that last for the period; undefined when it can.
 	const whyNotOwned = (state: CacheState | undefined, model: Model<Api> | undefined): string | undefined => {
-		const missedAt = missedFor(model);
-		if (missedAt !== undefined) return missedLine(missedAt);
+		const fellBack = fallbackFor(model);
+		if (fellBack) return fallbackLine(fellBack.key, fellBack.at);
 		if (state?.answeredAt === undefined) return "no answer has read or written the prompt cache yet";
 		if (!state.lifetime) return "the cache lifetime is unknown";
 		if (state.lifetime.ms < MIN_OWNED_LIFETIME_MS) return `the cache lifetime (${formatDuration(state.lifetime.ms)}) is under a minute`;
@@ -842,6 +864,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (setting.minutes <= 0) return { refuse: "keep-warm was turned off" };
 		if (period !== p) return { refuse: "a new idle period started" };
 		if (p.ended) return { refuse: `keep-warm ended: ${p.ended.reason}` };
+		// Two misses in a row on this model since the period started (another period's refresh): it is Pi's now.
+		const fellBackAt = misses.fallback.get(p.fixed.model);
+		if (fellBackAt !== undefined) return { refuse: fallbackLine(p.fixed.model, fellBackAt) };
 		const drift = readDrift(ctx, p);
 		if (drift) return { refuse: drift };
 		if (running || !ctx.isIdle() || ctx.hasPendingMessages()) return { hold: "busy", reason: "Pi is busy or has queued messages" };
@@ -928,7 +953,13 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 							const built = warmPayload(params, sent);
 							const payload = "payload" in built ? built.payload : undefined;
 							// The last gate, the last check; nothing is reserved before it passes.
-							const verdict = lastGate(ctx, p, controller.signal, lastSafe, request.model.api, payload, "reason" in built ? built.reason : undefined);
+							let verdict: GateVerdict;
+							try {
+								verdict = lastGate(ctx, p, controller.signal, lastSafe, request.model.api, payload, "reason" in built ? built.reason : undefined);
+							} catch {
+								// The session's context is gone (/new, /reload, Pi exiting): nothing leaves.
+								verdict = { refuse: "the session ended before the refresh went out" };
+							}
 							if ("hold" in verdict) {
 								if (verdict.hold === "busy") held = true;
 								if (verdict.hold === "late") late = true;
@@ -961,64 +992,66 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			const used = response?.usage;
 			const usage = out && used && used.input + used.cacheRead + used.cacheWrite + used.output > 0 ? traceUsage(used) : undefined;
 			const seconds = (Date.now() - started) / 1000;
+			const aborted = controller.signal.aborted || response?.stopReason === "aborted";
+			const failed = !aborted && !held && !refused && !late && (!response || response.stopReason === "error");
+			const failure = error ?? response?.errorMessage ?? "the request failed";
 			// Whatever the outcome: once the period's spending reached its limit, warming ends.
 			const reached = () => (out && budgetReached(budget, spending) ? endWarm(p, "budget", budgetReason(p, false)) : undefined);
-			// A miss, however the refresh ended: its reported usage shows a prompt and under 90% of it read from the cache.
-			// A success is judged by its usage as before; an error or abort that reported no prompt is no evidence and sets
-			// nothing. A miss ends warming for the period and, the first time, leaves the model to Pi for the process (R9).
-			const settledOk = !controller.signal.aborted && response !== undefined && response.stopReason !== "aborted" && response.stopReason !== "error";
-			const share = used ? cachedShare(used) : 0;
-			const missed = out && used !== undefined && (settledOk || used.input + used.cacheRead + used.cacheWrite > 0) && share < MIN_WARM_CACHED_SHARE;
-			const missReason = `the refresh read only ${Math.floor(100 * share)}% from the cache, so it wrote the context again`;
-			const noteMiss = () => {
-				if (!missed) return {};
-				const first = !missedModels.has(p.fixed.model);
-				if (first) missedModels.set(p.fixed.model, started);
-				if (ctx.hasUI) {
-					ctx.ui.notify(`Keeping the cache warm read only ${Math.floor(100 * share)}% from the cache, so it wrote the context again. ${capitalize(missedLine(missedModels.get(p.fixed.model) ?? started))}.`, "warning");
+			// What the refresh shows, however it ended: only reported usage with a prompt is evidence. Under 90% of the
+			// prompt read from the cache is a miss, the rest a hit; without a prompt in the usage it is neither.
+			const prompt = out && used ? used.input + used.cacheRead + used.cacheWrite : 0;
+			const share = used && prompt > 0 ? used.cacheRead / prompt : undefined;
+			const verdict = share === undefined ? undefined : share < MIN_WARM_CACHED_SHARE ? "miss" : "hit";
+			const missReason = `the refresh read only ${Math.floor(100 * (share ?? 0))}% from the cache, so it wrote the context again`;
+			// Recorded here, without the session's context, which may be gone (/new, /reload, Pi exiting): the model's run of
+			// misses (two in a row and it is left to Pi), the period's end, the timer's bookkeeping.
+			const fellBack = verdict ? recordRefresh(p.fixed.model, verdict, started) : false;
+			let ended: ReturnType<typeof endWarm> | undefined;
+			if (out) {
+				ended =
+					reached() ??
+					(verdict === "miss" ? endWarm(p, "missed", failed ? `${missReason} before it failed: ${failure}` : missReason) : failed ? endWarm(p, "failed", failure) : undefined);
+			} else if (refused) ended = endWarm(p, "unable", refused);
+			else if (failed) ended = endWarm(p, "failed", failure);
+			if ((aborted || held) && p.doneFor === expiresAt) p.doneFor = undefined;
+			// Either way the provider refreshed (or wrote) the entry when it received the request.
+			if (out && !aborted && !failed) warmedAt = started;
+			const fallback = fellBack ? { leftToPi: fallbackLine(p.fixed.model, started) } : {};
+			// What is said and shown, only while the session is alive.
+			ifSessionAlive(() => {
+				if (fellBack && ctx.hasUI) {
+					ctx.ui.notify(`Two refreshes in a row missed the cache for ${p.fixed.model}, so pi-cache-keeper stopped keeping it warm; Pi's own warming takes over. /cache-keeper-warm starts it again.`, "warning");
 				}
-				return first ? { leftToPi: missedLine(started) } : {};
-			};
+			});
 			// A real request started (or the session moved on); it refreshes the cache itself. What went out stays counted.
 			// If that run sent nothing, the refresh for this expiry is tried again, as for any passing hold-up.
-			if (controller.signal.aborted || response?.stopReason === "aborted") {
-				if (p.doneFor === expiresAt) p.doneFor = undefined;
+			if (aborted) {
 				if (!out) return;
-				const ended = reached() ?? (missed ? endWarm(p, "missed", missReason) : {});
-				const leftToPi = noteMiss();
 				ifSessionAlive(() => {
-					trace(ctx, { ...base, action: "cancelled", seconds, ...ended, reason: "a new request or a change of session cancelled it", usage, budget: budgetRecord(p), ...leftToPi });
+					trace(ctx, { ...base, action: "cancelled", seconds, ...ended, reason: "a new request or a change of session cancelled it", usage, budget: budgetRecord(p), ...fallback });
 				});
 				return;
 			}
 			ifSessionAlive(() => {
 				if (held) {
 					// Tried again on the next ticks, as any passing hold-up.
-					if (p.doneFor === expiresAt) p.doneFor = undefined;
 					if (p.busyFor !== expiresAt) trace(ctx, { ...base, action: "skip", seconds, reason: "Pi got busy or a message was queued while the refresh was being prepared, so it was withheld; tried again until the last safe moment" });
 					p.busyFor = expiresAt;
 				} else if (refused) {
 					// Withheld for good; warming ends with the reason where it has not ended yet.
-					trace(ctx, { ...base, action: "skip", seconds, ...endWarm(p, "unable", refused), reason: refused, budget: budgetRecord(p) });
+					trace(ctx, { ...base, action: "skip", seconds, ...ended, reason: refused, budget: budgetRecord(p) });
 				} else if (late) {
 					trace(ctx, { ...base, action: "skip", seconds, reason: "too late: the cache was about to expire before the refresh went out, so it was not sent" });
-				} else if (!response || response.stopReason === "error") {
-					const reason = error ?? response?.errorMessage ?? "the request failed";
-					const ended = reached() ?? (missed ? endWarm(p, "missed", `${missReason} before it failed: ${reason}`) : endWarm(p, "failed", reason));
-					if (ctx.hasUI) ctx.ui.notify(`pi-cache-keeper could not keep the cache warm: ${reason}`, "warning");
-					trace(ctx, { ...base, action: "failed", seconds, ...ended, reason, usage, budget: budgetRecord(p), ...noteMiss() });
+				} else if (failed) {
+					if (ctx.hasUI) ctx.ui.notify(`pi-cache-keeper could not keep the cache warm: ${failure}`, "warning");
+					trace(ctx, { ...base, action: "failed", seconds, ...ended, reason: failure, usage, budget: budgetRecord(p), ...fallback });
 				} else {
-					// Either way the provider refreshed (or wrote) the entry when it received the request.
-					warmedAt = started;
 					const after = timerState(ctx)?.expiresAt;
-					const ended =
-						reached() ??
-						(missed
-							? endWarm(p, "missed", missReason)
-							: after !== undefined && !wantsWarm(after, p.idleSince, warmMinutes())
-								? endWarm(p, "limit", limitReason())
-								: {});
-					trace(ctx, { ...base, action: missed ? "missed" : "warm", seconds, ...ended, usage, budget: budgetRecord(p), ...noteMiss() });
+					const limit = !ended && after !== undefined && !wantsWarm(after, p.idleSince, warmMinutes()) ? endWarm(p, "limit", limitReason()) : undefined;
+					trace(ctx, { ...base, action: verdict === "miss" ? "missed" : "warm", seconds, ...(ended ?? limit), usage, budget: budgetRecord(p), ...fallback });
+					if (verdict === "miss" && !fellBack && ctx.hasUI) {
+						ctx.ui.notify(`Keeping the cache warm read only ${Math.floor(100 * (share ?? 0))}% from the cache, so it wrote the context again. Stopped until your next message.`, "warning");
+					}
 				}
 				if (ctx.isIdle()) startTimer(ctx);
 			});
@@ -1048,7 +1081,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			if (keepWarmOn && remaining > 0 && !warming) noteLimit(ctx, expiresAt, timer);
 			if (!keepWarmOn) noteSwitchOff(ctx, expiresAt, timer);
 			const ended = keepWarmOn && owns(period) ? endedStatus(period) : undefined;
-			const text = warming ? "cache warm · refreshing" : `${formatCacheStatus(remaining)}${ended ? ` · ${ended}` : ""}`;
+			// Left to Pi after two misses in a row: said for as long as it lasts.
+			const fellBack = keepWarmOn && fallbackFor(ctx.model) ? FALLBACK_STATUS : undefined;
+			const suffix = [ended, fellBack].filter(Boolean).join(" · ");
+			const text = warming ? "cache warm · refreshing" : `${formatCacheStatus(remaining)}${suffix ? ` · ${suffix}` : ""}`;
 			if (ctx.hasUI && text !== shown) {
 				shown = text;
 				ctx.ui.setStatus(STATUS_KEY, remaining <= WARNING_MS && !warming ? ctx.ui.theme.fg(remaining > 0 ? "warning" : "dim", text) : text);
@@ -1078,8 +1114,18 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				}
 			}
 		};
-		ticker = setInterval(tick, 1000);
-		ticker.unref();
+		// A tick runs outside any event of Pi's: if this session's context is gone (/new, /reload, Pi exiting before
+		// session_shutdown stopped it), the timer stops instead of throwing out of a callback, which would end Pi.
+		const own = setInterval(() => {
+			try {
+				tick();
+			} catch {
+				clearInterval(own);
+				if (ticker === own) ticker = undefined;
+			}
+		}, 1000);
+		ticker = own;
+		own.unref();
 		tick();
 	};
 
@@ -1183,7 +1229,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		});
 		// Pi redraws the chat after this handler returns; appending now would put the card above the summary.
 		const records = decision ? [decision, result] : [result];
-		setTimeout(() => showCard(records), 0);
+		setTimeout(() => ifSessionAlive(() => showCard(records)), 0);
 		decision = undefined;
 		compactionTrigger = undefined;
 		forget(ctx);
@@ -1398,10 +1444,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const p = period;
 		const rule = keepWarmRule(minutes, p?.budget ? p.budget.priced : !model || hasPrices(model));
 		if (!p || running) return rule;
-		const missedAt = missedFor(model);
-		if (p.notOwned !== undefined) return `${rule}; ${missedAt !== undefined && p.notOwned === missedLine(missedAt) ? p.notOwned : `this session is left to Pi's own warming: ${p.notOwned}`}`;
-		if (!owns(p)) return rule;
-		const window = missedAt === undefined ? "" : `; ${missedLine(missedAt)}`;
+		const fellBack = fallbackFor(model);
+		const line = fellBack && fallbackLine(fellBack.key, fellBack.at);
+		if (p.notOwned !== undefined) return `${rule}; ${line && p.notOwned === line ? line : `this session is left to Pi's own warming: ${p.notOwned}`}`;
+		if (!owns(p)) return line ? `${rule}; ${line}` : rule;
+		const window = line ? `; ${line}` : "";
 		if (p.ended) return `${rule}; ${endedStatus(p)}, until your next message (${p.ended.reason})${window}`;
 		return `${rule}; so far ${spendingText(p.budget, p.spending)}`;
 	};
@@ -1571,6 +1618,25 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			if (!config.modelData) return ctx.ui.notify("Model data from providers.dev is off. Turn it on in /cache-keeper-settings.", "info");
 			await refreshAndReport(ctx, true, true);
+		},
+	});
+
+	pi.registerCommand("cache-keeper-warm", {
+		description: "Start keeping the cache warm again for models two missed refreshes in a row left to Pi's own warming",
+		handler: async (_args, ctx) => {
+			const fellBack = [...misses.fallback.keys()].sort();
+			const counted = [...misses.counts.entries()].filter(([model, count]) => count > 0 && !misses.fallback.has(model)).map(([model]) => model).sort();
+			misses.fallback.clear();
+			misses.counts.clear();
+			const off = warmMinutes(true) > 0 ? "" : " Keep-warm itself is off (keepWarmMinutes: 0); /cache-keeper-settings turns it on.";
+			let text: string;
+			if (fellBack.length > 0) {
+				const also = counted.length > 0 ? ` The missed-refresh count of ${counted.join(", ")} is cleared too.` : "";
+				text = `pi-cache-keeper keeps ${fellBack.join(", ")} warm again, from your next message: whether it keeps an idle period warm is decided when the period starts.${also}${off}`;
+			} else if (counted.length > 0) {
+				text = `No model was left to Pi's own warming. The missed-refresh count of ${counted.join(", ")} is cleared.${off}`;
+			} else text = `Nothing to clear: no model was left to Pi's own warming, and no refresh had missed the cache.${off}`;
+			ctx.ui.notify(text, "info");
 		},
 	});
 

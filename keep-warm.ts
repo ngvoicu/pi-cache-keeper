@@ -267,7 +267,8 @@ export function warmBudget(model: Model<Api>, promptTokens: number): WarmBudget 
 	const hit = price(model, { cacheRead: promptTokens });
 	const miss = price(model, model.cost.cacheWrite > 0 ? { cacheWrite: promptTokens } : { input: promptTokens });
 	return {
-		priced: promptTokens > 0 && (hit > 0 || miss > 0),
+		// Counted in refreshes only where the model has no price at all; any price (output included) counts in money.
+		priced: promptTokens > 0 && hasPrices(model),
 		refreshCost: price(model, { cacheRead: promptTokens, output: 1 }),
 		missCost: Math.max(0, miss - hit),
 	};
@@ -276,8 +277,8 @@ export function warmBudget(model: Model<Api>, promptTokens: number): WarmBudget 
 /** Whether the model has any price; without one, the budget counts refreshes instead of money. */
 export function hasPrices(model: Model<Api>): boolean {
 	if (!model.cost) return false;
-	const { input, cacheRead, cacheWrite } = model.cost;
-	return input > 0 || cacheRead > 0 || cacheWrite > 0;
+	const { input, output, cacheRead, cacheWrite } = model.cost;
+	return input > 0 || output > 0 || cacheRead > 0 || cacheWrite > 0;
 }
 
 /**

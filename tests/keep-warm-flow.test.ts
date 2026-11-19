@@ -9,6 +9,7 @@ import { calculateCost } from "@earendil-works/pi-ai";
 const dir = mkdtempSync(join(tmpdir(), "pcc-warm-"));
 process.env.PI_CODING_AGENT_DIR = dir;
 const settings = (cacheKeeper: Record<string, unknown>) => writeFileSync(join(dir, "settings.json"), JSON.stringify({ cacheKeeper }));
+const readSettings = () => JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
 settings({ keepWarmMinutes: 120, minContextTokens: 100_000 });
 const { default: cacheKeeper } = await import("../index.ts");
 
@@ -229,7 +230,7 @@ const allTraces = () =>
 		.map((line) => JSON.parse(line));
 const traces = () => allTraces().filter((record) => record.event === "warm" || record.event === "expiry");
 // The models a missed refresh left to Pi belong to the Pi process (R9); each test starts as a new process.
-const newProcess = () => delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-cache-keeper.missed-models")];
+const newProcess = () => delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-cache-keeper.warm-misses")];
 const fresh = (keepWarm: Record<string, unknown> = {}) => {
 	newProcess();
 	settings({ keepWarmMinutes: 120, minContextTokens: 100_000, ...keepWarm });
@@ -1055,6 +1056,20 @@ async function adapterPayload(model: { api: string }, options: Record<string, un
 	assert.ok(got, "the adapter built a payload");
 	return got;
 }
+// A provider's stream, in memory: server-sent events from objects (or a literal like "[DONE]").
+const sse = (events: unknown[]) =>
+	new Response(events.map((e) => (typeof e === "string" ? `data: ${e}\n\n` : `${(e as { type?: string }).type ? `event: ${(e as { type: string }).type}\n` : ""}data: ${JSON.stringify(e)}\n\n`)).join(""), {
+		headers: { "content-type": "text/event-stream" },
+	});
+// The extension's refresh through Pi's real adapter to an in-memory transport (nothing leaves the process).
+function inMemory(model: { api: string }, cacheRetention: string, reply: () => Response) {
+	return (options: Record<string, unknown> & { onPayload: (p: unknown) => unknown; signal: AbortSignal }) => ({
+		result: async () => {
+			const { streamSimple } = await realAdapter(model);
+			return streamSimple(model, piContext(), { ...options, apiKey: "sk-fixture", cacheRetention, maxRetries: 0, fetch: async () => reply() }).result();
+		},
+	});
+}
 function viaRealAdapter(model: { api: string }) {
 	return (options: Record<string, unknown> & { onPayload: (p: unknown) => unknown }) => {
 		let stream: { result: () => Promise<unknown> } | undefined;
@@ -1530,7 +1545,7 @@ test("R7c/3: a refresh limit must be a positive integer: -1 never leaves", async
 	assert.match(stop.reason, /up to -1 output tokens/);
 });
 
-// --------------------------------------------- R8 and R9: the request as sent, never the setting; one miss is enough
+// --------------------------------------------- R8: the request as sent, never the setting
 
 const FIVE_AND_HOUR = { short: 300, long: 3600 };
 // Pi's real warmer beside the extension, keep-warm off and on: what Pi decided, what the handler answered, what the
@@ -1783,99 +1798,192 @@ test("the reason for thinking names what the request carries, for any provider: 
 	assert.doesNotMatch(shown, /Claude/);
 });
 
-test("R9: after a refresh that missed, this model is left to Pi for the rest of the process, also in the instance /new makes; another model is still owned; a new process owns again", async (t) => {
+// --------------------------------------------- R9: two misses in a row, then Pi, with a warning and a way back
+
+const MODEL_KEY = "cliproxyapi/sub/claude";
+// Half the prompt read from the cache: a miss that stays within the budget, so it ends the period as "missed".
+const HALF_MISS = { usage: { input: 0, cacheRead: 300_000, cacheWrite: 300_000 } };
+const misses = () => (globalThis as Record<symbol, { counts: Map<string, number>; fallback: Map<string, number> } | undefined>)[Symbol.for("pi-cache-keeper.warm-misses")];
+const countOf = (model = MODEL_KEY) => misses()?.counts.get(model) ?? 0;
+const WARNING = `Two refreshes in a row missed the cache for ${MODEL_KEY}, so pi-cache-keeper stopped keeping it warm; Pi's own warming takes over. /cache-keeper-warm starts it again.`;
+const FALLBACK_STATUS = "keep-warm: Pi's after 2 missed refreshes (/cache-keeper-warm)";
+const fallbackLineAt = (at: number, model = MODEL_KEY) =>
+	`two refreshes in a row missed the cache for ${model} (the last at ${new Date(at).toTimeString().slice(0, 5)}), so it is left to Pi's own warming; /cache-keeper-warm starts keeping it warm again`;
+const keepWarmLineOf = async (h: ReturnType<typeof harness>) => (await h.command("cache-keeper")).split("\n").find((l) => l.startsWith("keep warm:"));
+const RULE = "keep warm: up to 2 h after Pi goes idle; stops once refreshing has cost as much as one cache miss";
+// One idle period: Pi goes idle after a real answer, the extension decides, the refresh is due 25 s before expiry.
+async function nextPeriod(h: ReturnType<typeof harness>, first = false) {
+	if (!first) {
+		mock.timers.tick(1000);
+		h.run(true);
+	} else h.emit("agent_settled");
+	const decided = h.decide();
+	const before = h.warms.length;
+	await h.idle(300_000);
+	await flush();
+	return { decided, refreshed: h.warms.length - before };
+}
+
+test("R9: one miss ends only its period; the next period is owned and refreshes, and a hit sets the count back to zero", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	fresh({ compactBeforeExpiry: false });
-	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true, respond: () => ({ usage: { cacheRead: 0, cacheWrite: 600_000 } }) });
-	h.emit("agent_settled");
-	assert.deepEqual(h.decide(), { action: "stop" });
-	await h.idle(300_000);
-	assert.equal(h.warms.length, 1);
-	const at = new Date(h.warms[0].at).toTimeString().slice(0, 5);
-	const line = `a refresh missed the cache at ${at}, so this model is left to Pi's own warming until Pi is restarted`;
-	assert.ok(
-		h.notes.includes(`Keeping the cache warm read only 0% from the cache, so it wrote the context again. ${line.charAt(0).toUpperCase()}${line.slice(1)}.`),
-		"the notification says what happens now",
-	);
-	const noted = traces().filter((r) => r.leftToPi);
-	assert.deepEqual(noted.map((r) => [r.action, r.leftToPi]), [["missed", line]], "a trace record notes it once");
-	assert.ok((await h.command("cache-keeper")).includes(line), "said while the missed period lasts");
-	// The next real answer: a period left to Pi from its start.
-	h.run(true);
-	assert.equal(h.decide(), undefined, "the handler returns nothing");
-	assert.ok((await h.command("cache-keeper")).includes(`keep warm: up to 2 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; ${line}`));
-	assert.ok((await h.command("cache-keeper-settings")).includes(line), "the settings line");
-	await h.idle(HOUR);
-	assert.equal(h.warms.length, 1, "nothing more is sent");
-	assert.equal(traces().filter((r) => r.leftToPi).length, 1);
-	// Another model in the same window: still owned.
-	mock.timers.tick(1000);
-	h.ctx.model = { ...h.model, id: "sub/other" };
-	h.run(true);
-	assert.deepEqual(h.decide(), { action: "stop" }, "another model");
-	const keepWarmLine = (await h.command("cache-keeper")).split("\n").find((l) => l.startsWith("keep warm:"));
-	assert.equal(keepWarmLine, "keep warm: up to 2 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; so far $0 spent, a miss costs $2.07");
-	// /new: Pi makes a new extension instance in the same process. The model is left to Pi from the start, twice over.
-	for (const n of [1, 2]) {
-		clock();
-		const afterNew = harness({ lifetime: 300, cost: WITH_WRITE, respond: () => ({ usage: { cacheRead: 0, cacheWrite: 600_000 } }) });
-		afterNew.emit("agent_settled");
-		assert.equal(afterNew.decide(), undefined, `after /new ${n}`);
-		assert.ok((await afterNew.command("cache-keeper")).includes(`stops once refreshing has cost as much as one cache miss; ${line}`), `after /new ${n}`);
-		await afterNew.idle(HOUR);
-		assert.equal(afterNew.state.attempts, 0, `after /new ${n}: nothing sent`);
-		const other = harness({ lifetime: 300, cost: WITH_WRITE, model: { id: "sub/other" } });
-		other.emit("agent_settled");
-		assert.deepEqual(other.decide(), { action: "stop" }, `after /new ${n}: another model`);
-	}
-	// A new Pi process: owned again.
-	newProcess();
-	clock();
-	const again = harness({ lifetime: 300, cost: WITH_WRITE });
-	again.emit("agent_settled");
-	assert.deepEqual(again.decide(), { action: "stop" }, "after a restart");
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true, respond: (n) => (n === 1 ? HALF_MISS : {}) });
+	assert.deepEqual(await nextPeriod(h, true), { decided: { action: "stop" }, refreshed: 1 });
+	assert.deepEqual(traces().filter((r) => r.stop).map((r) => [r.action, r.stop]), [["missed", "missed"]]);
+	assert.equal(countOf(), 1);
+	assert.ok(h.notes.includes("Keeping the cache warm read only 50% from the cache, so it wrote the context again. Stopped until your next message."));
+	assert.deepEqual(await nextPeriod(h), { decided: { action: "stop" }, refreshed: 1 }, "the next period is owned and refreshes");
+	assert.equal(countOf(), 0, "a hit sets it back to zero");
+	assert.ok(!h.notes.includes(WARNING));
 });
 
-test("R9: a miss is a miss however the refresh ended: an error or abort after usage that shows a miss sets it; without usage nothing", async (t) => {
+test("R9: miss, hit, miss: still owned", async (t) => {
+	clock();
 	t.after(() => mock.timers.reset());
-	// Half the prompt read from the cache: a miss that stays within the budget, so it ends warming as "missed".
-	const missUsage = { cacheRead: 300_000, cacheWrite: 300_000 };
-	const cases: [string, Partial<Options>, (h: ReturnType<typeof harness>) => void, boolean, string][] = [
-		["error after usage", { respond: () => ({ stopReason: "error", errorMessage: "stream failed", usage: missUsage }) }, () => {}, true, "failed"],
-		["abort after usage", { respond: () => ({ usage: missUsage }), hold: () => true }, (h) => h.run(true), true, "cancelled"],
-		["error without usage", { respond: () => ({ stopReason: "error", errorMessage: "stream failed", usage: { input: 0, output: 0, cacheRead: 0 } }) }, () => {}, false, "failed"],
-		["abort without usage", { respond: () => ({ usage: missUsage }), hold: () => true }, (h) => ((h.state.abortReports = false), h.run(true)), false, "cancelled"],
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true, respond: (n) => (n === 2 ? {} : HALF_MISS) });
+	await nextPeriod(h, true);
+	await nextPeriod(h);
+	await nextPeriod(h);
+	assert.equal(countOf(), 1);
+	assert.ok(!h.notes.includes(WARNING));
+	mock.timers.tick(1000);
+	h.run(true);
+	assert.deepEqual(h.decide(), { action: "stop" }, "owned after miss, hit, miss");
+});
+
+test("R9: two misses in a row: left to Pi from the next period's start, warned once, shown in the footer and /cache-keeper, logged once; another model is unaffected; /cache-keeper-warm starts it again", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true, respond: () => HALF_MISS });
+	// Every notification, also those a command's output would clear from the harness's notes.
+	const said: string[] = [];
+	const notify = h.ctx.ui.notify;
+	h.ctx.ui.notify = (text: string) => (said.push(text), notify(text));
+	await nextPeriod(h, true);
+	assert.equal(countOf(), 1);
+	assert.deepEqual(await nextPeriod(h), { decided: { action: "stop" }, refreshed: 1 }, "one miss: the next period is still owned");
+	const secondAt = h.warms[1].at;
+	const line = fallbackLineAt(secondAt);
+	assert.equal(said.filter((n) => n === WARNING).length, 1, "the warning");
+	assert.deepEqual(traces().filter((r) => r.leftToPi).map((r) => [r.action, r.stop, r.leftToPi]), [["missed", "missed", line]], "logged once");
+	assert.equal(await keepWarmLineOf(h), `${RULE}; keep-warm ended (a refresh missed the cache): $1.22 spent, a miss costs $2.07, until your next message (the refresh read only 50% from the cache, so it wrote the context again); ${line}`);
+	// The next period: Pi's from its start.
+	const third = await nextPeriod(h);
+	assert.deepEqual(third, { decided: undefined, refreshed: 0 }, "the handler returns nothing, nothing is sent");
+	assert.equal(await keepWarmLineOf(h), `${RULE}; ${line}`);
+	assert.ok(h.statuses.some((s) => s.text?.endsWith(` · ${FALLBACK_STATUS}`)), "the footer");
+	assert.ok((await h.command("cache-keeper-settings")).includes(line), "the settings line");
+	assert.deepEqual(await nextPeriod(h), { decided: undefined, refreshed: 0 }, "and the next");
+	assert.equal(said.filter((n) => n === WARNING).length, 1, "warned once");
+	assert.equal(traces().filter((r) => r.leftToPi).length, 1);
+	// Another model in the same process: unaffected.
+	h.ctx.model = { ...h.model, id: "sub/other" };
+	assert.deepEqual((await nextPeriod(h)).decided, { action: "stop" }, "another model");
+	assert.equal(await keepWarmLineOf(h).then((l) => l?.includes("two refreshes in a row")), false);
+	h.ctx.model = h.model;
+	// /cache-keeper-warm: cleared for every model; nothing sent, nothing else changed.
+	const attempts = h.state.attempts;
+	assert.equal(
+		await h.command("cache-keeper-warm"),
+		`pi-cache-keeper keeps ${MODEL_KEY} warm again, from your next message: whether it keeps an idle period warm is decided when the period starts. The missed-refresh count of cliproxyapi/sub/other is cleared too.`,
+	);
+	assert.equal(h.state.attempts, attempts, "the command sends nothing");
+	assert.deepEqual([misses()?.fallback.size, misses()?.counts.size], [0, 0]);
+	assert.deepEqual((await nextPeriod(h)).decided, { action: "stop" }, "owned again from the next period");
+	assert.equal(countOf(), 1, "counted from zero: one miss");
+	assert.deepEqual((await nextPeriod(h)).decided, { action: "stop" }, "still owned after one miss");
+	assert.equal(await h.command("cache-keeper-warm"), `pi-cache-keeper keeps ${MODEL_KEY} warm again, from your next message: whether it keeps an idle period warm is decided when the period starts.`);
+	assert.equal(await h.command("cache-keeper-warm"), "Nothing to clear: no model was left to Pi's own warming, and no refresh had missed the cache.");
+	settings({ keepWarmMinutes: 0, minContextTokens: 100_000, compactBeforeExpiry: false });
+	assert.equal(
+		await h.command("cache-keeper-warm"),
+		"Nothing to clear: no model was left to Pi's own warming, and no refresh had missed the cache. Keep-warm itself is off (keepWarmMinutes: 0); /cache-keeper-settings turns it on.",
+		"it does not turn keep-warm on",
+	);
+	assert.equal(readSettings().cacheKeeper.keepWarmMinutes, 0);
+});
+
+test("R9: one miss counted, then the command with only a count to clear", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, respond: () => HALF_MISS });
+	await nextPeriod(h, true);
+	assert.equal(await h.command("cache-keeper-warm"), `No model was left to Pi's own warming. The missed-refresh count of ${MODEL_KEY} is cleared.`);
+	assert.equal(countOf(), 0);
+});
+
+test("R9: the state belongs to the Pi process: a new extension instance (/new, /reload) finds it, a new process does not", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, respond: () => HALF_MISS });
+	await nextPeriod(h, true);
+	await nextPeriod(h);
+	const line = fallbackLineAt(h.warms[1].at);
+	for (const n of [1, 2]) {
+		clock();
+		const again = harness({ lifetime: 300, cost: WITH_WRITE, respond: () => HALF_MISS });
+		assert.deepEqual(await nextPeriod(again, true), { decided: undefined, refreshed: 0 }, `instance ${n}`);
+		assert.equal(await keepWarmLineOf(again), `${RULE}; ${line}`);
+		const other = harness({ lifetime: 300, cost: WITH_WRITE, model: { id: "sub/other" } });
+		other.emit("agent_settled");
+		assert.deepEqual(other.decide(), { action: "stop" }, `instance ${n}: another model`);
+	}
+	newProcess();
+	clock();
+	const restarted = harness({ lifetime: 300, cost: WITH_WRITE });
+	restarted.emit("agent_settled");
+	assert.deepEqual(restarted.decide(), { action: "stop" }, "a new process");
+});
+
+test("R9: an interrupted refresh that reported a miss counts; one that reported no usage neither counts nor resets", async (t) => {
+	t.after(() => mock.timers.reset());
+	const none = { usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+	const cases: [string, Partial<Options>, boolean][] = [
+		["error after usage", { respond: (n) => (n === 2 ? { stopReason: "error", errorMessage: "stream failed", ...HALF_MISS } : HALF_MISS) }, true],
+		["abort after usage", { respond: () => HALF_MISS, hold: (n) => n === 2 }, true],
+		["error without usage", { respond: (n) => (n === 2 ? { stopReason: "error", errorMessage: "stream failed", ...none } : HALF_MISS) }, false],
+		["abort without usage", { respond: () => HALF_MISS, hold: (n) => n === 2 }, false],
 	];
-	for (const [label, options, settle, miss, action] of cases) {
+	for (const [label, options, counts] of cases) {
 		clock();
 		fresh({ compactBeforeExpiry: false });
 		const h = harness({ lifetime: 300, cost: WITH_WRITE, ...options });
-		h.emit("agent_settled");
-		assert.deepEqual(h.decide(), { action: "stop" }, label);
-		await h.idle(276_000);
-		await flush();
-		assert.equal(h.warms.length, 1, label);
-		settle(h);
-		await flush();
-		const record = traces().find((r) => r.action === action);
-		assert.ok(record, `${label}: ${JSON.stringify(traces())}`);
-		if (miss) {
-			assert.equal(record.stop, "missed", label);
-			assert.match(record.leftToPi, /^a refresh missed the cache at /, label);
-			assert.ok(record.budget.spent > 1, `${label}: the cost is counted`);
-		} else {
-			assert.equal(record.leftToPi, undefined, label);
-			assert.notEqual(record.stop, "missed", label);
-		}
-		// The next real answer.
-		mock.timers.tick(1000);
-		if (action === "failed") h.run(true);
-		else {
+		if (label === "abort without usage") h.state.abortReports = false;
+		await nextPeriod(h, true);
+		assert.equal(countOf(), 1, label);
+		await nextPeriod(h);
+		assert.equal(h.warms.length, 2, label);
+		// An abort settles when the next real request starts; that run's period began before the settlement was known.
+		if (options.hold) {
 			mock.timers.tick(1000);
 			h.run(true);
+			await flush();
 		}
-		assert.deepEqual(h.decide(), miss ? undefined : { action: "stop" }, `${label}: the next period`);
+		assert.equal(countOf(), counts ? 2 : 1, `${label}: the count`);
+		assert.equal(misses()?.fallback.has(MODEL_KEY), counts, label);
+		if (options.hold && counts) {
+			// The period that started before the exclusion was recorded: its refresh stops at the last gate (point C).
+			h.decide();
+			await h.idle(300_000);
+			await flush();
+			assert.equal(h.warms.length, 2, `${label}: nothing more leaves`);
+			const refused = traces().find((r) => r.stop === "unable");
+			assert.match(refused?.reason ?? "", /^two refreshes in a row missed the cache for /, label);
+		}
+		mock.timers.tick(1000);
+		h.run(true);
+		assert.deepEqual(h.decide(), counts ? undefined : { action: "stop" }, `${label}: the next period`);
+		if (!counts) {
+			// Not reset either: the next miss is the second in a row.
+			await h.idle(300_000);
+			await flush();
+			assert.equal(misses()?.fallback.has(MODEL_KEY), true, `${label}: the next miss makes two`);
+		}
 	}
 });
 
@@ -1887,19 +1995,11 @@ test("R9: with Pi's real Anthropic adapter, a refresh whose stream fails after r
 	fresh({ compactBeforeExpiry: false });
 	const real = claude();
 	const sent = await adapterPayload(real, { maxTokens: 8192, cacheRetention: "long" }, systemAndUser);
-	// In memory: what the provider's stream would say, a message_start with its usage, then an error.
 	const events = [
 		{ type: "message_start", message: { id: "m", type: "message", role: "assistant", model: real.id, content: [], stop_reason: null, usage: { input_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 120_000, output_tokens: 1 } } },
 		{ type: "error", error: { type: "overloaded_error", message: "Overloaded" } },
 	];
-	const fetch = async () => new Response(events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
-	const stream = (options: Record<string, unknown> & { onPayload: (p: unknown) => unknown; signal: AbortSignal }) => ({
-		result: async () => {
-			const { streamSimple } = await realAdapter(real);
-			return streamSimple(real, piContext(), { ...options, apiKey: "sk-fixture", cacheRetention: "long", maxRetries: 0, fetch }).result();
-		},
-	});
-	const h = harness({ model: { ...real, cost: WITH_WRITE }, sent, stream, cached: 120_000 });
+	const h = harness({ model: { ...real, cost: WITH_WRITE }, sent, stream: inMemory(real, "long", () => sse(events)), cached: 120_000 });
 	h.emit("agent_settled");
 	assert.deepEqual(h.decide(), { action: "stop" });
 	await h.idle(3_420_000);
@@ -1909,9 +2009,72 @@ test("R9: with Pi's real Anthropic adapter, a refresh whose stream fails after r
 	assert.deepEqual([record.usage.cacheRead, record.usage.cacheWrite], [0, 120_000]);
 	// Writing 120,000 tokens costs more than the miss it was to avoid: warming ends on the budget, and it is a miss.
 	assert.equal(record.stop, "budget");
-	assert.match(record.leftToPi, /^a refresh missed the cache at /);
-	h.run(true);
-	assert.equal(h.decide(), undefined, "the next period is Pi's");
+	assert.equal(countOf("anthropic/claude-sonnet-4-6"), 1);
+});
+
+test("R9: a successful refresh whose usage shows no prompt (omitted, or output only) is neither a miss nor a hit, through Pi's real Chat Completions and Responses adapters; warming goes on", { skip: noCatalog }, async (t) => {
+	t.after(() => mock.timers.reset());
+	noNetwork(t);
+	withRetention(t, undefined);
+	const completion = (usage?: Record<string, number>) =>
+		sse([
+			{ id: "c", object: "chat.completion.chunk", created: 1, model: "m", choices: [{ index: 0, delta: { role: "assistant", content: "o" }, finish_reason: null }] },
+			{ id: "c", object: "chat.completion.chunk", created: 1, model: "m", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], ...(usage ? { usage } : {}) },
+			"[DONE]",
+		]);
+	const responses = (usage?: Record<string, number>) => {
+		const item = { id: "m", type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "o", annotations: [] }] };
+		return sse([
+			{ type: "response.output_item.added", output_index: 0, item: { ...item, status: "in_progress", content: [] } },
+			{ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "o" },
+			{ type: "response.output_item.done", output_index: 0, item },
+			{ type: "response.completed", response: { id: "r", object: "response", model: "m", status: "completed", output: [item], ...(usage ? { usage } : {}) } },
+		]);
+	};
+	const cases: [string, string, string, () => Response][] = [
+		["Kimi K3, usage omitted", "moonshotai", "kimi-k3", () => completion()],
+		["Kimi K3, output only", "moonshotai", "kimi-k3", () => completion({ completion_tokens: 1 })],
+		["GPT-6.1 Sol, usage omitted", "openai", "gpt-6.1-sol", () => responses()],
+		["GPT-6.1 Sol, output only", "openai", "gpt-6.1-sol", () => responses({ output_tokens: 1 })],
+	];
+	for (const [label, provider, id, reply] of cases) {
+		clock();
+		fresh({ compactBeforeExpiry: false });
+		const real = MODELS[provider][id];
+		const model = { ...real, promptCache: undefined, cost: WITH_WRITE };
+		const key = `${provider}/${id}`;
+		misses(); // the store exists once a harness is made
+		const sent = await adapterPayload(model, { maxTokens: 8192, cacheRetention: "short" }, systemAndUser);
+		const h = harness({ model, sent, stream: inMemory(model, "short", reply) });
+		const lifetime = provider === "openai" ? 1_800_000 : 300_000;
+		h.emit("agent_settled");
+		assert.deepEqual(h.decide(), { action: "stop" }, label);
+		// A miss already counted for the model: a refresh without evidence must not reset it.
+		misses()?.counts.set(key, 1);
+		await h.idle(2 * lifetime);
+		await flush();
+		assert.ok(h.warms.length >= 2, `${label}: warming goes on (${h.warms.length} refreshes)`);
+		assert.deepEqual(traces().filter((r) => r.stop), [], `${label}: nothing ended`);
+		assert.equal(countOf(key), 1, `${label}: the count is neither raised nor reset`);
+		assert.equal(misses()?.fallback.size, 0, label);
+		mock.timers.reset();
+	}
+});
+
+test("unpriced means no price at all: a model that charges only for output is counted in money, and left to Pi where a refresh costs as much as a miss", async (t) => {
+	t.after(() => mock.timers.reset());
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const outputOnly = harness({ lifetime: 300, cost: { input: 0, output: 15, cacheRead: 0, cacheWrite: 0 } });
+	outputOnly.emit("agent_settled");
+	assert.equal(outputOnly.decide(), undefined);
+	assert.match(await outputOnly.command("cache-keeper"), /left to Pi's own warming: at this model's prices a refresh costs as much as a miss/);
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const free = harness({ lifetime: 300 });
+	free.emit("agent_settled");
+	assert.deepEqual(free.decide(), { action: "stop" }, "no price at all: the ten-refresh allowance");
+	assert.match(await free.command("cache-keeper"), /at most 10 refreshes/);
 });
 
 test("R8: the ordinary cases with Pi's real adapters and tools: Claude and Kimi K3, long and short; GPT-6.1 Sol owned at 30 min with either retention; GPT with the shared prefix left to Pi", { skip: noCatalog }, async (t) => {

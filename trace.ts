@@ -110,8 +110,8 @@ export interface WarmTrace extends TimerContext {
 	/** Set on the one record where keeping warm ended for the rest of the idle period. */
 	stop?: WarmStop;
 	/**
-	 * Set on the first refresh of a model that missed the cache: from then on, until the Pi process ends, this
-	 * model's idle periods are left to Pi's own warming. The line `/cache-keeper` shows.
+	 * Set on the refresh that was a model's second miss in a row: from then on, until /cache-keeper-warm or the end of
+	 * the Pi process, this model is left to Pi's own warming. The line `/cache-keeper` shows.
 	 */
 	leftToPi?: string;
 }
@@ -267,9 +267,9 @@ export function describeTrace(record: TraceRecord): string {
 			const ended = record.stop ? `; keep-warm ended (${stopLabel(record.stop)})` : "";
 			if (record.action === "warm") return `${time} kept the cache warm${idle}${used}${budget}${ended}`;
 			if (record.action === "missed") return `${time} keeping the cache warm missed the cache${idle}${used}${budget}${ended || "; stopped until your next message"}${record.leftToPi ? `; ${record.leftToPi}` : ""}`;
-			if (record.action === "failed") return `${time} keeping the cache warm failed: ${record.reason}${used}${budget}${ended}`;
+			if (record.action === "failed") return `${time} keeping the cache warm failed: ${record.reason}${used}${budget}${ended}${record.leftToPi ? `; ${record.leftToPi}` : ""}`;
 			if (record.action === "pi-stopped") return `${time} told Pi's own idle warming to stop: ${record.reason}${budget}`;
-			if (record.action === "cancelled") return `${time} a refresh of the cache was cancelled: ${record.reason}${used}${budget}${ended}`;
+			if (record.action === "cancelled") return `${time} a refresh of the cache was cancelled: ${record.reason}${used}${budget}${ended}${record.leftToPi ? `; ${record.leftToPi}` : ""}`;
 			if (record.stop) return `${time} cache expires in ${record.secondsLeft}s: keep-warm ended (${stopLabel(record.stop)}), ${record.reason}${budget}`;
 			return `${time} cache expires in ${record.secondsLeft}s: not keeping it warm, ${record.reason}`;
 		}

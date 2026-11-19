@@ -205,6 +205,10 @@ test("a refresh that cannot pay for itself; a reason for thinking by what the re
 	assert.equal(refreshCanPay({ priced: true, refreshCost: 2.07, missCost: 2.07 }), false, "as much as a miss");
 	assert.equal(refreshCanPay({ priced: true, refreshCost: 0.6, missCost: 0 }), false, "no discount at all");
 	assert.equal(refreshCanPay({ priced: false, refreshCost: 0, missCost: 0 }), true, "without prices the budget counts refreshes");
+	const model = (cost: Record<string, number>) => ({ cost }) as never;
+	assert.equal(warmBudget(model({ input: 0, output: 15, cacheRead: 0, cacheWrite: 0 }), 1000).priced, true, "an output price is a price");
+	assert.equal(warmBudget(model({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }), 1000).priced, false, "no price at all");
+	assert.equal(refreshCanPay(warmBudget(model({ input: 0, output: 15, cacheRead: 0, cacheWrite: 0 }), 1000)), false, "a refresh costs output, a miss nothing");
 	assert.equal(whyNotReplayable({ thinking: { type: "adaptive" } }), undefined);
 	assert.equal(whyNotReplayable({ messages: [] }), undefined);
 	assert.equal(whyNotReplayable({ thinking: { type: "enabled" } }), 'the request turns thinking on (thinking: { type: "enabled" }), which a refresh capped at one output token cannot re-send as it was');
