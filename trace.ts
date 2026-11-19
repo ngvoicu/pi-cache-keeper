@@ -219,6 +219,11 @@ export function comparison(record: CompactTrace): { text: string; ratio: number 
 
 export function formatRemaining(ms: number): string {
 	const seconds = Math.max(0, Math.ceil(ms / 1000));
+	// A 12-hour cache reads "11h 59m", not "719m".
+	if (seconds >= 2 * 3600) {
+		const minutes = Math.floor(seconds / 60);
+		return minutes % 60 === 0 ? `${minutes / 60}h` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+	}
 	if (seconds >= 120) return `${Math.floor(seconds / 60)}m`;
 	return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }

@@ -42,6 +42,11 @@ test("the footer labels the countdown as the cache's, and the /cache-keeper line
 	assert.equal(formatCacheStatus(-5_000), "cache cold · next message full price");
 	assert.equal(formatRemaining(29 * 60_000), "29m");
 	assert.equal(formatRemaining(25_000), "0:25");
+	// Past two hours (a 12-hour cache), in hours and minutes.
+	assert.equal(formatRemaining(119 * 60_000), "119m");
+	assert.equal(formatRemaining(2 * 3_600_000), "2h");
+	assert.equal(formatRemaining(12 * 3_600_000 - 60_000), "11h 59m");
+	assert.equal(formatCacheStatus(11 * 3_600_000 + 30_000), "cache warm · 11h left");
 });
 
 test("the log describes keeping the cache warm", () => {

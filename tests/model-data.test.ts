@@ -14,7 +14,6 @@ import {
 	fieldStates,
 	findFacts,
 	accessVia,
-	formatFieldStates,
 	parseAnsweredEvent,
 	parseUpstreamsEvent,
 	loadStore,
@@ -164,30 +163,16 @@ test("when two entries can describe a model, only what both say is kept, and the
 	assert.deepEqual(findFacts([{ provider: "nowhere", model: "x" }], providers), { facts: {}, unsure: [], assumed: [], refs: [] });
 });
 
-test("the footer says what was found: a lifetime evaluations found unsafe counts as not found", () => {
+test("what providers.dev has for each field: a lifetime evaluations found unsafe counts as not found", () => {
 	const exact = (provider: string, model: string) => findFacts([{ provider, model }], providers);
-	assert.equal(formatFieldStates(exact("openai-codex", "gpt-6.1-sol")), "· window ✓ · cache short ✓ · long ✗ · price ✓");
-	assert.equal(formatFieldStates(exact("devin", "swe-2")), "· window ✓ · cache short ✗ · long ✗ · price ✗");
-	assert.equal(formatFieldStates(exact("openai-codex", "gpt-6.1-terra")), "· window ✓ · cache short ✗ · long ✗ · price ✓");
-	assert.equal(formatFieldStates(exact("antigravity", "gemini-3.8-flash-high")).startsWith("· window ✗ · cache short ✓"), true);
+	assert.deepEqual(fieldStates(exact("openai-codex", "gpt-6.1-sol")), { window: "found", short: "found", long: "missing", price: "found" });
+	assert.deepEqual(fieldStates(exact("devin", "swe-2")), { window: "found", short: "missing", long: "missing", price: "missing" });
+	assert.deepEqual(fieldStates(exact("openai-codex", "gpt-6.1-terra")), { window: "found", short: "missing", long: "missing", price: "found" });
+	const gemini = fieldStates(exact("antigravity", "gemini-3.8-flash-high"));
+	assert.deepEqual([gemini.window, gemini.short], ["missing", "found"]);
 	const unsure = findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, { upstreams: [{ provider: "anthropic" }] }), providers);
-	assert.equal(
-		formatFieldStates(unsure, (mark, state) => `<${state}:${mark}>`),
-		"· window <found:✓> · cache short <assumed:⚠> · long <found:✓> · price <found:✓> · <assumed:⚠ login or API key unknown: shorter values>",
-	);
-	assert.equal(formatFieldStates(exact("openai", "nope")), "· providers.dev: no data for this model");
-	// Nothing ever fetched: the footer says why, and still shows how the model is reached and the tier in use.
-	const none = findFacts([{ provider: "openai-codex", model: "gpt-6.1-sol" }], {});
-	assert.equal(
-		formatFieldStates(none, (text, state) => `<${state}:${text}>`, { via: "sub", tier: "short", fetch: "failed" }),
-		"· sub · providers.dev: no data, <assumed:fetch failed> · cache in use: short",
-	);
-	assert.equal(formatFieldStates(none, undefined, { via: "api", fetch: "offline" }), "· api · providers.dev: no data (PI_OFFLINE)");
-	// The saved data after a failed refresh: shown as it is, with a warning at the end.
-	assert.equal(
-		formatFieldStates(exact("openai-codex", "gpt-6.1-sol"), undefined, { via: "sub", fetch: "stale" }),
-		"· sub · window ✓ · cache short ✓ · long ✗ · price ✓ · ⚠ refresh failed: saved data",
-	);
+	assert.deepEqual(fieldStates(unsure), { window: "found", short: "assumed", long: "found", price: "found" });
+	assert.deepEqual(fieldStates(exact("openai", "nope")), { window: "missing", short: "missing", long: "missing", price: "missing" });
 	assert.equal(describeFound(exact("openai-codex", "gpt-6.1-sol")), "openai-codex/gpt-6.1-sol: window 922,000, short cache 5 min, price $2/$10 per million");
 	assert.equal(describeFound(exact("devin", "swe-2")), "devin/swe-2: window at least 300,499, no safe short cache lifetime");
 	assert.equal(
@@ -383,30 +368,18 @@ test("a proxy extension's events: every model's route, and what answered a reque
 	assert.equal(parseAnsweredEvent({ provider: "cliproxyapi", model: "claude-opus-5-5", upstreams: [] }), undefined);
 });
 
-test("the footer: values, a warning for a guess or for an answer from elsewhere, the tier in use, and login or key first", () => {
+test("which values are sure: one entry, the smaller of values that differ, or a value only some entries have", () => {
 	const login = { provider: "anthropic", model: "claude-opus-5-5", subscription: true };
 	const exact = findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, { upstreams: [login] }), providers);
 	assert.deepEqual({ short: exact.facts.short, long: exact.facts.long, assumed: exact.assumed, unsure: exact.unsure }, { short: 3600, long: 3600, assumed: [], unsure: [] });
-	assert.equal(formatFieldStates(exact), "· window ✓ · cache short ✓ · long ✓ · price ✓");
-	// The answer came from an API key while the values are the login's: said at the end of the footer.
-	assert.equal(formatFieldStates(exact, undefined, { served: "api" }), "· window ✓ · cache short ✓ · long ✓ · price ✓ · ⚠ answered by an API key");
-	assert.equal(formatFieldStates(findFacts([], providers), undefined, { served: "sub" }), "· providers.dev: no data for this model · ⚠ answered by a login");
-	// The tier in use is named after its mark, or on its own when there is no data.
-	assert.equal(formatFieldStates(exact, undefined, { tier: "short" }), "· window ✓ · cache short ✓ (in use) · long ✓ · price ✓");
-	assert.equal(formatFieldStates(exact, (text, state) => `<${state}:${text}>`, { tier: "long" }), "· window <found:✓> · cache short <found:✓> · long <found:✓> (in use) · price <found:✓>");
-	assert.equal(formatFieldStates(findFacts([], providers), undefined, { tier: "long" }), "· providers.dev: no data for this model · cache in use: long");
-	// Whether a subscription login or an API key serves the model leads the footer.
-	assert.equal(formatFieldStates(exact, undefined, { via: "sub", tier: "short" }), "· sub · window ✓ · cache short ✓ (in use) · long ✓ · price ✓");
-	assert.equal(formatFieldStates(findFacts([], providers), undefined, { via: "api" }), "· api · providers.dev: no data for this model");
-	assert.equal(
-		formatFieldStates(findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, { upstreams: [{ provider: "anthropic" }] }), providers), undefined, { via: "sub or api" }),
-		"· sub or api · window ✓ · cache short ⚠ · long ✓ · price ✓ · ⚠ login or API key unknown: shorter values",
-	);
-	// Pi knows it is the ChatGPT login, but providers.dev has no entry for that login on the OpenAI API.
-	assert.equal(
-		formatFieldStates(findFacts(lookupsFor({ provider: "openai", id: "gpt-6.1-sol" }, { subscription: true }), providers), undefined, { via: "sub" }),
-		"· sub · window ✓ · cache short ⚠ · long ? · price ✓ · ⚠ no entry for this login: shorter values",
-	);
+	assert.deepEqual(fieldStates(exact), { window: "found", short: "found", long: "found", price: "found" });
+	// A login or an API key, not known: the key's 5 minutes, the smaller short lifetime, is a guess.
+	const either = findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, { upstreams: [{ provider: "anthropic" }] }), providers);
+	assert.deepEqual([either.facts.short, fieldStates(either).short], [300, "assumed"]);
+	// Pi knows it is the ChatGPT login, but providers.dev has no entry for that login on the OpenAI API: the short
+	// lifetime is the smaller of the two, the long one only the API key has.
+	const chatgpt = findFacts(lookupsFor({ provider: "openai", id: "gpt-6.1-sol" }, { subscription: true }), providers);
+	assert.deepEqual(fieldStates(chatgpt), { window: "found", short: "assumed", long: "unsure", price: "found" });
 });
 
 test("a model is served by a subscription login or an API key: pi's own sign-in, or what the proxy's extension says", () => {

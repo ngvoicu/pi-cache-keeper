@@ -48,7 +48,6 @@ import {
 	appendTrace,
 	comparison,
 	describeTrace,
-	formatCacheStatus,
 	formatDuration,
 	formatRemaining,
 	formatTokens,
@@ -99,8 +98,8 @@ import {
 	desiredOverride,
 	fetchDataset,
 	findFacts,
+	fieldStates,
 	accessVia,
-	formatFieldStates,
 	parseAnsweredEvent,
 	parseUpstreamsEvent,
 	type Upstream,
@@ -118,9 +117,9 @@ import {
 	type Access,
 	type DataStore,
 	type Fetch,
-	type FetchState,
 	type Found,
 } from "./model-data.ts";
+import { formatFooter, lifetimesView, priceAt, sentView, type Countdown, type DataView, type FooterView, type KeepWarmView, type PriceView } from "./footer.ts";
 
 interface CapturedRequest {
 	transcript: AgentMessage[];
@@ -156,8 +155,6 @@ const MIN_OWNED_LIFETIME_MS = 60_000;
  */
 const WARM_MISSES = Symbol.for("pi-cache-keeper.warm-misses");
 const MISSES_IN_A_ROW = 2;
-/** The footer, after the countdown, while the current model is left to Pi after two misses in a row. */
-const FALLBACK_STATUS = "keep-warm: Pi's after 2 missed refreshes (/cache-keeper-warm)";
 interface WarmMisses {
 	counts: Map<string, number>;
 	fallback: Map<string, number>;
@@ -190,6 +187,8 @@ interface WarmPeriod {
 	/** When Pi went idle after the period's answer; the time limit counts from here. */
 	idleSince: number;
 	notOwned?: string;
+	/** What the footer says of `notOwned`, in a few words; none where nothing is worth saying (no answer yet). */
+	notOwnedLabel?: string;
 	/** The request of the period's answer; forgotten with the cached request (model switch, compaction, branch move). */
 	request?: CapturedRequest;
 	budget?: WarmBudget;
@@ -216,8 +215,8 @@ interface CachedPath {
 	cache: CacheState;
 }
 
+/** The extension's one status in Pi's footer: the countdown, what went wrong, and the values in use (see footer.ts). */
 const STATUS_KEY = "cache-keeper";
-const DATA_STATUS_KEY = "cache-keeper-data";
 const httpFetch: Fetch = (url, init) => fetch(url, init);
 const CARD_TYPE = "cache-keeper";
 /** The card type pi-cached-compaction wrote; still rendered so cards in older sessions show. */
@@ -226,7 +225,6 @@ const PREFIX_MISMATCH = "pi-cache-keeper: request prefix differs from the cached
 const BRIDGE_API = "claude-bridge";
 const FORK_REQUEST_HEADER = "x-claude-bridge-fork";
 const EXPIRY_LEAD_MS = 20_000;
-const WARNING_MS = 30_000;
 const RETENTION_MARKER = "PI_CACHE_KEEPER_RETENTION";
 const INTERACTIVE_OWNER = Symbol.for("pi-cache-keeper.interactive-long-retention");
 
@@ -336,44 +334,50 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		misses.fallback.set(model, at);
 		return true;
 	};
-	// Why the extension cannot keep a period warm itself, from facts that last for the period; undefined when it can.
-	const whyNotOwned = (state: CacheState | undefined, model: Model<Api> | undefined): string | undefined => {
+	// Why the extension cannot keep a period warm itself, from facts that last for the period, with what the footer says
+	// of it in a few words; undefined when it can.
+	const whyNotOwned = (state: CacheState | undefined, model: Model<Api> | undefined): { reason: string; label?: string } | undefined => {
+		const no = (label: string | undefined, reason: string) => ({ reason, ...(label ? { label } : {}) });
 		const fellBack = fallbackFor(model);
-		if (fellBack) return fallbackLine(fellBack.key, fellBack.at);
-		if (state?.answeredAt === undefined) return "no answer has read or written the prompt cache yet";
-		if (!state.lifetime) return "the cache lifetime is unknown";
-		if (state.lifetime.ms < MIN_OWNED_LIFETIME_MS) return `the cache lifetime (${formatDuration(state.lifetime.ms)}) is under a minute`;
+		// While it lasts the footer says it on its own; after /cache-keeper-warm the period stays Pi's until the next answer.
+		if (fellBack) return no("until your next message", fallbackLine(fellBack.key, fellBack.at));
+		if (state?.answeredAt === undefined) return no(undefined, "no answer has read or written the prompt cache yet");
+		if (!state.lifetime) return no("no cache lifetime", "the cache lifetime is unknown");
+		if (state.lifetime.ms < MIN_OWNED_LIFETIME_MS) return no("lifetime under a minute", `the cache lifetime (${formatDuration(state.lifetime.ms)}) is under a minute`);
 		// The same state the countdown reads: without a cached answer there is no expiry to keep warm.
-		if (!state.cached) return "the last answer did not use the prompt cache";
+		if (!state.cached) return no("last answer used no cache", "the last answer did not use the prompt cache");
 		const request = answerRequest;
-		if (!request || request.answeredAt !== state.answeredAt) return "the request of the last answer was not captured";
-		if (!request.payload) return `${request.model.api} requests cannot be re-sent`;
+		if (!request || request.answeredAt !== state.answeredAt) return no("request not seen", "the request of the last answer was not captured");
+		if (!request.payload) return no("no request to re-send", `${request.model.api} requests cannot be re-sent`);
 		// The same checks the refresh makes, on the payload as it was sent: only where a refresh is proven to go out with
 		// its output capped (see REPLAYABLE_APIS) does the extension keep the cache warm and stop Pi's warming.
-		if (!REPLAYABLE_APIS.has(request.model.api)) return `this API's requests are not re-sent by the extension (${request.model.api})`;
-		if (!messageArrayKey(request.payload)) return `the ${request.model.api} request has no message list the extension can check`;
-		if (!outputLimitKey(request.payload)) return "the request carries no output limit the extension can cap";
+		if (!REPLAYABLE_APIS.has(request.model.api)) return no(`${request.model.api} not re-sent`, `this API's requests are not re-sent by the extension (${request.model.api})`);
+		if (!messageArrayKey(request.payload)) return no("request not checkable", `the ${request.model.api} request has no message list the extension can check`);
+		if (!outputLimitKey(request.payload)) return no("no output limit", "the request carries no output limit the extension can cap");
 		const thinking = whyNotReplayable(request.payload);
-		if (thinking) return thinking;
+		if (thinking) return no("thinking on", thinking);
 		// R8: the tier is the one the request as sent asks for, never the setting. One lifetime for the whole request, the
 		// one the period would fix; no attempt to work out another.
 		const cache = request.cache ?? requestCache(request.payload);
-		if (cache.unreadable) return `the request carries a cache marker the extension does not read (${cache.unreadable})`;
-		if (request.sharedPrefix || cache.mixed) return "the request carries more than one cache lifetime";
+		if (cache.unreadable) return no("unreadable cache marker", `the request carries a cache marker the extension does not read (${cache.unreadable})`);
+		if (request.sharedPrefix || cache.mixed) return no("several cache lifetimes", "the request carries more than one cache lifetime");
 		// The answer's own report wins: writes in the other tier, or in both, and the request is not what was cached.
 		const answered = state.answerTiers;
-		if (answered && answered.length > 1) return "the answer reports cache writes in both tiers (5 min and 1 h)";
-		if (answered?.length === 1 && answered[0] !== cache.tier) return `the answer reports cache writes in the ${answered[0]} tier, the request asked for the ${cache.tier} one`;
-		if (state.tier !== cache.tier) return `the cache tier reported earlier (${state.tier}) does not match the one the request asked for (${cache.tier})`;
-		if (cache.markers.some((m) => m.ms !== undefined && m.ms !== state.lifetime?.ms)) return "the request's cache lifetime does not match the model data";
+		if (answered && answered.length > 1) return no("both tiers written", "the answer reports cache writes in both tiers (5 min and 1 h)");
+		if (answered?.length === 1 && answered[0] !== cache.tier) return no("the answer wrote the other tier", `the answer reports cache writes in the ${answered[0]} tier, the request asked for the ${cache.tier} one`);
+		if (state.tier !== cache.tier) return no("tier mismatch", `the cache tier reported earlier (${state.tier}) does not match the one the request asked for (${cache.tier})`);
+		if (cache.markers.some((m) => m.ms !== undefined && m.ms !== state.lifetime?.ms)) return no("lifetime differs from the data", "the request's cache lifetime does not match the model data");
 		// A lifetime assumed for a model family holds only on that provider's own API.
 		const ownApi = ASSUMED_LIFETIMES[state.lifetime.source];
 		if (ownApi && !ownApi.test(request.model.baseUrl)) {
-			return `the cache lifetime (${state.lifetime.source}) is only assumed on the provider's own API, not at ${request.model.baseUrl}; declare one with modelOverrides.promptCache`;
+			return no(
+				"lifetime only assumed here",
+				`the cache lifetime (${state.lifetime.source}) is only assumed on the provider's own API, not at ${request.model.baseUrl}; declare one with modelOverrides.promptCache`,
+			);
 		}
 		// Owned or left alone, never in between: where one refresh costs as much as the miss it avoids, the gate would
 		// stop the first refresh, so the period is not taken from Pi at all.
-		if (state.answerPrompt !== undefined && !refreshCanPay(warmBudget(request.model, state.answerPrompt))) return "at this model's prices a refresh costs as much as a miss";
+		if (state.answerPrompt !== undefined && !refreshCanPay(warmBudget(request.model, state.answerPrompt))) return no("a refresh costs a miss", "at this model's prices a refresh costs as much as a miss");
 		return undefined;
 	};
 	// Pi is idle. After a run that brought a new real answer (or at a session's start) a new period starts; after one that
@@ -384,13 +388,14 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const state = ctx.model ? keptState(ctx.model, ctx.sessionManager.getBranch(), requested) : undefined;
 		const answeredAt = state?.answeredAt;
 		if (!fresh && period && (answeredAt === undefined || answeredAt === period.answeredAt)) return;
-		const notOwned = whyNotOwned(state, answerRequest?.model ?? ctx.model);
-		const request = notOwned === undefined ? answerRequest : undefined;
+		const why = whyNotOwned(state, answerRequest?.model ?? ctx.model);
+		const request = why === undefined ? answerRequest : undefined;
 		const model = ctx.model;
 		period = {
 			answeredAt,
 			idleSince: Date.now(),
-			notOwned,
+			notOwned: why?.reason,
+			...(why?.label ? { notOwnedLabel: why.label } : {}),
 			onAtStart: warmMinutes(true) > 0,
 			request,
 			budget: request && state?.answerPrompt !== undefined ? warmBudget(request.model, state.answerPrompt) : undefined,
@@ -459,10 +464,39 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	pi.registerEntryRenderer(LEGACY_CARD_TYPE, renderCard);
 	const showCard = (records: TraceRecord[]) => pi.appendEntry<{ records: TraceRecord[] }>(CARD_TYPE, { records });
 
-	const stopTimer = (ctx: ExtensionContext) => {
+	// The footer (see footer.ts): the countdown as the timer last set it, the model's values as showData last read them,
+	// and what keep-warm says now, fitted to the terminal's width. Pi is told only when the text changes.
+	let countdown: Countdown | undefined;
+	let modelView: Omit<FooterView, "countdown" | "keepWarm"> | undefined;
+	let footerText: string | undefined;
+	let onResize: (() => void) | undefined;
+	// Pi's footer is as wide as the terminal; elsewhere (RPC, tests) nothing is fitted.
+	const footerWidth = () => (process.stdout.isTTY && process.stdout.columns > 0 ? process.stdout.columns : Number.POSITIVE_INFINITY);
+	// What keep-warm says in the footer, while it is on: two misses in a row left the model to Pi (for as long as that
+	// lasts, countdown or not), warming ended for this idle period and why (until your next message), the period is
+	// Pi's and why, or keep-warm was switched on during the period.
+	const keepWarmView = (model: Model<Api>): KeepWarmView | undefined => {
+		if (warmMinutes() <= 0) return undefined;
+		if (fallbackFor(model)) return { fallback: true };
+		const p = period;
+		if (!p) return undefined;
+		if (owns(p)) return p.ended && !running ? { ended: { stop: p.ended.stop, limit: keepWarmLabel(warmMinutes()), amounts: spendingText(p.budget, p.spending) } } : undefined;
+		if (!p.onAtStart) return { pending: true };
+		return p.notOwnedLabel ? { leftToPi: p.notOwnedLabel } : undefined;
+	};
+	const renderFooter = (ctx: ExtensionContext) => {
+		if (!ctx.hasUI) return;
+		const model = ctx.model;
+		const text = model ? formatFooter({ countdown, keepWarm: keepWarmView(model), ...modelView }, footerWidth(), (piece, tone) => ctx.ui.theme.fg(tone, piece)) : undefined;
+		if (text === footerText) return;
+		footerText = text;
+		ctx.ui.setStatus(STATUS_KEY, text);
+	};
+	const stopTimer = (ctx: ExtensionContext, render = true) => {
 		clearInterval(ticker);
 		ticker = undefined;
-		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
+		countdown = undefined;
+		if (render) renderFooter(ctx);
 	};
 	const forget = (ctx: ExtensionContext) => {
 		pendingTranscript = undefined;
@@ -542,27 +576,59 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		return { ...model, promptCache };
 	};
 
-	// The footer: what providers.dev has for the current model. Before any data was fetched it shows only when no fetch
-	// is coming (it failed, or PI_OFFLINE), so `sub` / `api` and the tier in use still show and the footer says why.
+	// The model's values for the footer: the cache lifetimes and the tier in use, what the last request asked for, the
+	// price, and what providers.dev has to say. Each value is one Pi or the extension has: Pi's model as it is now (its
+	// catalog, your models.json, providers.dev's values written there), the lifetime the countdown runs on, the request
+	// as it was sent.
+	const modelViewOf = (ctx: ExtensionContext, model: Model<Api>): Omit<FooterView, "countdown" | "keepWarm"> => {
+		const entries = ctx.sessionManager.getBranch();
+		const bridge = model.api === BRIDGE_API;
+		const access = accessReader(ctx)(model);
+		const otherwise = servedOtherwise(model);
+		const lastAnswer = answeredFor(model);
+		const via = bridge ? undefined : accessVia(lastAnswer ? { upstreams: lastAnswer } : access);
+		const fetched = data.checkedAt !== undefined;
+		// providers.dev's entries for the values in use: those of what answered, when that is not what the values are for.
+		const found = config.modelData && fetched ? findFacts(lookupsFor(model, otherwise ? { upstreams: otherwise } : access), data.providers) : undefined;
+		const served = servedModel(model);
+		// The tier and lifetime the countdown runs on: as a period the extension keeps warm fixed them, else as with
+		// keep-warm off. Claude Code picks the tier for the bridge model.
+		const p = period;
+		const owned = owns(p);
+		const tier = owned ? p.fixed.tier : bridge ? undefined : cacheTier(entries, model);
+		const counted = owned ? undefined : stateOf(model, entries).lifetime;
+		const declared = tier === undefined ? undefined : served.promptCache?.[tier];
+		// Where the model declares none for the tier, the countdown's own (the provider's report, a family's documented one).
+		const inUse = owned ? p.fixed.ms / 1000 : (declared ?? (counted && counted.source !== "declared by the model" ? counted.ms / 1000 : undefined));
+		const lifetimes = lifetimesView(served.promptCache, { tier, seconds: inUse }, found);
+		const request = captured && captured.model.provider === model.provider && captured.model.id === model.id ? captured : undefined;
+		const cache = request?.payload ? (request.cache ?? requestCache(request.payload)) : undefined;
+		const retention = process.env.PI_CACHE_RETENTION === "long" ? "long" : "short";
+		const sent = cache ? sentView(cache, { tier, ms: inUse === undefined ? undefined : inUse * 1000 }, served.promptCache, retention) : undefined;
+		const rates = hasPrices(model) ? priceAt(model.cost, ctx.getContextUsage()?.tokens ?? undefined) : undefined;
+		const priceState = found && found.refs.length > 0 ? fieldStates(found).price : undefined;
+		const price: PriceView = {
+			...(via ? { via } : {}),
+			// A subscription login has no per-token price; nor has Claude Code through the bridge, which Pi prices at $0.
+			...(via === "sub" || (bridge && !rates) ? { subscription: true } : {}),
+			...(rates ? { rates } : priceState === "unsure" ? { partial: true } : {}),
+		};
+		const dataView: DataView = {};
+		if (config.modelData) {
+			if (!fetched && dataError !== undefined) dataView.fetch = "failed";
+			else if (!fetched && process.env.PI_OFFLINE) dataView.fetch = "offline";
+			if (fetched && dataError !== undefined) dataView.staleMs = Date.now() - (data.checkedAt as number);
+			if (found && found.refs.length === 0) dataView.noEntry = true;
+			if (otherwise) dataView.served = accessVia({ upstreams: otherwise });
+			if (lifetimes.short.mark === "guess" || lifetimes.long.mark === "guess") dataView.guess = via === "sub" || via === "api" ? "login" : "access";
+		}
+		return { lifetimes, ...(sent ? { sent } : {}), price, data: dataView };
+	};
 	const showData = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
 		const model = ctx.model;
-		const never = data.checkedAt === undefined;
-		const fetch: FetchState | undefined = never ? (dataError !== undefined ? "failed" : process.env.PI_OFFLINE ? "offline" : undefined) : dataError !== undefined ? "stale" : undefined;
-		if (!config.modelData || !model || (never && !fetch)) return ctx.ui.setStatus(DATA_STATUS_KEY, undefined);
-		const { theme } = ctx.ui;
-		const color = (state: string) => (state === "found" ? "success" : state === "missing" ? "dim" : "warning");
-		// Claude Code picks the tier for the bridge model.
-		const tier = model.api === BRIDGE_API ? undefined : cacheTier(ctx.sessionManager.getBranch(), model);
-		const access = accessReader(ctx)(model);
-		const otherwise = servedOtherwise(model);
-		const served = otherwise ? accessVia({ upstreams: otherwise }) : undefined;
-		const lastAnswer = answeredFor(model);
-		const via = model.api === BRIDGE_API ? undefined : accessVia(lastAnswer ? { upstreams: lastAnswer } : access);
-		ctx.ui.setStatus(
-			DATA_STATUS_KEY,
-			formatFieldStates(findFacts(lookupsFor(model, access), data.providers), (text, state) => theme.fg(color(state), text), { served, tier, via, fetch }),
-		);
+		modelView = model ? modelViewOf(ctx, model) : undefined;
+		renderFooter(ctx);
 	};
 
 	// Brings models.json in line with the saved data (or, with the setting off, takes this extension's values out).
@@ -673,7 +739,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// can now use a provider it has no data for. Never waited for, and never in PI_OFFLINE mode.
 	const refreshDataIfDue = (ctx: ExtensionContext) => {
 		// Turned off by hand in settings.json: take this extension's values out of models.json, as the menu does.
-		if (!config.modelData && Object.keys(data.written).length > 0) void applyData(ctx).catch(() => {});
+		// The footer then shows Pi's own values again.
+		if (!config.modelData && Object.keys(data.written).length > 0) void applyData(ctx).then(() => ifSessionAlive(() => showData(ctx)), () => {});
 		if (!config.modelData || !ctx.hasUI || process.env.PI_OFFLINE) return;
 		const due = data.checkedAt === undefined || Date.now() - data.checkedAt > DATA_MAX_AGE_MS || neededProviders(ctx).some((provider) => data.providers[provider] === undefined);
 		if (due) void refreshAndReport(ctx, false, false);
@@ -1059,10 +1126,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	};
 
 	const startTimer = (ctx: ExtensionContext, compactAtExpiry = true) => {
-		stopTimer(ctx);
+		stopTimer(ctx, false);
 		const readState = () => timerState(ctx);
 		const first = readState();
-		if (first?.expiresAt === undefined) return;
+		if (first?.expiresAt === undefined) return renderFooter(ctx);
 		let expiresAt = first.expiresAt;
 		const warmLead = first.lifetime ? warmLeadMs(first.lifetime.ms, EXPIRY_LEAD_MS) : 0;
 		const timer: TimerContext = {
@@ -1070,7 +1137,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			lifetimeSeconds: first.lifetime && first.lifetime.ms / 1000,
 			lifetimeSource: first.lifetime?.source,
 		};
-		let shown: string | undefined;
 		let ticks = 0;
 		let attempted = !compactAtExpiry;
 		let warmChecked = false;
@@ -1080,15 +1146,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			const keepWarmOn = warmMinutes() > 0;
 			if (keepWarmOn && remaining > 0 && !warming) noteLimit(ctx, expiresAt, timer);
 			if (!keepWarmOn) noteSwitchOff(ctx, expiresAt, timer);
-			const ended = keepWarmOn && owns(period) ? endedStatus(period) : undefined;
-			// Left to Pi after two misses in a row: said for as long as it lasts.
-			const fellBack = keepWarmOn && fallbackFor(ctx.model) ? FALLBACK_STATUS : undefined;
-			const suffix = [ended, fellBack].filter(Boolean).join(" · ");
-			const text = warming ? "cache warm · refreshing" : `${formatCacheStatus(remaining)}${suffix ? ` · ${suffix}` : ""}`;
-			if (ctx.hasUI && text !== shown) {
-				shown = text;
-				ctx.ui.setStatus(STATUS_KEY, remaining <= WARNING_MS && !warming ? ctx.ui.theme.fg(remaining > 0 ? "warning" : "dim", text) : text);
-			}
+			countdown = warming ? { state: "refreshing" } : remaining > 0 ? { state: "warm", ms: remaining } : { state: "cold" };
+			renderFooter(ctx);
 			if (remaining <= 0) {
 				// Expired (or the timer ran this late): nothing is refreshed or compacted from a cache that is gone.
 				clearInterval(ticker);
@@ -1174,6 +1233,14 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		refreshDataIfDue(ctx);
 		// Proxy extensions answer with where their models come from (UPSTREAMS_EVENT).
 		if (config.modelData) pi.events.emit(REQUEST_EVENT, {});
+		// The footer is fitted to the terminal's width again when it changes.
+		if (ctx.hasUI && !onResize) {
+			onResize = () => {
+				const current = sessionCtx;
+				if (current) ifSessionAlive(() => renderFooter(current));
+			};
+			process.stdout.on("resize", onResize);
+		}
 	});
 	// One warmer per idle period. Where the extension keeps the period warm itself (see whyNotOwned), every decision of
 	// Pi's own warming that arrives while the window is idle (between agent_settled and agent_start, and Pi idle) is
@@ -1204,11 +1271,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		abortWarm();
 		// The idle period, its spending and its time limit stay: they end only when this run brings a new real answer.
 		running = true;
-		stopTimer(ctx);
-		// Keep the status in place during a request, so it does not appear and vanish with each turn.
-		if (ctx.hasUI && ctx.model && stateOf(ctx.model, ctx.sessionManager.getBranch()).lifetime) {
-			ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", "cache in use"));
-		}
+		stopTimer(ctx, false);
+		// Keep the countdown's place during a request, so it does not appear and vanish with each turn.
+		if (ctx.hasUI && ctx.model && stateOf(ctx.model, ctx.sessionManager.getBranch()).lifetime) countdown = { state: "running" };
+		renderFooter(ctx);
 	});
 	pi.on("agent_settled", (_event, ctx) => {
 		goIdle(ctx);
@@ -1267,11 +1333,17 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	pi.on("session_tree", (_event, ctx) => {
 		forget(ctx);
 		startTimer(ctx);
+		// The request the footer says was sent is forgotten with the branch.
+		showData(ctx);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
 		sessionCtx = undefined;
+		if (onResize) process.stdout.off("resize", onResize);
+		onResize = undefined;
 		abortWarm();
-		stopTimer(ctx);
+		stopTimer(ctx, false);
+		footerText = undefined;
+		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 	});
 
 	const checkCachedPath = (entries: SessionEntry[], model: Model<Api> | undefined): CachedPath | { reason: string } => checkRequestPath(entries, model, captured);
@@ -1582,7 +1654,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 								.catch((error: unknown) => ifSessionAlive(() => ctx.ui.notify(`pi-cache-keeper could not update models.json: ${error instanceof Error ? error.message : String(error)}`, "error")));
 						}
 					}
-					if (id === "keepWarmMinutes") describeWarm();
+					if (id === "keepWarmMinutes") {
+						describeWarm();
+						keepWarmSetting(true);
+						showData(ctx);
+					}
 					if (id === "compactAtPercent" || id === "compactAtTokens") {
 						fullStuck = false;
 						lastFullSkip = undefined;
@@ -1637,6 +1713,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				text = `No model was left to Pi's own warming. The missed-refresh count of ${counted.join(", ")} is cleared.${off}`;
 			} else text = `Nothing to clear: no model was left to Pi's own warming, and no refresh had missed the cache.${off}`;
 			ctx.ui.notify(text, "info");
+			renderFooter(ctx);
 		},
 	});
 

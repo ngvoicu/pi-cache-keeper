@@ -764,34 +764,38 @@ test("R4: each end reason is recorded once, with the amounts, in the log, the fo
 		const footer = h.statuses.map((s) => s.text).filter((text) => text?.includes("keep-warm ended"));
 		return { h, stop: stops[0], footer: footer[0], shown: await h.command("cache-keeper") };
 	};
+	// After the countdown and why warming ended, the values in use: the period's tier and lifetime, the request as sent
+	// (no cache marker, Pi's default cache, which is the short tier the period counts), and the price.
+	const values = (lifetime: string, price = "api $3/$15 per M") => ` · short ${lifetime} (in use) · long ${lifetime} · sent default cache · ${price}`;
 
 	// budget: with prices (gate) and without (count).
 	let r = await ended({ lifetime: 300, cost: WITH_WRITE }, undefined, 1440);
 	assert.equal(r.stop.stop, "budget");
-	assert.equal(r.footer, "cache warm · 0:24 left · keep-warm ended (budget reached): $1.98 spent, a miss costs $2.07");
+	assert.equal(r.footer, `cache warm · 0:24 left · keep-warm ended (budget reached): $1.98 spent, a miss costs $2.07${values("5m")}`);
 	assert.match(r.shown, /keep warm: up to 24 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; keep-warm ended \(budget reached\): \$1\.98 spent, a miss costs \$2\.07, until your next message \(refreshing has cost/);
 	r = await ended({ lifetime: 300 }, undefined, 1440);
-	assert.equal(r.footer, "cache warm · 5m left · keep-warm ended (budget reached): 10 of 10 refreshes", "ended when the 10th refresh settled");
+	assert.equal(r.footer, `cache warm · 5m left · keep-warm ended (budget reached): 10 of 10 refreshes${values("5m", "api, price unknown")}`, "ended when the 10th refresh settled");
 
 	// limit: the last refresh carries the cache past the window; or the answer's own lifetime already covers it.
 	r = await ended({ lifetime: 3600, cost: WITH_WRITE });
 	assert.deepEqual([r.stop.action, r.stop.stop, r.h.warms.length], ["warm", "limit", 2]);
-	assert.equal(r.footer, "cache warm · 60m left · keep-warm ended (2 h limit): $0.36 spent, a miss costs $2.07");
+	assert.equal(r.footer, `cache warm · 60m left · keep-warm ended (2 h limit): $0.36 spent, a miss costs $2.07${values("1h")}`);
 	r = await ended({ lifetime: 3600, cost: WITH_WRITE }, undefined, 30);
 	assert.deepEqual([r.stop.action, r.stop.stop, r.h.warms.length], ["skip", "limit", 0]);
 	assert.equal(r.stop.idleMinutes, 0, "recorded when the period starts");
-	assert.equal(r.footer, "cache warm · 60m left · keep-warm ended (30 min limit): $0 spent, a miss costs $2.07");
+	assert.equal(r.footer, `cache warm · 60m left · keep-warm ended (30 min limit): $0 spent, a miss costs $2.07${values("1h")}`);
 
 	// missed: a refresh read under 90% from the cache.
 	r = await ended({ lifetime: 300, cost: WITH_WRITE, respond: () => ({ usage: { cacheRead: 300_000, cacheWrite: 300_000 } }) });
 	assert.deepEqual([r.stop.action, r.stop.stop, r.h.warms.length], ["missed", "missed", 1]);
 	assert.equal(r.stop.reason, "the refresh read only 49% from the cache, so it wrote the context again");
-	assert.equal(r.footer, "cache warm · 5m left · keep-warm ended (a refresh missed the cache): $1.22 spent, a miss costs $2.07");
+	// Something gone wrong is marked, right after the countdown.
+	assert.equal(r.footer, `cache warm · 5m left · ⚠ keep-warm ended (a refresh missed the cache): $1.22 spent, a miss costs $2.07${values("5m")}`);
 
 	// failed: a refresh ended in an error.
 	r = await ended({ lifetime: 300, cost: WITH_WRITE, respond: () => ({ stopReason: "error", errorMessage: "overloaded" }) });
 	assert.deepEqual([r.stop.action, r.stop.stop, r.h.warms.length], ["failed", "failed", 1]);
-	assert.equal(r.footer, "cache warm · 0:25 left · keep-warm ended (a refresh failed): $0.18 spent, a miss costs $2.07");
+	assert.equal(r.footer, `cache warm · 0:25 left · ⚠ keep-warm ended (a refresh failed): $0.18 spent, a miss costs $2.07${values("5m")}`);
 
 	// unable: the cached path no longer checks out (a branch move made the extension forget the request). Pi's
 	// decisions are still answered by the period's facts.
@@ -801,7 +805,8 @@ test("R4: each end reason is recorded once, with the amounts, in the log, the fo
 	});
 	assert.deepEqual([r.stop.action, r.stop.stop, r.h.warms.length], ["skip", "unable", 0]);
 	assert.match(r.stop.reason, /^no request since the session started or compacted, or since the model or branch changed/);
-	assert.equal(r.footer, "cache warm · 0:24 left · keep-warm ended (the request can't be re-sent): $0 spent, a miss costs $2.07");
+	// The branch move forgot the request, so the footer no longer says what was sent.
+	assert.equal(r.footer, "cache warm · 0:24 left · ⚠ keep-warm ended (the request can't be re-sent): $0 spent, a miss costs $2.07 · short 5m (in use) · long 5m · api $3/$15 per M");
 	assert.deepEqual(r.h.decide(), { action: "stop" });
 });
 
@@ -1806,7 +1811,7 @@ const HALF_MISS = { usage: { input: 0, cacheRead: 300_000, cacheWrite: 300_000 }
 const misses = () => (globalThis as Record<symbol, { counts: Map<string, number>; fallback: Map<string, number> } | undefined>)[Symbol.for("pi-cache-keeper.warm-misses")];
 const countOf = (model = MODEL_KEY) => misses()?.counts.get(model) ?? 0;
 const WARNING = `Two refreshes in a row missed the cache for ${MODEL_KEY}, so pi-cache-keeper stopped keeping it warm; Pi's own warming takes over. /cache-keeper-warm starts it again.`;
-const FALLBACK_STATUS = "keep-warm: Pi's after 2 missed refreshes (/cache-keeper-warm)";
+const FALLBACK_STATUS = "⚠ keep-warm: Pi's after 2 missed refreshes (/cache-keeper-warm)";
 const fallbackLineAt = (at: number, model = MODEL_KEY) =>
 	`two refreshes in a row missed the cache for ${model} (the last at ${new Date(at).toTimeString().slice(0, 5)}), so it is left to Pi's own warming; /cache-keeper-warm starts keeping it warm again`;
 const keepWarmLineOf = async (h: ReturnType<typeof harness>) => (await h.command("cache-keeper")).split("\n").find((l) => l.startsWith("keep warm:"));
@@ -1874,7 +1879,9 @@ test("R9: two misses in a row: left to Pi from the next period's start, warned o
 	const third = await nextPeriod(h);
 	assert.deepEqual(third, { decided: undefined, refreshed: 0 }, "the handler returns nothing, nothing is sent");
 	assert.equal(await keepWarmLineOf(h), `${RULE}; ${line}`);
-	assert.ok(h.statuses.some((s) => s.text?.endsWith(` · ${FALLBACK_STATUS}`)), "the footer");
+	// The footer says it right after the countdown, also once the cache has gone cold and no countdown runs.
+	assert.ok(h.statuses.some((s) => s.text?.startsWith(`cache warm · 4m left · ${FALLBACK_STATUS} · `)), "the footer, with the countdown");
+	assert.equal(h.statuses.at(-1)?.text, `cache cold · next message full price · ${FALLBACK_STATUS} · short 5m (in use) · long 5m · sent default cache · api $3/$15 per M`, "and without one");
 	assert.ok((await h.command("cache-keeper-settings")).includes(line), "the settings line");
 	assert.deepEqual(await nextPeriod(h), { decided: undefined, refreshed: 0 }, "and the next");
 	assert.equal(said.filter((n) => n === WARNING).length, 1, "warned once");
@@ -1892,6 +1899,7 @@ test("R9: two misses in a row: left to Pi from the next period's start, warned o
 	);
 	assert.equal(h.state.attempts, attempts, "the command sends nothing");
 	assert.deepEqual([misses()?.fallback.size, misses()?.counts.size], [0, 0]);
+	assert.ok(!h.statuses.at(-1)?.text?.includes(FALLBACK_STATUS), "the footer no longer says it");
 	assert.deepEqual((await nextPeriod(h)).decided, { action: "stop" }, "owned again from the next period");
 	assert.equal(countOf(), 1, "counted from zero: one miss");
 	assert.deepEqual((await nextPeriod(h)).decided, { action: "stop" }, "still owned after one miss");
