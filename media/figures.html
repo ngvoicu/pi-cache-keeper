@@ -21,7 +21,11 @@ figure{margin:0 0 40px;width:960px}
 /* The footer's states: one caption and one status line each */
 .term .states{padding:6px 18px 14px}
 .term .states .cap{margin:10px 0 3px;font:11px/1.3 -apple-system,"Segoe UI",sans-serif;color:#7e888e}
+.term .states .sect{margin:16px 0 0;font:600 11px/1.3 -apple-system,"Segoe UI",sans-serif;color:#9da5a9}
+.term .states .sect:first-child{margin-top:6px}
 .term .states pre{padding:0;font-size:11px}
+/* A narrower terminal: its right edge, dashed */
+.term .states pre.edge{box-sizing:content-box;margin-top:6px;border-right:1px dashed #5a6369}
 
 /* Concept figures: the video's paper, type and colors */
 .paper{border-radius:8px;border:1px solid rgba(139,132,125,.5);padding:28px 36px 30px;color:#252f3d;font:16px/1 Departure,monospace;background-color:#ebe7e4;
@@ -63,19 +67,36 @@ figure{margin:0 0 40px;width:960px}
 <span class="rule"> ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</span>
 <span class="dim">~/project (main)</span>
 <span class="dim">↑900 ↓1.2k R411k W2.1k CH99.3% $0.260 (sub) 41.2%/1.0M (auto)</span><span class="dim">                                   claude-opus-5-5 • high</span>
-cache warm · 59m left · sub · window <span class="ok">✓</span> · cache short <span class="ok">✓</span> · long <span class="ok">✓</span> (in use) · price <span class="dim">✗</span></pre></div>
+cache warm · 59m left · long 1h<span class="dim"> (in use)</span> · <span class="dim">short </span><span class="dim">5m</span> · <span class="dim">sent 1h</span> · <span class="mut">sub, no per-token price</span></pre></div>
 </figure>
 
 <figure id="footer-states">
 <div class="term"><div class="bar"><i></i><i></i><i></i><span>pi · the footer's last line</span></div>
 <div class="states">
-<p class="cap">warm: a message now reads the conversation from the cache</p><pre>cache warm · 59m left · sub · window <span class="ok">✓</span> · cache short <span class="ok">✓</span> · long <span class="ok">✓</span> (in use) · price <span class="dim">✗</span></pre>
-<p class="cap">the last 30 seconds, in the warning color</p><pre><span class="warn">cache warm · 0:25 left</span> · api · window <span class="ok">✓</span> · cache short <span class="ok">✓</span> (in use) · long <span class="dim">✗</span> · price <span class="ok">✓</span></pre>
-<p class="cap">expired</p><pre><span class="dim">cache cold · next message full price</span> · sub · window <span class="ok">✓</span> · cache short <span class="ok">✓</span> · long <span class="ok">✓</span> (in use) · price <span class="dim">✗</span></pre>
-<p class="cap">while a request runs</p><pre><span class="dim">cache in use</span> · sub · window <span class="ok">✓</span> · cache short <span class="ok">✓</span> · long <span class="ok">✓</span> (in use) · price <span class="dim">✗</span></pre>
-<p class="cap">providers.dev has no entry for the model</p><pre>cache warm · 58m left · api · providers.dev: no data for this model · cache in use: long</pre>
-<p class="cap">through a proxy that may use a login or an API key: the smaller values</p><pre>cache warm · 55m left · sub or api · window <span class="ok">✓</span> · cache short <span class="warn">⚠</span> · long <span class="ok">✓</span> (in use) · price <span class="warn">?</span> · <span class="warn">⚠ login or API key unknown: shorter values</span></pre>
-<p class="cap">through a proxy: an API key answered for a login's values</p><pre>cache warm · 4m left · api · window <span class="ok">✓</span> · cache short <span class="ok">✓</span> (in use) · long <span class="ok">✓</span> · price <span class="dim">✗</span> · <span class="warn">⚠ answered by an API key</span></pre>
+<p class="sect">a 140-column terminal</p>
+<p class="cap">warm: a message now reads the conversation from the cache</p><pre>cache warm · 59m left · long 1h<span class="dim"> (in use)</span> · <span class="dim">short </span><span class="dim">5m</span> · <span class="dim">sent 1h</span> · api $3/$15<span class="dim"> per M</span></pre>
+<p class="cap">the last 30 seconds, in the warning color</p><pre><span class="warn">cache warm · 0:25 left</span> · long 1h<span class="dim"> (in use)</span> · <span class="dim">short </span><span class="dim">5m</span> · <span class="dim">sent 1h</span> · api $3/$15<span class="dim"> per M</span></pre>
+<p class="cap">expired</p><pre><span class="dim">cache cold · next message full price</span> · long 1h<span class="dim"> (in use)</span> · <span class="dim">short </span><span class="dim">5m</span> · <span class="dim">sent 1h</span> · api $3/$15<span class="dim"> per M</span></pre>
+<p class="cap">while a request runs</p><pre><span class="dim">cache in use</span> · long 1h<span class="dim"> (in use)</span> · <span class="dim">short </span><span class="dim">5m</span> · <span class="dim">sent 1h</span> · api $3/$15<span class="dim"> per M</span></pre>
+<p class="cap">a subscription login</p><pre>cache warm · 59m left · long 1h<span class="dim"> (in use)</span> · <span class="dim">short </span><span class="dim">5m</span> · <span class="dim">sent 1h</span> · <span class="mut">sub, no per-token price</span></pre>
+<p class="cap">the request asked for the 5-minute cache while the retention says long, and the provider wrote that</p><pre>cache warm · 4m left · short 5m<span class="dim"> (in use)</span> · <span class="dim">long </span><span class="dim">1h</span> · <span class="mut">sent 5m (retention long)</span> · api $3/$15<span class="dim"> per M</span></pre>
+<p class="cap">keep-warm ended: refreshing has cost as much as one cache miss</p><pre><span class="warn">cache warm · 0:24 left</span> · <span class="mut">keep-warm ended (budget reached): $1.98 spent, a miss costs $2.07</span> · long 1h · <span class="dim">short </span><span class="dim">5m</span> · <span class="dim">sent 1h</span> · api $3/$15</pre>
+<p class="cap">two refreshes in a row missed the cache: said for as long as it lasts, also once the cache is cold</p><pre><span class="dim">cold: full price</span> · <span class="warn">⚠ keep-warm: Pi's after 2 missed refreshes (/cache-keeper-warm)</span> · long 1h · <span class="dim">short </span><span class="dim">5m</span> · <span class="dim">sent 1h</span> · api $3/$15</pre>
+<p class="cap">GPT on OpenAI with the longer cache: two lifetimes sent, so the period is Pi's and the countdown may run long</p><pre>cache warm · 11h 40m left · <span class="mut">keep-warm: Pi's (several cache lifetimes)</span> · long 12h<span class="dim"> (in use)</span> · <span class="dim">short </span><span class="dim">30m</span> · <span class="warn">⚠ sent 30m + 12h</span> · api $2/$10<span class="dim"> per M</span></pre>
+<p class="cap">through a proxy: an API key answered for a login's values; the values follow what answered</p><pre>cache warm · 59m left · <span class="warn">⚠ answered by an API key</span> · long 1h<span class="dim"> (in use)</span> · <span class="dim">short </span><span class="dim">5m</span> · <span class="dim">sent 1h</span> · api $3/$15<span class="dim"> per M</span></pre>
+<p class="cap">through a proxy that may use a login or an API key: the smaller value, marked</p><pre>cache warm · 55m left · long 1h<span class="dim"> (in use)</span> · <span class="dim">short </span><span class="dim">5m</span><span class="warn"> ⚠</span> · <span class="dim">sent 1h</span> · sub or api $3/$15<span class="dim"> per M</span> · <span class="warn">⚠ login or API key unknown: shorter values</span></pre>
+<p class="cap">providers.dev could not be reached: Pi's own values</p><pre>cache warm · 58m left · <span class="warn">⚠ providers.dev: no data, fetch failed</span> · long 1h<span class="dim"> (in use)</span> · <span class="dim">short </span><span class="dim">5m</span> · <span class="dim">sent 1h</span> · api $3/$15<span class="dim"> per M</span></pre>
+<p class="cap">no cache lifetime known: no countdown</p><pre><span class="mut">cache lifetime unknown</span> · <span class="mut">sent default cache (retention long)</span> · api $1.25/$10<span class="dim"> per M above 200k</span> · <span class="dim">providers.dev: no data for this model</span></pre>
+<p class="sect">60 columns: the wording goes first, then the least important values</p>
+<pre class="edge" style="width:60ch">warm 59m · long 1h · <span class="dim">short </span><span class="dim">5m</span> · <span class="dim">sent 1h</span> · api $3/$15</pre>
+<pre class="edge" style="width:60ch"><span class="warn">warm 0:25</span> · <span class="warn">⚠ keep-warm failed</span> · long 1h · api $3/$15</pre>
+<pre class="edge" style="width:60ch"><span class="dim">cold</span> · <span class="warn">⚠ keep-warm: Pi's</span> · long 1h · <span class="dim">short </span><span class="dim">5m</span> · api $3/$15</pre>
+<pre class="edge" style="width:60ch">warm 11h 40m · <span class="mut">keep-warm: Pi's</span> · long 12h · <span class="warn">⚠ sent 30m+12h</span></pre>
+<p class="sect">40 columns: the countdown and what went wrong stay</p>
+<pre class="edge" style="width:40ch">warm 59m · long 1h · api $3/$15</pre>
+<pre class="edge" style="width:40ch"><span class="warn">warm 0:25</span> · <span class="warn">⚠ keep-warm failed</span> · long 1h</pre>
+<pre class="edge" style="width:40ch"><span class="dim">cold</span> · <span class="warn">⚠ keep-warm: Pi's</span> · long 1h</pre>
+<pre class="edge" style="width:40ch">warm 11h 40m · long 12h · <span class="warn">⚠ sent 30m+12h</span></pre>
 </div></div>
 </figure>
 

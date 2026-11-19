@@ -1618,7 +1618,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				label: "Model data from providers.dev",
 				currentValue: config.modelData ? "on" : "off",
 				values: ["on", "off"],
-				description: `Once a day, read each model's input window, cache lifetimes and prices from ${DATA_SOURCE} (a public API: no key, and nothing about your sessions is sent) and put them into ~/.pi/agent/models.json: the window replaces Pi's, lifetimes and prices fill what Pi has none for, and values you set there yourself are never touched. The footer shows what was found for the current model. off takes these values out again.`,
+				description: `Once a day, read each model's input window, cache lifetimes and prices from ${DATA_SOURCE} (a public API: no key, and nothing about your sessions is sent) and put them into ~/.pi/agent/models.json: the window replaces Pi's, lifetimes and prices fill what Pi has none for, and values you set there yourself are never touched. The footer shows the current model's values and marks a guess. off takes these values out again.`,
 			},
 		];
 		await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
