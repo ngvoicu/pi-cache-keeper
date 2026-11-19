@@ -660,7 +660,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			const level = pi.getThinkingLevel();
 			if (fresh && (await pi.setModel(fresh))) {
 				pi.setThinkingLevel(level);
-				startTimer(ctx);
+				// After an await: the session may be gone.
+				ifSessionAlive(() => startTimer(ctx));
 			}
 		}
 		return plan.changed.length;
