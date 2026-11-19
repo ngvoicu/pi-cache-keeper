@@ -1365,6 +1365,29 @@ for (const windowMinutes of [120, 1440]) {
 	});
 }
 
+test("R7c/1: with the default settings (long retention), Claude on the Anthropic API and Kimi K3 on Moonshot are kept warm, GPT on OpenAI's Responses API is left to Pi", { skip: noCatalog }, async (t) => {
+	t.after(() => mock.timers.reset());
+	noNetwork(t);
+	withRetention(t, "long");
+	const cases: [string, string, unknown, string | undefined][] = [
+		["anthropic", "claude-sonnet-4-6", { action: "stop" }, "lifetime 60 min"],
+		["moonshotai", "kimi-k3", { action: "stop" }, "lifetime 60 min"],
+		["openai", "gpt-6.1-sol", undefined, undefined],
+	];
+	for (const [provider, id, decision, source] of cases) {
+		clock();
+		fresh({ compactBeforeExpiry: false });
+		const real = MODELS[provider][id];
+		const sent = await adapterPayload(real, { maxTokens: 8192, cacheRetention: "long" }, systemAndUser);
+		const h = harness({ model: real, sent, stream: viaRealAdapter(real) });
+		h.emit("agent_settled");
+		assert.deepEqual(h.decide(), decision, id);
+		const shown = await h.command("cache-keeper");
+		if (source) assert.match(shown, new RegExp(source), id);
+		else assert.match(shown, /left to Pi's own warming: the request carries more than one cache lifetime/, id);
+	}
+});
+
 test("R7c/1: GPT Responses with short retention states no lifetime: owned at 30 min, refreshed before the conversation's cache expires", { skip: noCatalog }, async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
