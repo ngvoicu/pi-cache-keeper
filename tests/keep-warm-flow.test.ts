@@ -207,6 +207,8 @@ function harness(options: Options = {}) {
 	};
 	// Runs the idle clock second by second, letting each refresh land, until a compaction starts or `ms` passed.
 	const idle = async (ms: number) => {
+		// A refresh started before (by agent_settled, say) lands before the clock moves on, as it would in Pi.
+		await flush();
 		for (let elapsed = 0; elapsed < ms && state.compacts === 0; elapsed += 1000) {
 			const before = state.attempts;
 			mock.timers.tick(1000);
@@ -231,6 +233,14 @@ const allTraces = () =>
 const traces = () => allTraces().filter((record) => record.event === "warm" || record.event === "expiry");
 // The models a missed refresh left to Pi belong to the Pi process (R9); each test starts as a new process.
 const newProcess = () => delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-cache-keeper.warm-misses")];
+// The footer as it reads without PI_OFFLINE (with it, it adds that no model data was fetched).
+const online = (t: { after: (fn: () => void) => void }) => {
+	const saved = process.env.PI_OFFLINE;
+	delete process.env.PI_OFFLINE;
+	t.after(() => {
+		if (saved !== undefined) process.env.PI_OFFLINE = saved;
+	});
+};
 const fresh = (keepWarm: Record<string, unknown> = {}) => {
 	newProcess();
 	settings({ keepWarmMinutes: 120, minContextTokens: 100_000, ...keepWarm });
@@ -751,6 +761,7 @@ test("R3: a run that sent nothing does not reset the spending; a new real answer
 // ---------------------------------------------------------------------------------------------------------------- R4
 
 test("R4: each end reason is recorded once, with the amounts, in the log, the footer and /cache-keeper", async (t) => {
+	online(t);
 	t.after(() => mock.timers.reset());
 	const ended = async (options: Options, act?: (h: ReturnType<typeof harness>) => Promise<void> | void, minutes = 120) => {
 		clock();
@@ -1808,7 +1819,7 @@ test("the reason for thinking names what the request carries, for any provider: 
 const MODEL_KEY = "cliproxyapi/sub/claude";
 // Half the prompt read from the cache: a miss that stays within the budget, so it ends the period as "missed".
 const HALF_MISS = { usage: { input: 0, cacheRead: 300_000, cacheWrite: 300_000 } };
-const misses = () => (globalThis as Record<symbol, { counts: Map<string, number>; fallback: Map<string, number> } | undefined>)[Symbol.for("pi-cache-keeper.warm-misses")];
+const misses = () => (globalThis as Record<symbol, { counts: Map<string, number>; fallback: Map<string, number>; inFlight: Map<string, Map<number, number>> } | undefined>)[Symbol.for("pi-cache-keeper.warm-misses")];
 const countOf = (model = MODEL_KEY) => misses()?.counts.get(model) ?? 0;
 const WARNING = `Two refreshes in a row missed the cache for ${MODEL_KEY}, so pi-cache-keeper stopped keeping it warm; Pi's own warming takes over. /cache-keeper-warm starts it again.`;
 const FALLBACK_STATUS = "⚠ keep-warm: Pi's after 2 missed refreshes (/cache-keeper-warm)";
@@ -1859,6 +1870,7 @@ test("R9: miss, hit, miss: still owned", async (t) => {
 });
 
 test("R9: two misses in a row: left to Pi from the next period's start, warned once, shown in the footer and /cache-keeper, logged once; another model is unaffected; /cache-keeper-warm starts it again", async (t) => {
+	online(t);
 	clock();
 	t.after(() => mock.timers.reset());
 	fresh({ compactBeforeExpiry: false });
@@ -1874,7 +1886,9 @@ test("R9: two misses in a row: left to Pi from the next period's start, warned o
 	const line = fallbackLineAt(secondAt);
 	assert.equal(said.filter((n) => n === WARNING).length, 1, "the warning");
 	assert.deepEqual(traces().filter((r) => r.leftToPi).map((r) => [r.action, r.stop, r.leftToPi]), [["missed", "missed", line]], "logged once");
-	assert.equal(await keepWarmLineOf(h), `${RULE}; keep-warm ended (a refresh missed the cache): $1.22 spent, a miss costs $2.07, until your next message (the refresh read only 50% from the cache, so it wrote the context again); ${line}`);
+	// From that moment the period reads as left to Pi (the decision handler returns nothing).
+	assert.equal(await keepWarmLineOf(h), `${RULE}; ${line}`);
+	assert.equal(h.decide(), undefined, "the period of the second miss: Pi's from then on");
 	// The next period: Pi's from its start.
 	const third = await nextPeriod(h);
 	assert.deepEqual(third, { decided: undefined, refreshed: 0 }, "the handler returns nothing, nothing is sent");
@@ -1975,13 +1989,13 @@ test("R9: an interrupted refresh that reported a miss counts; one that reported 
 		assert.equal(countOf(), counts ? 2 : 1, `${label}: the count`);
 		assert.equal(misses()?.fallback.has(MODEL_KEY), counts, label);
 		if (options.hold && counts) {
-			// The period that started before the exclusion was recorded: its refresh stops at the last gate (point C).
-			h.decide();
+			// The period that started before the second miss was reported is Pi's from then on: Pi is not stopped for a
+			// refresh the extension will not send, and nothing more leaves.
+			assert.equal(h.decide("warm"), undefined, `${label}: the running period's handler returns nothing`);
+			assert.match((await keepWarmLineOf(h)) ?? "", /two refreshes in a row missed the cache for /, label);
 			await h.idle(300_000);
 			await flush();
 			assert.equal(h.warms.length, 2, `${label}: nothing more leaves`);
-			const refused = traces().find((r) => r.stop === "unable");
-			assert.match(refused?.reason ?? "", /^two refreshes in a row missed the cache for /, label);
 		}
 		mock.timers.tick(1000);
 		h.run(true);
@@ -2067,6 +2081,68 @@ test("R9: a successful refresh whose usage shows no prompt (omitted, or output o
 		assert.equal(misses()?.fallback.size, 0, label);
 		mock.timers.reset();
 	}
+});
+
+test("never a third paid miss: while a refresh of the model is on its way, from any session of the process, no other leaves; it is cancelled after 60 s, and stops holding back after 10 min", async (t) => {
+	t.after(() => mock.timers.reset());
+	// Another session's refresh of this model, sent 1 s ago and still open: this one is held until the last safe moment.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const held = harness({ lifetime: 300, cost: WITH_WRITE });
+	misses()?.inFlight.set(MODEL_KEY, new Map([[-1, Date.now() - 1000]]));
+	held.emit("agent_settled");
+	assert.deepEqual(held.decide(), { action: "stop" });
+	await held.idle(300_000);
+	assert.equal(held.state.attempts, 0, "nothing leaves while it is open");
+	assert.ok(traces().some((r) => r.action === "skip" && /an earlier refresh of this model has not settled yet/.test(r.reason)));
+	assert.ok(traces().some((r) => r.action === "skip" && /^too late/.test(r.reason)), "then too late, as for any hold-up");
+	// One sent more than 10 min ago no longer holds the model back.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const stale = harness({ lifetime: 300, cost: WITH_WRITE });
+	misses()?.inFlight.set(MODEL_KEY, new Map([[-1, Date.now() - 10 * 60_000]]));
+	stale.emit("agent_settled");
+	await stale.idle(300_000);
+	await flush();
+	assert.equal(stale.warms.length, 1, "after 10 min it is no longer waited for");
+	// The extension's own refresh that gets no answer is cancelled after 60 s, and settles.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const silent = harness({ lifetime: 3600, cost: WITH_WRITE, hold: () => true });
+	silent.emit("agent_settled");
+	await silent.idle(3_421_000);
+	assert.equal(silent.warms.length, 1);
+	assert.equal(misses()?.inFlight.get(MODEL_KEY)?.size, 1, "on its way");
+	for (let i = 0; i < 61; i++) {
+		mock.timers.tick(1000);
+		await flush();
+	}
+	const cancelled = traces().find((r) => r.action === "cancelled");
+	assert.equal(cancelled?.reason, "no answer within 60 s, so it was cancelled");
+	await flush();
+	assert.equal(silent.warms.length, 2, "settled: it no longer holds the model back, and the refresh is tried again before the last safe moment");
+});
+
+test("prices in tiers count as prices: four zero base rates and a paid tier are counted in money at the request's size", async (t) => {
+	t.after(() => mock.timers.reset());
+	const tier = (cacheRead: number) => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, tiers: [{ inputTokensAbove: 100_000, input: 1, output: 15, cacheRead, cacheWrite: 1 }] });
+	// The reviewer's shape: the tier prices a cached read like a write, so a refresh cannot save anything: Pi's.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const flat = harness({ lifetime: 300, cost: tier(1) as never });
+	flat.emit("agent_settled");
+	assert.equal(flat.decide(), undefined);
+	assert.match(await flat.command("cache-keeper"), /left to Pi's own warming: at this model's prices a refresh costs as much as a miss/);
+	await flat.idle(HOUR);
+	assert.equal(flat.state.attempts, 0);
+	// A tier with a discounted read: owned, with a money budget (not ten refreshes).
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const discounted = harness({ lifetime: 300, cost: tier(0.1) as never });
+	discounted.emit("agent_settled");
+	assert.deepEqual(discounted.decide(), { action: "stop" });
+	const line = (await discounted.command("cache-keeper")).split("\n").find((l) => l.startsWith("keep warm:"));
+	assert.match(line ?? "", /so far \$0 spent, a miss costs \$0\.54/);
 });
 
 test("unpriced means no price at all: a model that charges only for output is counted in money, and left to Pi where a refresh costs as much as a miss", async (t) => {

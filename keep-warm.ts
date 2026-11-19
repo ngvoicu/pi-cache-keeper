@@ -265,20 +265,43 @@ function price(model: Model<Api>, tokens: Partial<Pick<Usage, "input" | "output"
 export function warmBudget(model: Model<Api>, promptTokens: number): WarmBudget {
 	if (!model.cost) return { priced: false, refreshCost: 0, missCost: 0 };
 	const hit = price(model, { cacheRead: promptTokens });
-	const miss = price(model, model.cost.cacheWrite > 0 ? { cacheWrite: promptTokens } : { input: promptTokens });
+	// At the rates for the request's size, as Pi prices it: a price tier above a number of input tokens replaces the base.
+	const rates = ratesFor(model, promptTokens);
+	const miss = price(model, rates.cacheWrite > 0 ? { cacheWrite: promptTokens } : { input: promptTokens });
 	return {
-		// Counted in refreshes only where the model has no price at all; any price (output included) counts in money.
+		// Counted in refreshes only where the model has no price at all, in any tier; any price counts in money.
 		priced: promptTokens > 0 && hasPrices(model),
 		refreshCost: price(model, { cacheRead: promptTokens, output: 1 }),
 		missCost: Math.max(0, miss - hit),
 	};
 }
 
-/** Whether the model has any price; without one, the budget counts refreshes instead of money. */
+type Rates = { input: number; output: number; cacheRead: number; cacheWrite: number };
+type TieredCost = Rates & { tiers?: (Rates & { inputTokensAbove: number })[] };
+
+/** The rates Pi prices a request of this many input tokens at (calculateCost): the highest tier it passes, else the base. */
+function ratesFor(model: Model<Api>, inputTokens: number): Rates {
+	const cost = model.cost as TieredCost;
+	let rates: Rates = cost;
+	let matched = -1;
+	for (const tier of cost.tiers ?? []) {
+		if (inputTokens > tier.inputTokensAbove && tier.inputTokensAbove > matched) {
+			rates = tier;
+			matched = tier.inputTokensAbove;
+		}
+	}
+	return rates;
+}
+
+/**
+ * Whether the model has any price, in its base rates or in any price tier; without one, the budget counts refreshes
+ * instead of money.
+ */
 export function hasPrices(model: Model<Api>): boolean {
 	if (!model.cost) return false;
-	const { input, output, cacheRead, cacheWrite } = model.cost;
-	return input > 0 || output > 0 || cacheRead > 0 || cacheWrite > 0;
+	const cost = model.cost as TieredCost;
+	const paid = (r: Rates) => r.input > 0 || r.output > 0 || r.cacheRead > 0 || r.cacheWrite > 0;
+	return paid(cost) || (cost.tiers ?? []).some(paid);
 }
 
 /**

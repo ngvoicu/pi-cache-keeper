@@ -39,7 +39,34 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 const encoder = new TextEncoder();
 const packet = (event: { type: string }) => encoder.encode(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
 
-async function replaceDuringRefresh(replace: "new" | "reload", shows: "miss" | "hit" | "nothing") {
+const MODEL_KEY = "anthropic/claude-sonnet-4-6";
+const usage = (read: number, write: number) => ({ input_tokens: 5, cache_read_input_tokens: read, cache_creation_input_tokens: write, output_tokens: 1, cache_creation: { ephemeral_5m_input_tokens: write, ephemeral_1h_input_tokens: 0 } });
+const messageStart = (read: number, write: number) => ({ type: "message_start", message: { id: "m", type: "message", role: "assistant", model: "claude-sonnet-4-6", content: [], stop_reason: null, usage: usage(read, write) } });
+const end = [{ type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } }, { type: "message_stop" }];
+const sse = (body: ReadableStream) => new Response(body, { headers: { "content-type": "text/event-stream" } });
+const closed = (events: { type: string }[]) =>
+	sse(
+		new ReadableStream({
+			start(c) {
+				for (const e of events) c.enqueue(packet(e));
+				c.close();
+			},
+		}),
+	);
+
+interface Session {
+	runtime: Any;
+	runner: Any;
+	/** One real request and its answer, which read the whole cache; then Pi goes idle. */
+	answer: () => Promise<void>;
+	/** The clock, second by second, letting what is due land. */
+	ticks: (seconds: number) => Promise<void>;
+	decide: () => Promise<unknown>;
+}
+
+// Pi's real session runtime with this extension, Claude Sonnet 4.6 at the 5-minute cache, keep-warm on for 2 h. Each of
+// the extension's refreshes goes through the real Anthropic adapter to `refresh` (n: the how-manieth, from 1).
+async function inRuntime(refresh: (n: number, signal: AbortSignal) => Response, scenario: (session: Session) => Promise<void>) {
 	writeFileSync(
 		join(dir, "settings.json"),
 		JSON.stringify({ cacheKeeper: { modelData: false, keepWarmMinutes: 120, cacheRetention: "short", compactBeforeExpiry: false, compactAtPercent: 0 }, cacheWarming: "idle", packages: [] }),
@@ -65,94 +92,134 @@ async function replaceDuringRefresh(replace: "new" | "reload", shows: "miss" | "
 	const onThrow = (error: unknown) => thrown.push(error);
 	process.on("uncaughtException", onThrow);
 	process.on("unhandledRejection", onThrow);
-	const runnerErrors: unknown[] = [];
 	const runner = runtime.session.extensionRunner;
-	await runtime.session.bindExtensions({ onError: (error: unknown) => runnerErrors.push(error) });
+	await runtime.session.bindExtensions({ onError: () => {} });
 	const ctx = runner.createContext();
 	const sessions = runtime.session.sessionManager;
-	const usage = (read: number, write: number) => ({ input_tokens: 5, cache_read_input_tokens: read, cache_creation_input_tokens: write, output_tokens: 1, cache_creation: { ephemeral_5m_input_tokens: write, ephemeral_1h_input_tokens: 0 } });
-	const messageStart = (read: number, write: number) => ({ type: "message_start", message: { id: "m", type: "message", role: "assistant", model: model.id, content: [], stop_reason: null, usage: usage(read, write) } });
-	const end = [{ type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } }, { type: "message_stop" }];
-	const sse = (body: ReadableStream) => new Response(body, { headers: { "content-type": "text/event-stream" } });
 	let refreshes = 0;
 	ctx.modelRegistry.streamSimple = (m: Any, context: Any, options: Any) =>
-		anthropic.streamSimple(m, context, {
-			...options,
-			apiKey: "sk-fixture",
-			maxRetries: 0,
-			cacheRetention: "short",
-			fetch: async () => {
-				refreshes++;
-				// The refresh's stream reports what it read (or nothing), then stays open until the session goes.
-				return sse(
-					new ReadableStream({
-						start(controller) {
-							if (shows === "miss") controller.enqueue(packet(messageStart(0, 120_000)));
-							if (shows === "hit") controller.enqueue(packet(messageStart(120_000, 0)));
-							options.signal.addEventListener("abort", () => controller.error(new Error("cancelled")), { once: true });
-						},
-					}),
-				);
-			},
-		});
+		anthropic.streamSimple(m, context, { ...options, apiKey: "sk-fixture", maxRetries: 0, cacheRetention: "short", fetch: async () => refresh(++refreshes, options.signal) });
 	mock.timers.reset();
 	mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"], now: 100_000_000 });
+	const prior: unknown[] = [];
+	const session: Session = {
+		runtime,
+		runner,
+		answer: async () => {
+			await runner.emit({ type: "agent_start" });
+			const ask = { role: "user", timestamp: Date.now(), content: [{ type: "text", text: prior.length ? "Continue." : "Read the change." }] };
+			prior.push(ask);
+			sessions.appendMessage(ask);
+			const messages = await runner.emitContext(transcript.normalizeContext({ systemPrompt: "Review code.", messages: prior, tools }).messages);
+			const answer = await anthropic
+				.streamSimple(model, { messages }, {
+					apiKey: "sk-fixture",
+					maxTokens: 8192,
+					cacheRetention: "short",
+					onPayload: (payload: unknown) => runner.emitBeforeProviderRequest(payload),
+					fetch: async () => closed([messageStart(120_000, 0), ...end]),
+				})
+				.result();
+			assert.equal(answer.stopReason, "stop");
+			await runner.emitMessageEnd({ type: "message_end", message: answer });
+			sessions.appendMessage(answer);
+			prior.push(answer);
+			await runner.emit({ type: "agent_settled", aborted: false });
+		},
+		ticks: async (seconds) => {
+			for (let i = 0; i < seconds; i++) {
+				mock.timers.tick(1000);
+				await flush();
+			}
+		},
+		decide: () => runner.emitCacheWarmingDecision({ type: "cache_warming_decision", action: "warm", timestamp: Date.now() }),
+	};
 	try {
-		// One real answer that read the cache: the period is the extension's.
-		const ask = { role: "user", timestamp: Date.now(), content: [{ type: "text", text: "Read the change." }] };
-		await runner.emit({ type: "agent_start" });
-		sessions.appendMessage(ask);
-		const messages = await runner.emitContext(transcript.normalizeContext({ systemPrompt: "Review code.", messages: [ask], tools }).messages);
-		const answer = await anthropic
-			.streamSimple(model, { messages }, {
-				apiKey: "sk-fixture",
-				maxTokens: 8192,
-				cacheRetention: "short",
-				onPayload: (payload: unknown) => runner.emitBeforeProviderRequest(payload),
-				fetch: async () =>
-					sse(
-						new ReadableStream({
-							start(c) {
-								for (const e of [messageStart(120_000, 0), ...end]) c.enqueue(packet(e));
-								c.close();
-							},
-						}),
-					),
-			})
-			.result();
-		assert.equal(answer.stopReason, "stop");
-		await runner.emitMessageEnd({ type: "message_end", message: answer });
-		sessions.appendMessage(answer);
-		await runner.emit({ type: "agent_settled", aborted: false });
-		assert.equal(await runner.emitCacheWarmingDecision({ type: "cache_warming_decision", action: "warm", timestamp: Date.now() }), "stop", "owned");
-		// To the refresh, 25 s before the 5-minute expiry; it is still streaming when the session is replaced.
-		for (let i = 0; i < 276; i++) {
-			mock.timers.tick(1000);
-			await flush();
-		}
-		assert.equal(refreshes, 1, "the refresh went out");
-		if (replace === "reload") await runtime.session.reload();
-		else await runtime.newSession();
-		for (let i = 0; i < 20; i++) {
-			mock.timers.tick(1000);
-			await flush();
-		}
+		await scenario(session);
 	} finally {
 		mock.timers.reset();
 		await runtime.dispose();
 		process.off("uncaughtException", onThrow);
 		process.off("unhandledRejection", onThrow);
 	}
-	return { thrown, runnerErrors, counts: Object.fromEntries(store()?.counts ?? []), fallback: [...(store()?.fallback.keys() ?? [])] };
+	return { thrown, refreshes, counts: Object.fromEntries(store()?.counts ?? []), fallback: [...(store()?.fallback.keys() ?? [])] };
 }
 
 for (const replace of ["new", "reload"] as const) {
 	for (const shows of ["miss", "hit", "nothing"] as const) {
 		test(`/${replace} while a refresh that reported ${shows === "nothing" ? "nothing" : `a ${shows}`} is still streaming: nothing throws, and ${shows === "miss" ? "the miss is counted" : "nothing is counted"}`, { skip }, async () => {
-			const result = await replaceDuringRefresh(replace, shows);
+			// The refresh's stream reports what it read (or nothing), then stays open until the session goes.
+			const open = (_n: number, signal: AbortSignal) =>
+				sse(
+					new ReadableStream({
+						start(controller) {
+							if (shows === "miss") controller.enqueue(packet(messageStart(0, 120_000)));
+							if (shows === "hit") controller.enqueue(packet(messageStart(120_000, 0)));
+							signal.addEventListener("abort", () => controller.error(new Error("cancelled")), { once: true });
+						},
+					}),
+				);
+			const result = await inRuntime(open, async (s) => {
+				await s.answer();
+				assert.equal(await s.decide(), "stop", "owned");
+				// To the refresh, 25 s before the 5-minute expiry; it is still streaming when the session is replaced.
+				await s.ticks(276);
+				if (replace === "reload") await s.runtime.session.reload();
+				else await s.runtime.newSession();
+				await s.ticks(20);
+			});
+			assert.equal(result.refreshes, 1, "the refresh went out");
 			assert.deepEqual(result.thrown, [], "nothing thrown out of a callback");
-			assert.deepEqual(result.counts, shows === "miss" ? { "anthropic/claude-sonnet-4-6": 1 } : {}, "the count");
+			assert.deepEqual(result.counts, shows === "miss" ? { [MODEL_KEY]: 1 } : {}, "the count");
 			assert.deepEqual(result.fallback, []);
 		});
 	}
+}
+
+// The reviewer's sequence: a first refresh misses; the second also reports a miss, then the user's next message cancels
+// it, but its stream takes long to settle; the next period's refresh falls due meanwhile. However the settlements fall,
+// at most two refreshes go out, both misses, and the model is left to Pi once the second is known.
+for (const [when, releaseAt] of [
+	["before the next refresh falls due", 120],
+	["while the next refresh is held", 280],
+	["after the next period's cache expired", 400],
+] as const) {
+	test(`never a third paid miss: the cancelled second miss settles ${when}`, { skip }, async () => {
+		let release: (() => void) | undefined;
+		const respond = (n: number, signal: AbortSignal) => {
+			if (n !== 2) return closed([messageStart(0, 120_000), ...end]);
+			// Reported a miss; ignores the cancellation until released.
+			return sse(
+				new ReadableStream({
+					start(controller) {
+						controller.enqueue(packet(messageStart(0, 120_000)));
+						release = () => controller.error(new Error("cancelled"));
+						void signal;
+					},
+				}),
+			);
+		};
+		const decisions: unknown[] = [];
+		const result = await inRuntime(respond, async (s) => {
+			await s.answer();
+			await s.ticks(276); // the first refresh: a miss
+			await s.answer();
+			await s.ticks(276); // the second refresh goes out, reports a miss, stays open
+			await s.answer(); // the user's next message cancels it; its stream does not settle yet
+			for (let t = 0; t < 330; t++) {
+				if (t === releaseAt) release?.();
+				if (t === 270) decisions.push(await s.decide());
+				await s.ticks(1);
+			}
+			if (releaseAt >= 330) release?.();
+			await s.ticks(5);
+			decisions.push(await s.decide());
+		});
+		assert.deepEqual(result.thrown, []);
+		assert.equal(result.refreshes, 2, "two refreshes went out, both misses; no third");
+		assert.deepEqual(result.fallback, [MODEL_KEY], "left to Pi once the second miss is known");
+		// Once the model is left to Pi, Pi is not told to stop: Pi's own proposal stands.
+		assert.equal(decisions.at(-1), "warm");
+		if (releaseAt < 270) assert.equal(decisions[0], "warm", "known before Pi's proposal: not stopped");
+	});
 }

@@ -155,16 +155,30 @@ const MIN_OWNED_LIFETIME_MS = 60_000;
  */
 const WARM_MISSES = Symbol.for("pi-cache-keeper.warm-misses");
 const MISSES_IN_A_ROW = 2;
+/**
+ * A refresh sent by the extension and not yet settled, per model, from any session of the process: while one is open,
+ * no other refresh of that model leaves (it could be the second miss, not yet reported). The extension cancels its own
+ * refresh after REFRESH_TIMEOUT_MS; one that stays open even so stops holding the model back REFRESH_HOLD_MAX_MS after
+ * it was sent, so a stream that never settles cannot keep a model from being kept warm for ever.
+ */
+const REFRESH_TIMEOUT_MS = 60_000;
+const SETTLING_REASON = "an earlier refresh of this model has not settled yet, and it may have missed the cache; tried again until the last safe moment";
+const REFRESH_HOLD_MAX_MS = 10 * 60_000;
 interface WarmMisses {
 	counts: Map<string, number>;
 	fallback: Map<string, number>;
+	/** Per model: the refreshes on their way, by an id, with when each was sent. */
+	inFlight: Map<string, Map<number, number>>;
 }
 function warmMissStore(): WarmMisses {
 	const host = globalThis as Record<symbol, unknown>;
 	const found = host[WARM_MISSES] as Partial<WarmMisses> | undefined;
-	if (!(found?.counts instanceof Map) || !(found.fallback instanceof Map)) host[WARM_MISSES] = { counts: new Map(), fallback: new Map() };
-	return host[WARM_MISSES] as WarmMisses;
+	if (!(found?.counts instanceof Map) || !(found.fallback instanceof Map)) host[WARM_MISSES] = { counts: new Map(), fallback: new Map(), inFlight: new Map() };
+	const store = host[WARM_MISSES] as WarmMisses;
+	if (!(store.inFlight instanceof Map)) store.inFlight = new Map();
+	return store;
 }
+let refreshIds = 0;
 
 /**
  * Lifetimes `cacheState` assumes for a model family rather than reads from the model's data, with the provider's own
@@ -334,6 +348,15 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		misses.fallback.set(model, at);
 		return true;
 	};
+	// Whether a refresh of this model, sent from any session of this process, is still on its way (see REFRESH_HOLD_MAX_MS).
+	const unsettled = (model: string): boolean => {
+		const open = misses.inFlight.get(model);
+		if (!open) return false;
+		const now = Date.now();
+		for (const [id, sentAt] of open) if (now - sentAt >= REFRESH_HOLD_MAX_MS) open.delete(id);
+		if (open.size === 0) misses.inFlight.delete(model);
+		return open.size > 0;
+	};
 	// Why the extension cannot keep a period warm itself, from facts that last for the period, with what the footer says
 	// of it in a few words; undefined when it can.
 	const whyNotOwned = (state: CacheState | undefined, model: Model<Api> | undefined): { reason: string; label?: string } | undefined => {
@@ -414,7 +437,15 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	};
 	// The extension keeps this period's cache warm: keep-warm on and the period's facts hold.
 	const owns = (p: WarmPeriod | undefined): p is WarmPeriod & { budget: WarmBudget; fixed: NonNullable<WarmPeriod["fixed"]> } =>
-		warmMinutes() > 0 && p !== undefined && p.onAtStart && p.notOwned === undefined && p.budget !== undefined && p.fixed !== undefined;
+		warmMinutes() > 0 &&
+		p !== undefined &&
+		p.onAtStart &&
+		p.notOwned === undefined &&
+		p.budget !== undefined &&
+		p.fixed !== undefined &&
+		// Two misses in a row on the period's model, also one reported after the period started: Pi's from then on, so the
+		// decision handler never answers "stop" for a refresh the last gate would refuse.
+		!misses.fallback.has(p.fixed.model);
 	// What differs from what the period's cached request was written with, if anything.
 	const driftReason = (fixed: NonNullable<WarmPeriod["fixed"]>, model: Model<Api>, state: CacheState, tier: "short" | "long"): string | undefined => {
 		const now = `${model.provider}/${model.id}`;
@@ -916,7 +947,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// last safe moment has not passed; the payload's output limit is within the API's proven refresh limit. "hold": a
 	// passing reason, tried again per R2 (a cancelled refresh, by the run that cancelled it); "refuse": withheld for good,
 	// and warming ends for the period where it has not ended yet.
-	type GateVerdict = { pass: true } | { hold: "cancelled" | "busy" | "late"; reason: string } | { refuse: string };
+	type GateVerdict = { pass: true } | { hold: "cancelled" | "busy" | "late" | "settling"; reason: string } | { refuse: string };
 	const lastGate = (
 		ctx: ExtensionContext,
 		p: WarmPeriod & { fixed: NonNullable<WarmPeriod["fixed"]> },
@@ -935,6 +966,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		// Two misses in a row on this model since the period started (another period's refresh): it is Pi's now.
 		const fellBackAt = misses.fallback.get(p.fixed.model);
 		if (fellBackAt !== undefined) return { refuse: fallbackLine(p.fixed.model, fellBackAt) };
+		// An earlier refresh of this model has not settled: it may be the second miss. Held, and tried again.
+		if (unsettled(p.fixed.model)) return { hold: "settling", reason: SETTLING_REASON };
 		const drift = readDrift(ctx, p);
 		if (drift) return { refuse: drift };
 		if (running || !ctx.isIdle() || ctx.hasPendingMessages()) return { hold: "busy", reason: "Pi is busy or has queued messages" };
@@ -977,6 +1010,13 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		}
 		// Pi's own refresh from the run just ended may still be in flight; its usage entry moves the expiry when it lands.
 		if (piWarmAt !== undefined && Date.now() - piWarmAt < 60_000) return;
+		// An earlier refresh of this model, from any session of this process, is still on its way: held (the last gate
+		// checks it again just before sending).
+		if (unsettled(p.fixed.model)) {
+			if (p.busyFor !== expiresAt) trace(ctx, { ...base, action: "skip", reason: SETTLING_REASON });
+			p.busyFor = expiresAt;
+			return;
+		}
 		// Read again just before a refresh: a model, lifetime or tier other than the period's ends warming.
 		timerState(ctx);
 		if (p.ended) return;
@@ -997,10 +1037,21 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		let reserved = 0;
 		let late = false;
 		let held = false;
+		let settling = false;
+		let timedOut = false;
 		let refused: string | undefined;
 
 		const controller = new AbortController();
 		warming = controller;
+		// Its entry among the model's refreshes on their way, once it goes out (see REFRESH_HOLD_MAX_MS).
+		const refreshId = ++refreshIds;
+		const open = misses.inFlight.get(p.fixed.model) ?? new Map<number, number>();
+		// A one-token answer comes in seconds; one that does not is cancelled, so it settles.
+		const timeout = setTimeout(() => {
+			timedOut = true;
+			controller.abort();
+		}, REFRESH_TIMEOUT_MS);
+		timeout.unref?.();
 		const started = Date.now();
 		// The level the cached request was sent with, as its payload shows it.
 		const thinkingLevel = payloadThinking(request.model.api, sent);
@@ -1017,6 +1068,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 						...({ disableContinuation: true } as object),
 						sessionId: ctx.sessionManager.getSessionId(),
 						signal: controller.signal,
+						timeoutMs: REFRESH_TIMEOUT_MS,
 						onPayload: (params: unknown) => {
 							const built = warmPayload(params, sent);
 							const payload = "payload" in built ? built.payload : undefined;
@@ -1030,6 +1082,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 							}
 							if ("hold" in verdict) {
 								if (verdict.hold === "busy") held = true;
+								if (verdict.hold === "settling") settling = true;
 								if (verdict.hold === "late") late = true;
 								throw new Error(verdict.reason);
 							}
@@ -1039,6 +1092,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 							}
 							// It goes out: reserved at the larger of its expected cost and what the last refresh really cost.
 							out = true;
+							open.set(refreshId, Date.now());
+							misses.inFlight.set(p.fixed.model, open);
 							reserved = reserveFor(budget, spending);
 							spending.spent += reserved;
 							spending.refreshes += 1;
@@ -1049,6 +1104,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			} catch (caught) {
 				error = caught instanceof Error ? caught.message : String(caught);
 			}
+			clearTimeout(timeout);
+			// Settled: no longer holds this model's other refreshes back.
+			open.delete(refreshId);
+			if (open.size === 0 && misses.inFlight.get(p.fixed.model) === open) misses.inFlight.delete(p.fixed.model);
 			if (warming === controller) warming = undefined;
 			// What the refresh reported it cost replaces the reserve; without a report (an error or abort before any
 			// usage, a model without prices) the reserve stays.
@@ -1061,7 +1120,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			const usage = out && used && used.input + used.cacheRead + used.cacheWrite + used.output > 0 ? traceUsage(used) : undefined;
 			const seconds = (Date.now() - started) / 1000;
 			const aborted = controller.signal.aborted || response?.stopReason === "aborted";
-			const failed = !aborted && !held && !refused && !late && (!response || response.stopReason === "error");
+			const failed = !aborted && !held && !settling && !refused && !late && (!response || response.stopReason === "error");
 			const failure = error ?? response?.errorMessage ?? "the request failed";
 			// Whatever the outcome: once the period's spending reached its limit, warming ends.
 			const reached = () => (out && budgetReached(budget, spending) ? endWarm(p, "budget", budgetReason(p, false)) : undefined);
@@ -1081,7 +1140,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					(verdict === "miss" ? endWarm(p, "missed", failed ? `${missReason} before it failed: ${failure}` : missReason) : failed ? endWarm(p, "failed", failure) : undefined);
 			} else if (refused) ended = endWarm(p, "unable", refused);
 			else if (failed) ended = endWarm(p, "failed", failure);
-			if ((aborted || held) && p.doneFor === expiresAt) p.doneFor = undefined;
+			if ((aborted || held || settling) && p.doneFor === expiresAt) p.doneFor = undefined;
 			// Either way the provider refreshed (or wrote) the entry when it received the request.
 			if (out && !aborted && !failed) warmedAt = started;
 			const fallback = fellBack ? { leftToPi: fallbackLine(p.fixed.model, started) } : {};
@@ -1096,12 +1155,17 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			if (aborted) {
 				if (!out) return;
 				ifSessionAlive(() => {
-					trace(ctx, { ...base, action: "cancelled", seconds, ...ended, reason: "a new request or a change of session cancelled it", usage, budget: budgetRecord(p), ...fallback });
+					const reason = timedOut ? `no answer within ${REFRESH_TIMEOUT_MS / 1000} s, so it was cancelled` : "a new request or a change of session cancelled it";
+					trace(ctx, { ...base, action: "cancelled", seconds, ...ended, reason, usage, budget: budgetRecord(p), ...fallback });
 				});
 				return;
 			}
 			ifSessionAlive(() => {
-				if (held) {
+				if (settling) {
+					// Tried again on the next ticks, until the last safe moment.
+					if (p.busyFor !== expiresAt) trace(ctx, { ...base, action: "skip", seconds, reason: SETTLING_REASON });
+					p.busyFor = expiresAt;
+				} else if (held) {
 					// Tried again on the next ticks, as any passing hold-up.
 					if (p.busyFor !== expiresAt) trace(ctx, { ...base, action: "skip", seconds, reason: "Pi got busy or a message was queued while the refresh was being prepared, so it was withheld; tried again until the last safe moment" });
 					p.busyFor = expiresAt;

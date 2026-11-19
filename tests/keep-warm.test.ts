@@ -15,6 +15,7 @@ import {
 	payloadTier,
 	REFRESH_LIMITS,
 	reserveFor,
+	hasPrices,
 	refreshCanPay,
 	requestCache,
 	whyNotReplayable,
@@ -209,6 +210,13 @@ test("a refresh that cannot pay for itself; a reason for thinking by what the re
 	assert.equal(warmBudget(model({ input: 0, output: 15, cacheRead: 0, cacheWrite: 0 }), 1000).priced, true, "an output price is a price");
 	assert.equal(warmBudget(model({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }), 1000).priced, false, "no price at all");
 	assert.equal(refreshCanPay(warmBudget(model({ input: 0, output: 15, cacheRead: 0, cacheWrite: 0 }), 1000)), false, "a refresh costs output, a miss nothing");
+	const tiered = (cacheRead: number) => model({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, tiers: [{ inputTokensAbove: 100_000, input: 1, output: 15, cacheRead, cacheWrite: 1 }] } as never);
+	assert.equal(hasPrices(tiered(1)), true, "a paid tier is a price");
+	assert.equal(hasPrices(model({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, tiers: [{ inputTokensAbove: 100_000, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }] } as never)), false, "every rate in every tier zero");
+	assert.deepEqual(warmBudget(tiered(1), 120_000), { priced: true, refreshCost: 0.120015, missCost: 0 }, "at the tier's rates: a miss costs nothing more");
+	assert.equal(refreshCanPay(warmBudget(tiered(1), 120_000)), false);
+	const below = warmBudget(tiered(1), 50_000);
+	assert.deepEqual([below.priced, below.refreshCost, below.missCost], [true, 0, 0], "below the tier: free, but still priced");
 	assert.equal(whyNotReplayable({ thinking: { type: "adaptive" } }), undefined);
 	assert.equal(whyNotReplayable({ messages: [] }), undefined);
 	assert.equal(whyNotReplayable({ thinking: { type: "enabled" } }), 'the request turns thinking on (thinking: { type: "enabled" }), which a refresh capped at one output token cannot re-send as it was');
