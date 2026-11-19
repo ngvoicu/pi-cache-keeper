@@ -1830,10 +1830,11 @@ const MODEL_KEY = "cliproxyapi/sub/claude";
 const HALF_MISS = { usage: { input: 0, cacheRead: 300_000, cacheWrite: 300_000 } };
 const misses = () => (globalThis as Record<symbol, { counts: Map<string, number>; fallback: Map<string, number>; inFlight: Map<string, Map<number, number>> } | undefined>)[Symbol.for("pi-cache-keeper.warm-misses")];
 const countOf = (model = MODEL_KEY) => misses()?.counts.get(model) ?? 0;
-const WARNING = `Two refreshes in a row missed the cache for ${MODEL_KEY}, so pi-cache-keeper stopped keeping it warm; Pi's own warming takes over. /cache-keeper-warm starts it again.`;
-const FALLBACK_STATUS = "⚠ keep-warm: Pi's after 2 missed refreshes (/cache-keeper-warm)";
-const fallbackLineAt = (at: number, model = MODEL_KEY) =>
-	`two refreshes in a row missed the cache for ${model} (the last at ${new Date(at).toTimeString().slice(0, 5)}), so it is left to Pi's own warming; /cache-keeper-warm starts keeping it warm again`;
+const warningFor = (kinds: string) => `Two refreshes in a row without a hit for ${MODEL_KEY} (${kinds}), so pi-cache-keeper stopped keeping it warm; Pi's own warming takes over. /cache-keeper-warm starts it again.`;
+const WARNING = warningFor("both missed the cache");
+const FALLBACK_STATUS = "⚠ keep-warm: Pi's after 2 refreshes without a hit (/cache-keeper-warm)";
+const fallbackLineAt = (at: number, model = MODEL_KEY, kinds = "both missed the cache") =>
+	`two refreshes in a row without a hit for ${model} (the last at ${new Date(at).toTimeString().slice(0, 5)}): ${kinds}, so it is left to Pi's own warming; /cache-keeper-warm starts keeping it warm again`;
 const keepWarmLineOf = async (h: ReturnType<typeof harness>) => (await h.command("cache-keeper")).split("\n").find((l) => l.startsWith("keep warm:"));
 const RULE = "keep warm: up to 2 h after Pi goes idle; stops once refreshing has cost as much as one cache miss";
 // One idle period: Pi goes idle after a real answer, the extension decides, the refresh is due 25 s before expiry.
@@ -1918,7 +1919,7 @@ test("R9: two misses in a row: left to Pi from the next period's start, warned o
 	const attempts = h.state.attempts;
 	assert.equal(
 		await h.command("cache-keeper-warm"),
-		`pi-cache-keeper keeps ${MODEL_KEY} warm again, at the latest from your next message: an idle period already running whose own warming had not ended is kept warm again at once. The missed-refresh count of cliproxyapi/sub/other is cleared too.`,
+		`pi-cache-keeper keeps ${MODEL_KEY} warm again, at the latest from your next message: an idle period already running whose own warming had not ended is kept warm again at once. The count of refreshes without a hit of cliproxyapi/sub/other is cleared too.`,
 	);
 	assert.equal(h.state.attempts, attempts, "the command sends nothing");
 	assert.deepEqual([misses()?.fallback.size, misses()?.counts.size], [0, 0]);
@@ -1927,11 +1928,11 @@ test("R9: two misses in a row: left to Pi from the next period's start, warned o
 	assert.equal(countOf(), 1, "counted from zero: one miss");
 	assert.deepEqual((await nextPeriod(h)).decided, { action: "stop" }, "still owned after one miss");
 	assert.equal(await h.command("cache-keeper-warm"), `pi-cache-keeper keeps ${MODEL_KEY} warm again, at the latest from your next message: an idle period already running whose own warming had not ended is kept warm again at once.`);
-	assert.equal(await h.command("cache-keeper-warm"), "Nothing to clear: no model was left to Pi's own warming, and no refresh had missed the cache.");
+	assert.equal(await h.command("cache-keeper-warm"), "Nothing to clear: no model was left to Pi's own warming, and no refresh was counted without a hit.");
 	settings({ keepWarmMinutes: 0, minContextTokens: 100_000, compactBeforeExpiry: false });
 	assert.equal(
 		await h.command("cache-keeper-warm"),
-		"Nothing to clear: no model was left to Pi's own warming, and no refresh had missed the cache. Keep-warm itself is off (keepWarmMinutes: 0); /cache-keeper-settings turns it on.",
+		"Nothing to clear: no model was left to Pi's own warming, and no refresh was counted without a hit. Keep-warm itself is off (keepWarmMinutes: 0); /cache-keeper-settings turns it on.",
 		"it does not turn keep-warm on",
 	);
 	assert.equal(readSettings().cacheKeeper.keepWarmMinutes, 0);
@@ -1957,13 +1958,57 @@ test("/cache-keeper-warm takes effect at the latest from the next message: a per
 	assert.equal(running.warms.length, 1, "and refreshed before its cache expires");
 });
 
+test("R9: the count is of refreshes in a row without a hit: unreported ones count as misses do; a hit resets; one cancelled before it reported does not count", async (t) => {
+	t.after(() => mock.timers.reset());
+	const UNREPORTED = { usage: { input: 0, output: 1, cacheRead: 0, cacheWrite: 0 } };
+	const run = async (label: string, respond: (n: number) => Record<string, unknown>, periods: number, options: Partial<Options> = {}) => {
+		clock();
+		fresh({ compactBeforeExpiry: false });
+		const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true, respond: respond as never, ...options });
+		const said: string[] = [];
+		const notify = h.ctx.ui.notify;
+		h.ctx.ui.notify = (text: string) => (said.push(text), notify(text));
+		for (let i = 0; i < periods; i++) await nextPeriod(h, i === 0);
+		mock.timers.tick(1000);
+		h.run(true);
+		await flush();
+		return { h, said, decided: h.decide(), line: await keepWarmLineOf(h) };
+	};
+	// Unreported, unreported: left to Pi, warned once.
+	let r = await run("unreported twice", () => UNREPORTED, 2);
+	assert.equal(r.decided, undefined, "left to Pi");
+	assert.equal(r.said.filter((n) => n === warningFor("neither reported what it cost")).length, 1, "warned once");
+	assert.match(r.line ?? "", /two refreshes in a row without a hit for cliproxyapi\/sub\/claude \(the last at \d\d:\d\d\): neither reported what it cost, so it is left to Pi's own warming; \/cache-keeper-warm starts keeping it warm again$/);
+	assert.deepEqual(traces().filter((x) => x.leftToPi).map((x) => [x.action, x.stop]), [["warm", "unknown"]], "logged once");
+	// Unreported, hit, unreported: still owned.
+	r = await run("unreported, hit, unreported", (n) => (n === 2 ? {} : UNREPORTED), 3);
+	assert.deepEqual(r.decided, { action: "stop" }, "still owned");
+	assert.equal(countOf(), 1);
+	// Miss, unreported: left to Pi, and said what the two were.
+	r = await run("miss, unreported", (n) => (n === 1 ? HALF_MISS : UNREPORTED), 2);
+	assert.equal(r.decided, undefined);
+	assert.equal(r.said.filter((n) => n === warningFor("one missed the cache, one did not report what it cost")).length, 1);
+	// Cancelled before it reported usage, twice (the user's next message): not counted, still owned.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, hold: () => true });
+	h.state.abortReports = false;
+	await nextPeriod(h, true);
+	await nextPeriod(h);
+	await nextPeriod(h);
+	assert.equal(h.warms.length, 3, "three went out, two of them cancelled by the next message");
+	assert.equal(traces().filter((x) => x.action === "cancelled").length, 2);
+	assert.equal(countOf(), 0, "not counted");
+	assert.deepEqual(h.decide(), { action: "stop" }, "still owned");
+});
+
 test("R9: one miss counted, then the command with only a count to clear", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	fresh({ compactBeforeExpiry: false });
 	const h = harness({ lifetime: 300, cost: WITH_WRITE, respond: () => HALF_MISS });
 	await nextPeriod(h, true);
-	assert.equal(await h.command("cache-keeper-warm"), `No model was left to Pi's own warming. The missed-refresh count of ${MODEL_KEY} is cleared.`);
+	assert.equal(await h.command("cache-keeper-warm"), `No model was left to Pi's own warming. The count of refreshes without a hit of ${MODEL_KEY} is cleared.`);
 	assert.equal(countOf(), 0);
 });
 
@@ -2021,7 +2066,7 @@ test("R9: an interrupted refresh that reported a miss counts; one that reported 
 			// The period that started before the second miss was reported is Pi's from then on: Pi is not stopped for a
 			// refresh the extension will not send, and nothing more leaves.
 			assert.equal(h.decide("warm"), undefined, `${label}: the running period's handler returns nothing`);
-			assert.match((await keepWarmLineOf(h)) ?? "", /two refreshes in a row missed the cache for /, label);
+			assert.match((await keepWarmLineOf(h)) ?? "", /two refreshes in a row without a hit for /, label);
 			await h.idle(300_000);
 			await flush();
 			assert.equal(h.warms.length, 2, `${label}: nothing more leaves`);
@@ -2063,7 +2108,7 @@ test("R9: with Pi's real Anthropic adapter, a refresh whose stream fails after r
 	assert.equal(countOf("anthropic/claude-sonnet-4-6"), 1);
 });
 
-test("a successful refresh whose usage shows no prompt (omitted, or output only) is neither a miss nor a hit, through Pi's real Chat Completions and Responses adapters; what it cost is unknown, so warming ends for the period, and the next period is owned again", { skip: noCatalog }, async (t) => {
+test("a successful refresh whose usage shows no prompt (omitted, or output only), through Pi's real Chat Completions and Responses adapters: what it cost is unknown, so warming ends for the period and it counts as a refresh without a hit; two in a row leave the model to Pi", { skip: noCatalog }, async (t) => {
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
 	withRetention(t, undefined);
@@ -2096,24 +2141,34 @@ test("a successful refresh whose usage shows no prompt (omitted, or output only)
 		const key = `${provider}/${id}`;
 		misses(); // the store exists once a harness is made
 		const sent = await adapterPayload(model, { maxTokens: 8192, cacheRetention: "short" }, systemAndUser);
-		const h = harness({ model, sent, stream: inMemory(model, "short", reply) });
+		// A context that fits the window, so compacting when full stays out of it.
+		const h = harness({ model, sent, stream: inMemory(model, "short", reply), ui: true, cached: 100_000 });
 		const lifetime = provider === "openai" ? 1_800_000 : 300_000;
 		h.emit("agent_settled");
 		assert.deepEqual(h.decide(), { action: "stop" }, label);
-		// A miss already counted for the model: a refresh without evidence must not reset it.
-		misses()?.counts.set(key, 1);
 		await h.idle(2 * lifetime);
 		await flush();
 		assert.equal(h.warms.length, 1, `${label}: no refresh after one whose cost is unknown`);
 		const stops = traces().filter((r) => r.stop);
 		assert.deepEqual(stops.map((r) => [r.action, r.stop, r.reason]), [["warm", "unknown", "the refresh reported no usage, so what it cost is unknown"]], label);
 		assert.match(await h.command("cache-keeper"), /keep-warm ended \(a refresh reported no usage\): .*\(the refresh reported no usage, so what it cost is unknown\)/, label);
-		assert.equal(countOf(key), 1, `${label}: the count is neither raised nor reset`);
+		assert.equal(countOf(key), 1, `${label}: counted as a refresh without a hit`);
 		assert.equal(misses()?.fallback.size, 0, label);
-		// The next period after a new real answer is owned again.
+		// The next period after a new real answer is owned again; its refresh also reports no usage: two in a row.
 		mock.timers.tick(1000);
 		h.run(true);
 		assert.deepEqual(h.decide(), { action: "stop" }, `${label}: the next period`);
+		await h.idle(lifetime);
+		await flush();
+		assert.equal(h.warms.length, 2, label);
+		assert.equal(misses()?.fallback.has(key), true, `${label}: left to Pi`);
+		assert.ok(
+			h.notes.includes(`Two refreshes in a row without a hit for ${key} (neither reported what it cost), so pi-cache-keeper stopped keeping it warm; Pi's own warming takes over. /cache-keeper-warm starts it again.`),
+			`${label}: warned`,
+		);
+		mock.timers.tick(1000);
+		h.run(true);
+		assert.equal(h.decide(), undefined, `${label}: the period after is Pi's`);
 		mock.timers.reset();
 	}
 });

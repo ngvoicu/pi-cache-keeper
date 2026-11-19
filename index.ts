@@ -146,7 +146,8 @@ interface CapturedRequest {
 const MIN_OWNED_LIFETIME_MS = 60_000;
 
 /**
- * R9: per model (provider/id), how many refreshes in a row missed the cache, and the models left to Pi's own warming
+ * R9: per model (provider/id), how many refreshes in a row did not show a hit (a miss, or a refresh that settled without
+ * reporting what it cost), and the models left to Pi's own warming
  * after two in a row, with when. A hit sets the run back to zero; /cache-keeper-warm clears both. A wrong lifetime
  * costs at most two missed refreshes, then nothing until the user starts warming again. Pi loads the extension again
  * (a new instance, its modules imported afresh) on /new, /resume, /fork and /reload, so the store is kept on
@@ -166,9 +167,15 @@ const NO_USAGE = "the refresh reported no usage, so what it cost is unknown";
 const NO_USAGE_CANCELLED = "the refresh was cancelled before it reported usage, so what it cost is unknown";
 const SETTLING_REASON = "an earlier refresh of this model has not settled yet, and it may have missed the cache; tried again until the last safe moment";
 const REFRESH_HOLD_MAX_MS = 10 * 60_000;
+/** A refresh that did not show a hit and counts: a miss, or one that settled successfully without reported usage. */
+type WithoutHit = "miss" | "unreported";
 interface WarmMisses {
 	counts: Map<string, number>;
+	/** The kinds of the current run, the last two. */
+	kinds: Map<string, WithoutHit[]>;
 	fallback: Map<string, number>;
+	/** What the two refreshes were that left a model to Pi. */
+	fallbackKinds: Map<string, WithoutHit[]>;
 	/** Per model: the refreshes on their way, by an id, with when each was sent. */
 	inFlight: Map<string, Map<number, number>>;
 }
@@ -178,6 +185,8 @@ function warmMissStore(): WarmMisses {
 	if (!(found?.counts instanceof Map) || !(found.fallback instanceof Map)) host[WARM_MISSES] = { counts: new Map(), fallback: new Map(), inFlight: new Map() };
 	const store = host[WARM_MISSES] as WarmMisses;
 	if (!(store.inFlight instanceof Map)) store.inFlight = new Map();
+	if (!(store.kinds instanceof Map)) store.kinds = new Map();
+	if (!(store.fallbackKinds instanceof Map)) store.fallbackKinds = new Map();
 	return store;
 }
 let refreshIds = 0;
@@ -336,26 +345,34 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const p = period;
 		return owns(p) ? keptState(model, entries, p.fixed.requested) : cacheState(servedModel(model), entries, warmedAt);
 	};
-	// R9: each model's run of missed refreshes, and the models two misses in a row left to Pi (see WARM_MISSES).
+	// R9: each model's run of refreshes without a hit, and the models two in a row left to Pi (see WARM_MISSES).
 	const misses = warmMissStore();
+	// What the two refreshes without a hit were: misses, unreported ones, or one of each.
+	const withoutHit = (kinds: readonly WithoutHit[] | undefined): string =>
+		kinds?.every((k) => k === "miss") ? "both missed the cache" : kinds?.every((k) => k === "unreported") ? "neither reported what it cost" : "one missed the cache, one did not report what it cost";
 	const fallbackLine = (model: string, at: number) =>
-		`two refreshes in a row missed the cache for ${model} (the last at ${new Date(at).toTimeString().slice(0, 5)}), so it is left to Pi's own warming; /cache-keeper-warm starts keeping it warm again`;
+		`two refreshes in a row without a hit for ${model} (the last at ${new Date(at).toTimeString().slice(0, 5)}): ${withoutHit(misses.fallbackKinds.get(model))}, so it is left to Pi's own warming; /cache-keeper-warm starts keeping it warm again`;
 	const fallbackFor = (model: Model<Api> | undefined): { key: string; at: number } | undefined => {
 		const key = model && `${model.provider}/${model.id}`;
 		const at = key === undefined ? undefined : misses.fallback.get(key);
 		return key !== undefined && at !== undefined ? { key, at } : undefined;
 	};
-	// A refresh's evidence, counted per model: a miss adds one, a hit sets the run back to zero. The second miss in a
-	// row leaves the model to Pi (true once, when that happens). Touches no session context.
-	const recordRefresh = (model: string, verdict: "miss" | "hit", at: number): boolean => {
+	// A refresh's evidence, counted per model: a miss, or a successful refresh that reported no prompt (what it cost is
+	// unknown), adds one; a hit sets the run back to zero. The second in a row leaves the model to Pi (true once, when that
+	// happens). Touches no session context.
+	const recordRefresh = (model: string, verdict: "hit" | WithoutHit, at: number): boolean => {
 		if (verdict === "hit") {
 			misses.counts.delete(model);
+			misses.kinds.delete(model);
 			return false;
 		}
 		const count = (misses.counts.get(model) ?? 0) + 1;
 		misses.counts.set(model, count);
+		const kinds = [...(misses.kinds.get(model) ?? []), verdict].slice(-MISSES_IN_A_ROW);
+		misses.kinds.set(model, kinds);
 		if (count < MISSES_IN_A_ROW || misses.fallback.has(model)) return false;
 		misses.fallback.set(model, at);
+		misses.fallbackKinds.set(model, kinds);
 		return true;
 	};
 	// Whether a refresh of this model, sent from any session of this process, is still on its way (see REFRESH_HOLD_MAX_MS).
@@ -1159,7 +1176,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			const missReason = `the refresh read only ${Math.floor(100 * (share ?? 0))}% from the cache, so it wrote the context again`;
 			// Recorded here, without the session's context, which may be gone (/new, /reload, Pi exiting): the model's run of
 			// misses (two in a row and it is left to Pi), the period's end, the timer's bookkeeping.
-			const fellBack = verdict ? recordRefresh(p.fixed.model, verdict, started) : false;
+			// A refresh that settled successfully without a prompt in its usage counts too; one cancelled or failed before it
+			// reported any does not.
+			const unreported = out && verdict === undefined && !aborted && !failed && !held && !settling && !late && !refused;
+			const fellBack = verdict ? recordRefresh(p.fixed.model, verdict, started) : unreported ? recordRefresh(p.fixed.model, "unreported", started) : false;
 			let ended: ReturnType<typeof endWarm> | undefined;
 			// Inside a period the next refresh goes out only after the one before it reported a hit: one that left and came back
 			// otherwise (a miss, a failure, or no prompt in its usage, so what it cost is unknown) ends warming for the period.
@@ -1183,7 +1203,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			// What is said and shown, only while the session is alive.
 			ifSessionAlive(() => {
 				if (fellBack && ctx.hasUI) {
-					ctx.ui.notify(`Two refreshes in a row missed the cache for ${p.fixed.model}, so pi-cache-keeper stopped keeping it warm; Pi's own warming takes over. /cache-keeper-warm starts it again.`, "warning");
+					ctx.ui.notify(
+						`Two refreshes in a row without a hit for ${p.fixed.model} (${withoutHit(misses.fallbackKinds.get(p.fixed.model))}), so pi-cache-keeper stopped keeping it warm; Pi's own warming takes over. /cache-keeper-warm starts it again.`,
+						"warning",
+					);
 				}
 			});
 			// A real request started (or the session moved on); it refreshes the cache itself. What went out stays counted.
@@ -1798,20 +1821,22 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("cache-keeper-warm", {
-		description: "Start keeping the cache warm again for models two missed refreshes in a row left to Pi's own warming",
+		description: "Start keeping the cache warm again for models two refreshes in a row without a hit left to Pi's own warming",
 		handler: async (_args, ctx) => {
 			const fellBack = [...misses.fallback.keys()].sort();
 			const counted = [...misses.counts.entries()].filter(([model, count]) => count > 0 && !misses.fallback.has(model)).map(([model]) => model).sort();
 			misses.fallback.clear();
+			misses.fallbackKinds.clear();
 			misses.counts.clear();
+			misses.kinds.clear();
 			const off = warmMinutes(true) > 0 ? "" : " Keep-warm itself is off (keepWarmMinutes: 0); /cache-keeper-settings turns it on.";
 			let text: string;
 			if (fellBack.length > 0) {
-				const also = counted.length > 0 ? ` The missed-refresh count of ${counted.join(", ")} is cleared too.` : "";
+				const also = counted.length > 0 ? ` The count of refreshes without a hit of ${counted.join(", ")} is cleared too.` : "";
 				text = `pi-cache-keeper keeps ${fellBack.join(", ")} warm again, at the latest from your next message: an idle period already running whose own warming had not ended is kept warm again at once.${also}${off}`;
 			} else if (counted.length > 0) {
-				text = `No model was left to Pi's own warming. The missed-refresh count of ${counted.join(", ")} is cleared.${off}`;
-			} else text = `Nothing to clear: no model was left to Pi's own warming, and no refresh had missed the cache.${off}`;
+				text = `No model was left to Pi's own warming. The count of refreshes without a hit of ${counted.join(", ")} is cleared.${off}`;
+			} else text = `Nothing to clear: no model was left to Pi's own warming, and no refresh was counted without a hit.${off}`;
 			ctx.ui.notify(text, "info");
 			renderFooter(ctx);
 		},

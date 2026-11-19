@@ -235,7 +235,7 @@ const ENDED_TINY: Partial<Record<WarmStop, string>> = { missed: "keep-warm misse
 
 function keepWarmPart(view: KeepWarmView): Part {
 	if ("fallback" in view) {
-		return plainPart(PRIORITY.warmAlert, ["⚠ keep-warm: Pi's after 2 missed refreshes (/cache-keeper-warm)", "⚠ keep-warm: Pi's after 2 misses", "⚠ keep-warm: Pi's", ALERT], "warning");
+		return plainPart(PRIORITY.warmAlert, ["⚠ keep-warm: Pi's after 2 refreshes without a hit (/cache-keeper-warm)", "⚠ keep-warm: Pi's after 2 without a hit", "⚠ keep-warm: Pi's", ALERT], "warning");
 	}
 	if ("ended" in view) {
 		const { stop, limit, amounts } = view.ended;

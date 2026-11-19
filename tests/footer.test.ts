@@ -45,7 +45,7 @@ test("the footer's colours: the last 30 seconds and errors in the warning colour
 	);
 	assert.equal(formatFooter({ countdown: { state: "cold" } }, Infinity, paint), "<dim>cache cold · next message full price</>");
 	assert.equal(formatFooter({ countdown: { state: "warm", ms: 31_000 } }, Infinity, paint), "cache warm · 0:31 left");
-	assert.equal(formatFooter({ keepWarm: { fallback: true } }, Infinity, paint), "<warning>⚠ keep-warm: Pi's after 2 missed refreshes (/cache-keeper-warm)</>");
+	assert.equal(formatFooter({ keepWarm: { fallback: true } }, Infinity, paint), "<warning>⚠ keep-warm: Pi's after 2 refreshes without a hit (/cache-keeper-warm)</>");
 	assert.equal(formatFooter({ keepWarm: { leftToPi: "thinking on" } }, Infinity, paint), "<muted>keep-warm: Pi's (thinking on)</>");
 	const guess = lifetimesView({ short: 300 }, { tier: "long" }, findFacts(lookupsFor({ provider: "openai", id: "gpt-6.1-sol" }, { subscription: true }), providers));
 	assert.equal(formatFooter({ lifetimes: guess }, Infinity, paint), "long <warning>?</><dim> (in use)</> · <dim>short </><dim>5m</><warning> ⚠</>");
@@ -63,8 +63,8 @@ test("keep-warm in the footer: why it ended, why a period is Pi's, and two misse
 	assert.equal(ended("failed"), `cache warm · 0:24 left · ⚠ keep-warm ended (a refresh failed): $1.98 spent, a miss costs $2.07${values}`);
 	assert.equal(ended("unable"), `cache warm · 0:24 left · ⚠ keep-warm ended (the request can't be re-sent): $1.98 spent, a miss costs $2.07${values}`);
 	// Two misses in a row: also with the cache cold, and with no countdown at all.
-	assert.equal(formatFooter({ countdown: { state: "cold" }, keepWarm: { fallback: true }, ...claude }), `cache cold · next message full price · ⚠ keep-warm: Pi's after 2 missed refreshes (/cache-keeper-warm)${values}`);
-	assert.equal(formatFooter({ keepWarm: { fallback: true }, ...claude }), `⚠ keep-warm: Pi's after 2 missed refreshes (/cache-keeper-warm)${values}`);
+	assert.equal(formatFooter({ countdown: { state: "cold" }, keepWarm: { fallback: true }, ...claude }), `cache cold · next message full price · ⚠ keep-warm: Pi's after 2 refreshes without a hit (/cache-keeper-warm)${values}`);
+	assert.equal(formatFooter({ keepWarm: { fallback: true }, ...claude }), `⚠ keep-warm: Pi's after 2 refreshes without a hit (/cache-keeper-warm)${values}`);
 	assert.equal(formatFooter(warm(5 * MIN, { keepWarm: { leftToPi: "several cache lifetimes" }, ...claude })), `cache warm · 5m left · keep-warm: Pi's (several cache lifetimes)${values}`);
 	assert.equal(formatFooter(warm(5 * MIN, { keepWarm: { pending: true }, ...claude })), `cache warm · 5m left · keep-warm: from your next message${values}`);
 });
@@ -183,7 +183,7 @@ test("narrow terminals: wording goes first, then the least important values; the
 	assert.equal(formatFooter(failed, 30), "warm 0:25 · ⚠ keep-warm failed");
 	assert.equal(formatFooter(failed, 14), "warm 0:25 · ⚠", "at the last, the mark alone");
 	const fallback = { countdown: { state: "cold" as const }, keepWarm: { fallback: true as const }, ...claude };
-	assert.equal(formatFooter(fallback, 100), "cold · ⚠ keep-warm: Pi's after 2 misses · long 1h · short 5m · sent 1h · api $5/$25");
+	assert.equal(formatFooter(fallback, 100), "cold · ⚠ keep-warm: Pi's after 2 without a hit · long 1h · short 5m · sent 1h · api $5/$25");
 	assert.equal(formatFooter(fallback, 24), "cold · ⚠ keep-warm: Pi's");
 	assert.equal(formatFooter(fallback, 14), "cold · ⚠");
 	// A request that asked for another lifetime than the countdown counts outlasts the values too.
