@@ -2218,6 +2218,7 @@ const shortRetention = (t: { after: (fn: () => void) => void }) => {
 test("footer: a request whose cache markers the extension does not read (Bedrock's cachePoint) says nothing of what was sent", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
+	online(t);
 	fresh();
 	// Claude on Bedrock asks for the one-hour cache twice, in Bedrock's own form; the answer reports a one-hour write.
 	const cachePoint = { cachePoint: { type: "default", ttl: "1h" } };
@@ -2237,6 +2238,7 @@ test("footer: a request whose cache markers the extension does not read (Bedrock
 test("footer: after a model switch, the new model's lifetimes and price, and nothing in use or sent until it makes a request", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
+	online(t);
 	shortRetention(t);
 	fresh();
 	// Claude with the one-hour cache, kept warm by the extension.
@@ -2272,6 +2274,7 @@ test("footer: after a model switch, the new model's lifetimes and price, and not
 test("footer: with keep-warm off, a countdown on another model's tier is said to be so, beside the model's own tier", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
+	online(t);
 	shortRetention(t);
 	fresh({ keepWarmMinutes: 0 });
 	// An earlier model wrote the one-hour cache; then Kimi K3, whose answers report no tier, at the short tier Pi asks for.
