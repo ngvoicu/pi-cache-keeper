@@ -137,6 +137,16 @@ test("the price in use: per million tokens at the context size, no per-token pri
 	assert.equal(formatFooter({ price: { via: "sub or api", rates: { input: 2, output: 10 } } }, 18), "sub/api $2/$10");
 });
 
+test("a countdown on another model's tier is said to be so, right after it, and only beside a countdown that says how long", () => {
+	const kimi: FooterView = { lifetimes: { inUse: "short", short: { seconds: 300 }, long: { seconds: 3600 } }, countdownTier: "long", price: { via: "api", rates: { input: 3, output: 15 } } };
+	assert.equal(formatFooter(warm(59 * MIN, kimi)), "cache warm · 59m left · ⚠ countdown on another model's long tier · short 5m (in use) · long 1h · api $3/$15 per M");
+	assert.equal(formatFooter({ countdown: { state: "cold" }, ...kimi }), "cache cold · next message full price · ⚠ countdown on another model's long tier · short 5m (in use) · long 1h · api $3/$15 per M");
+	assert.equal(formatFooter({ countdown: { state: "running" }, ...kimi }), "cache in use · short 5m (in use) · long 1h · api $3/$15 per M");
+	assert.equal(formatFooter(kimi), "short 5m (in use) · long 1h · api $3/$15 per M");
+	assert.equal(formatFooter(warm(59 * MIN, kimi), 60), "warm 59m · ⚠ countdown: other model · short 5m · api $3/$15");
+	assert.equal(formatFooter(warm(59 * MIN, kimi), 14), "warm 59m · ⚠");
+});
+
 test("providers.dev in the footer: an answer from elsewhere, no data, stale data, PI_OFFLINE, a guess", () => {
 	const values = { lifetimes: claude.lifetimes, price: claude.price };
 	assert.equal(formatFooter(warm(4 * MIN, { ...values, data: { served: "api" } })), "cache warm · 4m left · ⚠ answered by an API key · long 1h (in use) · short 5m · api $5/$25 per M");
@@ -193,6 +203,7 @@ test("narrow terminals: wording goes first, then the least important values; the
 test("at every width from 1 to 200 columns, in every state: within the width, and no value outlasts an error", () => {
 	const views: FooterView[] = [
 		warm(59 * MIN),
+		warm(59 * MIN, { ...claude, lifetimes: { inUse: "short", short: { seconds: 300 }, long: { seconds: 3600 } }, countdownTier: "long", data: { served: "api" } }),
 		{ countdown: { state: "cold" }, keepWarm: { fallback: true }, ...claude },
 		warm(24_000, { keepWarm: { ended: { stop: "budget", limit: "24 h", amounts: "$1.98 spent, a miss costs $2.07" } }, ...claude }),
 		warm(24_000, { keepWarm: { ended: { stop: "missed", limit: "2 h", amounts: "$1.22 spent, a miss costs $2.07" } }, ...claude, data: { served: "api", staleMs: 30 * HOUR } }),

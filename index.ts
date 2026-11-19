@@ -203,6 +203,8 @@ interface WarmPeriod {
 	notOwned?: string;
 	/** What the footer says of `notOwned`, in a few words; none where nothing is worth saying (no answer yet). */
 	notOwnedLabel?: string;
+	/** The session's model when the period started, as `provider/id`: the footer says nothing of the period for another. */
+	model?: string;
 	/** The request of the period's answer; forgotten with the cached request (model switch, compaction, branch move). */
 	request?: CapturedRequest;
 	budget?: WarmBudget;
@@ -231,6 +233,12 @@ interface CachedPath {
 
 /** The extension's one status in Pi's footer: the countdown, what went wrong, and the values in use (see footer.ts). */
 const STATUS_KEY = "cache-keeper";
+/**
+ * The request forms whose cache markers `requestCache` reads: Anthropic Messages (`cache_control`) and OpenAI's Chat
+ * Completions and Responses (Codex's and Azure's too). Pi's other adapters write theirs in forms it does not read
+ * (Bedrock's `cachePoint`, Gemini's `cachedContent`), so for those the footer says nothing of what was sent.
+ */
+const MARKERS_READ: ReadonlySet<string> = new Set(["anthropic-messages", "openai-completions", "openai-responses", "openai-codex-responses", "azure-openai-responses"]);
 const httpFetch: Fetch = (url, init) => fetch(url, init);
 const CARD_TYPE = "cache-keeper";
 /** The card type pi-cached-compaction wrote; still rendered so cards in older sessions show. */
@@ -419,6 +427,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			idleSince: Date.now(),
 			notOwned: why?.reason,
 			...(why?.label ? { notOwnedLabel: why.label } : {}),
+			...(model ? { model: `${model.provider}/${model.id}` } : {}),
 			onAtStart: warmMinutes(true) > 0,
 			request,
 			budget: request && state?.answerPrompt !== undefined ? warmBudget(request.model, state.answerPrompt) : undefined,
@@ -510,7 +519,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (warmMinutes() <= 0) return undefined;
 		if (fallbackFor(model)) return { fallback: true };
 		const p = period;
-		if (!p) return undefined;
+		// A period that started on another model (switched since) says nothing about this one.
+		if (!p || p.model !== `${model.provider}/${model.id}`) return undefined;
 		if (owns(p)) return p.ended && !running ? { ended: { stop: p.ended.stop, limit: keepWarmLabel(warmMinutes()), amounts: spendingText(p.budget, p.spending) } } : undefined;
 		if (!p.onAtStart) return { pending: true };
 		return p.notOwnedLabel ? { leftToPi: p.notOwnedLabel } : undefined;
@@ -622,20 +632,27 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		// providers.dev's entries for the values in use: those of what answered, when that is not what the values are for.
 		const found = config.modelData && fetched ? findFacts(lookupsFor(model, otherwise ? { upstreams: otherwise } : access), data.providers) : undefined;
 		const served = servedModel(model);
-		// The tier and lifetime the countdown runs on: as a period the extension keeps warm fixed them, else as with
-		// keep-warm off. Claude Code picks the tier for the bridge model.
+		// The model's own tier in use, once it has made a request in this session (its answer on the branch, or a request
+		// the extension saw): as a period the extension keeps warm for this model fixed it, else the tier its own answers
+		// reported, else the one Pi asks for. Claude Code picks the tier for the bridge model.
 		const p = period;
-		const owned = owns(p);
-		const tier = owned ? p.fixed.tier : bridge ? undefined : cacheTier(entries, model);
+		const key = `${model.provider}/${model.id}`;
+		const owned = owns(p) && p.fixed.model === key;
+		const request = captured && captured.model.provider === model.provider && captured.model.id === model.id ? captured : undefined;
+		const asked = request !== undefined || entries.some((e) => e.type === "message" && e.message.role === "assistant" && e.message.provider === model.provider && e.message.model === model.id);
+		const tier = !asked || bridge ? undefined : owned ? p.fixed.tier : cacheTier(entries, model);
+		// The tier the countdown runs on, read as stateOf reads it: with keep-warm off, the latest tier any model's answer
+		// reported, which after a model switch can be another model's.
+		const countdownTier = owns(p) ? cacheTier(entries, model, p.fixed.requested) : cacheTier(entries);
 		const counted = owned ? undefined : stateOf(model, entries).lifetime;
 		const declared = tier === undefined ? undefined : served.promptCache?.[tier];
-		// Where the model declares none for the tier, the countdown's own (the provider's report, a family's documented one).
-		const inUse = owned ? p.fixed.ms / 1000 : (declared ?? (counted && counted.source !== "declared by the model" ? counted.ms / 1000 : undefined));
+		// Where the model declares none for the tier, the countdown's own (the provider's report, a family's documented
+		// one), when the countdown runs on that tier.
+		const inUse = owned ? p.fixed.ms / 1000 : (declared ?? (tier === countdownTier && counted && counted.source !== "declared by the model" ? counted.ms / 1000 : undefined));
 		const lifetimes = lifetimesView(served.promptCache, { tier, seconds: inUse }, found);
-		const request = captured && captured.model.provider === model.provider && captured.model.id === model.id ? captured : undefined;
-		const cache = request?.payload ? (request.cache ?? requestCache(request.payload)) : undefined;
+		const cache = request?.payload && MARKERS_READ.has(model.api) ? (request.cache ?? requestCache(request.payload)) : undefined;
 		const retention = process.env.PI_CACHE_RETENTION === "long" ? "long" : "short";
-		const sent = cache ? sentView(cache, { tier, ms: inUse === undefined ? undefined : inUse * 1000 }, served.promptCache, retention) : undefined;
+		const sent = cache && tier ? sentView(cache, { tier, ms: inUse === undefined ? undefined : inUse * 1000 }, served.promptCache, retention) : undefined;
 		const rates = hasPrices(model) ? priceAt(model.cost, ctx.getContextUsage()?.tokens ?? undefined) : undefined;
 		const priceState = found && found.refs.length > 0 ? fieldStates(found).price : undefined;
 		const price: PriceView = {
@@ -653,7 +670,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			if (otherwise) dataView.served = accessVia({ upstreams: otherwise });
 			if (lifetimes.short.mark === "guess" || lifetimes.long.mark === "guess") dataView.guess = via === "sub" || via === "api" ? "login" : "access";
 		}
-		return { lifetimes, ...(sent ? { sent } : {}), price, data: dataView };
+		// The countdown on another tier than the model's own: said beside it, so the two are not read as one.
+		const otherTier = tier !== undefined && !owned && countdownTier !== tier ? countdownTier : undefined;
+		return { lifetimes, ...(sent ? { sent } : {}), ...(otherTier ? { countdownTier: otherTier } : {}), price, data: dataView };
 	};
 	const showData = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;

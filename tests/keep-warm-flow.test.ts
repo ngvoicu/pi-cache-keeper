@@ -2201,3 +2201,102 @@ test("no file imports evaluateCacheWarming (missing before pi-ai 1.5.1)", () => 
 
 // At exit rather than in a root after-hook: that hook can run while a test still awaits a real adapter.
 process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
+
+// ------------------------------------------------- the footer: only what the extension read, and only for this model
+
+const lastFooter = (h: ReturnType<typeof harness>) => h.statuses.at(-1)?.text;
+// The retention Pi asks for, for one test: Pi's short default, as the reviewer's cases ran with.
+const shortRetention = (t: { after: (fn: () => void) => void }) => {
+	const before = process.env.PI_CACHE_RETENTION;
+	delete process.env.PI_CACHE_RETENTION;
+	t.after(() => {
+		if (before === undefined) delete process.env.PI_CACHE_RETENTION;
+		else process.env.PI_CACHE_RETENTION = before;
+	});
+};
+
+test("footer: a request whose cache markers the extension does not read (Bedrock's cachePoint) says nothing of what was sent", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh();
+	// Claude on Bedrock asks for the one-hour cache twice, in Bedrock's own form; the answer reports a one-hour write.
+	const cachePoint = { cachePoint: { type: "default", ttl: "1h" } };
+	const sent = { modelId: "us.anthropic.claude-sonnet-5-5", system: [{ text: "s" }, cachePoint], messages: [{ role: "user", content: [{ text: "hi" }, cachePoint] }], inferenceConfig: { maxTokens: 8192 } };
+	const h = harness({
+		ui: true,
+		cost: WITH_WRITE,
+		model: { provider: "amazon-bedrock", id: "us.anthropic.claude-sonnet-5-5", api: "bedrock-converse-stream", promptCache: { short: 300, long: 3600 } },
+		sent,
+		answer: { cacheWrite: 1, cacheWrite1h: 1 },
+	});
+	h.emit("agent_settled");
+	// It said "⚠ sent default cache" before.
+	assert.equal(lastFooter(h), "cache warm · 60m left · keep-warm: Pi's (bedrock-converse-stream not re-sent) · long 1h (in use) · short 5m · api $3/$15 per M");
+});
+
+test("footer: after a model switch, the new model's lifetimes and price, and nothing in use or sent until it makes a request", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	shortRetention(t);
+	fresh();
+	// Claude with the one-hour cache, kept warm by the extension.
+	const sent = { model: "claude", max_tokens: 64_000, system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "1h" } }], messages: [{ role: "user", content: "hi" }], thinking: { type: "adaptive" } };
+	const h = harness({ ui: true, cost: WITH_WRITE, sent });
+	h.emit("agent_settled");
+	// The retention in force is Pi's short default, so the request's hour is said against it.
+	assert.equal(lastFooter(h), "cache warm · 60m left · long 1h (in use) · short 1h · sent 1h (retention short) · api $3/$15 per M");
+	const gemini = { provider: "google", id: "gemini-3.8-pro", api: "google-generative-ai", contextWindow: 1_000_000, maxTokens: 64_000, cost: { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 } };
+	h.ctx.model = gemini as never;
+	h.emit("model_select");
+	// It said "long 1h (in use) · short unknown · api $1.25/$10 per M" before.
+	assert.equal(lastFooter(h), "cache lifetime unknown · api $1.25/$10 per M");
+	// A model with lifetimes of its own: both shown, neither in use.
+	h.ctx.model = { ...gemini, id: "gemini-3.8-cached", promptCache: { short: 300, long: 3600 } } as never;
+	h.emit("model_select");
+	assert.equal(lastFooter(h), "short 5m · long 1h · api $1.25/$10 per M");
+	// Back on Claude, which has answered in this session: its tier is in use again; the request was forgotten with the switch.
+	h.ctx.model = h.model as never;
+	h.emit("model_select");
+	assert.equal(lastFooter(h), "long 1h (in use) · short 1h · api $3/$15 per M");
+
+	// A period left to Pi is said for its own model only.
+	fresh();
+	const left = harness({ ui: true, cost: WITH_WRITE, thinking: { type: "enabled", budget_tokens: 1024 } });
+	left.emit("agent_settled");
+	assert.match(lastFooter(left)!, /^cache warm · 60m left · keep-warm: Pi's \(thinking on\) · /);
+	left.ctx.model = gemini as never;
+	left.emit("model_select");
+	assert.equal(lastFooter(left), "cache lifetime unknown · api $1.25/$10 per M");
+});
+
+test("footer: with keep-warm off, a countdown on another model's tier is said to be so, beside the model's own tier", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	shortRetention(t);
+	fresh({ keepWarmMinutes: 0 });
+	// An earlier model wrote the one-hour cache; then Kimi K3, whose answers report no tier, at the short tier Pi asks for.
+	const earlier = {
+		type: "message",
+		id: "e",
+		parentId: null,
+		timestamp: new Date(0).toISOString(),
+		message: { role: "assistant", content: [], provider: "claude-bridge", model: "bridge-claude", timestamp: 0, stopReason: "stop", usage: { input: 0, output: 1, cacheRead: 0, cacheWrite: 600_000, cacheWrite1h: 600_000 } },
+	};
+	const h = harness({
+		ui: true,
+		cost: WITH_WRITE,
+		before: [earlier],
+		model: { provider: "moonshotai", id: "kimi-k3", api: "openai-completions", baseUrl: "https://api.moonshot.ai/v1", promptCache: { short: 300, long: 3600 } },
+		sent: { model: "kimi-k3", max_tokens: 8192, messages: [{ role: "user", content: "hi" }] },
+	});
+	h.emit("agent_settled");
+	// The countdown itself is unchanged (it counts the long tier the earlier model reported, as the released version
+	// does); the footer no longer puts it beside Kimi's short tier as if they were one. It said
+	// "cache warm · 60m left · short 5m (in use) · long 1h · sent default cache · api $3/$15 per M" before.
+	assert.equal(lastFooter(h), "cache warm · 60m left · ⚠ countdown on another model's long tier · short 5m (in use) · long 1h · sent default cache · api $3/$15 per M");
+	// Without the earlier model's write, the same session reads as one.
+	fresh({ keepWarmMinutes: 0 });
+	const alone = harness({ ui: true, cost: WITH_WRITE, model: { provider: "moonshotai", id: "kimi-k3", api: "openai-completions", baseUrl: "https://api.moonshot.ai/v1", promptCache: { short: 300, long: 3600 } }, sent: { model: "kimi-k3", max_tokens: 8192, messages: [{ role: "user", content: "hi" }] } });
+	alone.emit("agent_settled");
+	assert.equal(lastFooter(alone), "cache warm · 5m left · short 5m (in use) · long 1h · sent default cache · api $3/$15 per M");
+});

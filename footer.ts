@@ -45,6 +45,7 @@ const ALERT = "⚠";
  */
 const PRIORITY = {
 	warmAlert: 95,
+	countdownAlert: 93,
 	countdown: 90,
 	served: 85,
 	dataAlert: 80,
@@ -148,6 +149,11 @@ export interface DataView {
 
 export interface FooterView {
 	countdown?: Countdown;
+	/**
+	 * The tier the countdown runs on, where it is not the current model's own: with keep-warm off the countdown takes
+	 * the tier the latest answer of any model reported, which after a model switch can be another model's.
+	 */
+	countdownTier?: Tier;
 	keepWarm?: KeepWarmView;
 	lifetimes?: LifetimesView;
 	sent?: SentView;
@@ -300,6 +306,10 @@ export function footerParts(view: FooterView): Part[] {
 	const parts: Part[] = [];
 	const { data } = view;
 	if (view.countdown) parts.push(countdownPart(view.countdown));
+	// Only beside a countdown that says how long the cache lasts.
+	if (view.countdownTier && (view.countdown?.state === "warm" || view.countdown?.state === "cold")) {
+		parts.push(plainPart(PRIORITY.countdownAlert, [`⚠ countdown on another model's ${view.countdownTier} tier`, "⚠ countdown: other model", ALERT], "warning"));
+	}
 	const warm = view.keepWarm ? keepWarmPart(view.keepWarm) : undefined;
 	if (warm && warm.priority === PRIORITY.warmAlert) parts.push(warm);
 	if (data?.served) {

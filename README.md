@@ -48,14 +48,14 @@ The lifetime is the model's declared one (which [providers.dev](#model-data-from
 
 | Part | Meaning |
 |---|---|
-| `long 1h (in use)` | the cache tier in use and the lifetime the countdown runs on. The tier is the one the model's last answer says it wrote (Anthropic tells), else the one Pi asks for (`cacheRetention`); for an idle period the extension [keeps warm](#keeping-the-cache-warm), the tier and lifetime the period started with. The lifetime is the model's own for that tier, else the one the countdown falls back on (above). Claude through pi-claude-bridge shows both tiers without `(in use)`: Claude Code picks |
+| `long 1h (in use)` | the model's own cache tier in use and its lifetime, once the model has made a request in this session. The tier is the one the model's own last answer says it wrote (Anthropic tells), else the one Pi asks for (`cacheRetention`); for an idle period the extension [keeps warm](#keeping-the-cache-warm), the tier and lifetime the period started with. The lifetime is the model's own for that tier, else the one the countdown falls back on (above). Before the model's first request (after `/model`, say) both tiers show, short then long, with nothing in use; so does Claude through pi-claude-bridge, where Claude Code picks |
 | `short 5m` | the other tier's lifetime, as the model declares it, or `unknown` |
 | `cache lifetime unknown` | neither is known: no countdown, no compacting before expiry, no keeping warm |
 | `5m ⚠` (warning color) | a guess: the smaller of values that differ, because it isn't known whether a login or an API key serves the model ([through a proxy](#through-a-proxy)) |
 | `?` (warning color) | found for some of the possible credentials but not all, so not used |
-| `sent 1h` (dim) | what the last request's cache markers asked for ([read as for keeping warm](#keeping-the-cache-warm)): the lifetime a marker states, else its tier (`long`, `short`), several joined with `+`, and `default cache` when the request carries no marker |
+| `sent 1h` (dim) | what the last request's cache markers asked for ([read as for keeping warm](#keeping-the-cache-warm)): the lifetime a marker states, else its tier (`long`, `short`), several joined with `+`, and `default cache` when the request carries no marker. Only for a request whose markers the extension reads (Anthropic Messages, OpenAI Chat Completions and Responses); Bedrock's, Gemini's and other forms show nothing about what was sent |
 | `sent 5m (retention long)` (muted) | the request asked for another tier than the retention in force (`cacheRetention`, or a `PI_CACHE_RETENTION` you set): the provider, or Pi's adapter for it, doesn't take the longer cache there |
-| `⚠ sent 30m + 12h` (warning color) | the request asked for another lifetime than the one the countdown runs on, or for more than one, so the countdown may not follow the cache the request wrote. `⚠ sent a cache marker it can't read`: a marker the extension doesn't read |
+| `⚠ sent 30m + 12h` (warning color) | the request asked for another lifetime than the one in use, or for more than one, so the countdown may not follow the cache the request wrote. `⚠ sent a cache marker it can't read`: a marker the extension doesn't read |
 | `api $3/$15 per M` | how the model is reached (`api`, `sub`, or `sub or api` through a proxy that may use either; [through a proxy](#through-a-proxy), what answered last) and the price in use: input and output per million tokens, at the current context size where the price has tiers (`above 200k`) |
 | `sub, no per-token price` (muted) | a subscription login: billed by the subscription, not per token (Pi still counts a cost at the model's prices, marked `(sub)`). Claude through pi-claude-bridge, which Pi prices at $0, shows `no per-token price` |
 | `api, price unknown`, `api, price ?` | no price known; `?`: prices that differ between the possible credentials, or that only some have |
@@ -68,6 +68,7 @@ The lifetime is the model's declared one (which [providers.dev](#model-data-from
 |---|---|
 | `⚠ keep-warm ended (a refresh missed the cache): $1.22 spent, a miss costs $2.07` | a refresh read less than 90% from the cache, so keeping warm ended for this idle period; likewise `(a refresh failed)` and `(the request can't be re-sent)`. Until your next message |
 | `⚠ keep-warm: Pi's after 2 missed refreshes (/cache-keeper-warm)` | two refreshes in a row missed the cache, so the model is left to Pi's own warming. For as long as that lasts, with a countdown or without |
+| `⚠ countdown on another model's long tier` | the countdown runs on another tier than the model's own (marked `(in use)`): with keep-warm off, or in a period left to Pi, the countdown takes the tier the latest answer of any model reported, and after a model switch that can be another model's. It may then not follow this model's cache |
 | `⚠ answered by an API key` (`a login`, `another account`) | through a proxy, the last answer came from another kind of credential than the values are for; the values and the countdown follow what answered |
 | `⚠ providers.dev: no data, fetch failed` | nothing was ever fetched: providers.dev could not be reached (blocked, or down), so the values are Pi's own. `/cache-keeper` has the reason; the next session start or `/cache-keeper-refresh` tries again |
 | `⚠ providers.dev refresh failed: data 26h old` | the last refresh failed, so the data fetched before is in use, as old as it says |
@@ -85,7 +86,7 @@ With keep-warm off none of these show, and with [model data](#model-data-from-pr
 
 **In a narrow terminal** the line is fitted to the width, and fitted again when the terminal is resized, so Pi doesn't cut it in the middle of a word:
 
-1. The wording goes first, the least important part's first: `api $3/$15 per M` becomes `api $3/$15`, `long 1h (in use)` becomes `long 1h` (the first lifetime is always the one in use), `cache warm · 59m left` becomes `warm 59m`, and errors shorten (`⚠ keep-warm failed`, `⚠ keep-warm: Pi's`, `⚠ data 26h old`).
+1. The wording goes first, the least important part's first: `api $3/$15 per M` becomes `api $3/$15`, `long 1h (in use)` becomes `long 1h` (the first lifetime is the one in use, once there is one), `cache warm · 59m left` becomes `warm 59m`, and errors shorten (`⚠ keep-warm failed`, `⚠ keep-warm: Pi's`, `⚠ data 26h old`).
 2. Then whole parts, the least important first: the providers.dev notes, what was sent when it agrees with the countdown, the explanation of a `⚠` guess, the other lifetime, the price, the lifetime in use, and the keep-warm notes.
 3. Errors go last, down to a bare `⚠` that stands for all of them (`/cache-keeper` says what it is). The countdown always stays.
 
