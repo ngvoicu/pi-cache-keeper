@@ -10,6 +10,10 @@ import {
 	gateAllows,
 	keepWarmLabel,
 	keepWarmRule,
+	limitWithinCap,
+	payloadThinking,
+	payloadTier,
+	REFRESH_LIMITS,
 	reserveFor,
 	spendingText,
 	wantsWarm,
@@ -113,13 +117,44 @@ test("the warm-up re-sends the captured request unchanged except for the output 
 	const built = warmPayload({ model: "other", max_tokens: 1, messages: [] }, captured);
 	assert.deepEqual(built, { payload: { ...captured, max_tokens: 1 } });
 	assert.equal(captured.max_tokens, 64_000, "the captured request is not changed");
-	// Never a refresh whose output is not capped: no known limit key from the provider, or the captured value again.
-	const uncapped = { reason: "the provider did not build a capped output limit the extension knows, so the refresh could generate a full answer" };
-	assert.deepEqual(warmPayload({ input: [] }, { input: ["x"], max_output_tokens: 32_000 }), uncapped, "a limit the provider leaves out");
-	assert.deepEqual(warmPayload({ inferenceConfig: { maxTokens: 1 } }, { messages: [], inferenceConfig: { maxTokens: 8192 } }), uncapped, "a limit under a key the extension does not know");
-	assert.deepEqual(warmPayload({ max_tokens: 64_000 }, captured), uncapped, "the captured value");
+	// Building takes the provider's limit keys as they are; whether they may leave is the last gate's check.
+	assert.deepEqual(warmPayload({ input: [] }, { input: ["x"], max_output_tokens: 32_000 }), { payload: { input: ["x"] } }, "a limit the provider leaves out is dropped");
 	assert.deepEqual(warmPayload({ max_output_tokens: 16 }, { input: ["x"] }), { payload: { input: ["x"], max_output_tokens: 16 } });
 	assert.deepEqual(warmPayload("nope", captured), { reason: "the provider payload is not an object" });
+});
+
+test("the absolute cap: a refresh payload carries its limit in a known key, at most the API's proven refresh limit", () => {
+	assert.deepEqual(REFRESH_LIMITS, { "anthropic-messages": 1, "openai-completions": 1, "openai-responses": 16 });
+	assert.deepEqual(limitWithinCap("anthropic-messages", { max_tokens: 1 }), { ok: true });
+	assert.deepEqual(limitWithinCap("openai-completions", { max_completion_tokens: 1 }), { ok: true });
+	assert.deepEqual(limitWithinCap("openai-responses", { max_output_tokens: 16 }), { ok: true }, "16 is the minimum OpenAI Responses accepts");
+	assert.deepEqual(limitWithinCap("anthropic-messages", { max_tokens: 1025 }), { reason: "the refresh would ask for up to 1025 output tokens (max_tokens), above the 1 a refresh of anthropic-messages may" });
+	assert.match((limitWithinCap("anthropic-messages", { max_tokens: 16_385 }) as { reason: string }).reason, /16385/);
+	assert.match((limitWithinCap("openai-responses", { max_output_tokens: 17 }) as { reason: string }).reason, /above the 16/);
+	assert.match((limitWithinCap("openai-completions", { max_tokens: 1, max_completion_tokens: 8192 }) as { reason: string }).reason, /8192/, "every known key");
+	assert.match((limitWithinCap("anthropic-messages", { max_tokens: "1" }) as { reason: string }).reason, /above the 1/, "not a number");
+	assert.deepEqual(limitWithinCap("anthropic-messages", { inferenceConfig: { maxTokens: 1 } }), { reason: "the refresh carries no output limit the extension knows, so it could generate a full answer" });
+	assert.deepEqual(limitWithinCap("bedrock-converse-stream", { max_tokens: 1 }), { reason: "this API's requests are not re-sent by the extension (bedrock-converse-stream)" });
+});
+
+test("the thinking level of a refresh is read from the captured payload", () => {
+	assert.equal(payloadThinking("anthropic-messages", { thinking: { type: "disabled" }, max_tokens: 64_000 }), "off");
+	assert.equal(payloadThinking("anthropic-messages", { max_tokens: 64_000 }), "off");
+	assert.equal(payloadThinking("anthropic-messages", { thinking: { type: "adaptive" }, output_config: { effort: "high" } }), "high");
+	assert.equal(payloadThinking("anthropic-messages", { thinking: { type: "adaptive" }, output_config: { effort: "max" } }), "off", "no Pi level: off, the smallest limit");
+	assert.equal(payloadThinking("openai-completions", { reasoning_effort: "low" }), "low");
+	assert.equal(payloadThinking("openai-completions", {}), "off");
+	assert.equal(payloadThinking("openai-responses", { reasoning: { effort: "medium" } }), "medium");
+});
+
+test("the cache tier a payload shows it was sent for", () => {
+	const block = (ttl?: string) => ({ type: "text", text: "s", cache_control: { type: "ephemeral", ...(ttl ? { ttl } : {}) } });
+	assert.equal(payloadTier("anthropic-messages", { system: [block("1h")], messages: [] }), "long");
+	assert.equal(payloadTier("anthropic-messages", { system: [block()], messages: [{ role: "user", content: [block()] }] }), "short");
+	assert.equal(payloadTier("anthropic-messages", { messages: [] }), undefined, "no cache_control: not shown");
+	assert.equal(payloadTier("openai-completions", { prompt_cache_retention: "24h" }), "long");
+	assert.equal(payloadTier("openai-completions", { prompt_cache_options: { mode: "implicit", ttl: "1h" } }), "long", "Kimi's long cache");
+	assert.equal(payloadTier("openai-completions", { messages: [] }), undefined);
 });
 
 test("cached share and labels", () => {

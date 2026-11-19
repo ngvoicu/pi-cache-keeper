@@ -14,11 +14,82 @@ const OUTPUT_LIMIT_KEYS = ["max_tokens", "max_output_tokens", "max_completion_to
  * Every other API (Bedrock's `inferenceConfig.maxTokens`, Mistral's `maxTokens`, Gemini's `config.maxOutputTokens`,
  * Codex without a limit, …) is left to Pi's own warming: a refresh there could generate a full answer.
  */
-export const REPLAYABLE_APIS: ReadonlySet<string> = new Set(["anthropic-messages", "openai-completions", "openai-responses"]);
+/**
+ * The refresh limit each re-sent API was proven to build for a one-token answer: the most a refresh payload may carry.
+ * A payload with a higher limit, or none in a known key, never leaves (see `limitWithinCap`).
+ */
+export const REFRESH_LIMITS: Readonly<Record<string, number>> = { "anthropic-messages": 1, "openai-completions": 1, "openai-responses": 16 };
+export const REPLAYABLE_APIS: ReadonlySet<string> = new Set(Object.keys(REFRESH_LIMITS));
 
 /** The key the captured request carries its output limit in, or undefined when it has none the extension knows. */
 export function outputLimitKey(payload: Payload): string | undefined {
 	return OUTPUT_LIMIT_KEYS.find((key) => typeof payload[key] === "number");
+}
+
+/**
+ * Whether a refresh payload for `api` carries its output limit in a known key, every known key at most the API's proven
+ * refresh limit; else why not.
+ */
+export function limitWithinCap(api: string, payload: Payload): { ok: true } | { reason: string } {
+	const cap = REFRESH_LIMITS[api];
+	if (cap === undefined) return { reason: `this API's requests are not re-sent by the extension (${api})` };
+	const keys = OUTPUT_LIMIT_KEYS.filter((key) => key in payload);
+	if (keys.length === 0) return { reason: "the refresh carries no output limit the extension knows, so it could generate a full answer" };
+	for (const key of keys) {
+		const value = payload[key];
+		if (typeof value !== "number" || !(value <= cap)) {
+			return { reason: `the refresh would ask for up to ${String(value)} output tokens (${key}), above the ${cap} a refresh of ${api} may` };
+		}
+	}
+	return { ok: true };
+}
+
+/**
+ * The cache tier a payload shows it was sent for, or undefined where it does not show one: Anthropic's `cache_control`
+ * (`ttl: "1h"` long, none short), OpenAI-style `prompt_cache_retention: "24h"` and Kimi's `prompt_cache_options.ttl:
+ * "1h"` (long).
+ */
+export function payloadTier(api: string, payload: Payload): "short" | "long" | undefined {
+	if (api === "anthropic-messages") {
+		let found: "short" | "long" | undefined;
+		const visit = (value: unknown): void => {
+			if (Array.isArray(value)) value.forEach(visit);
+			else if (isPlainObject(value)) {
+				const control = value.cache_control;
+				if (isPlainObject(control)) found = control.ttl === "1h" ? "long" : (found ?? "short");
+				for (const [key, field] of Object.entries(value)) if (key !== "cache_control") visit(field);
+			}
+		};
+		visit([payload.system, payload.messages, payload.tools]);
+		return found;
+	}
+	const options = payload.prompt_cache_options;
+	if (payload.prompt_cache_retention === "24h" || (isPlainObject(options) && options.ttl === "1h")) return "long";
+	return undefined;
+}
+
+type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+const THINKING_LEVELS: ReadonlySet<string> = new Set(["minimal", "low", "medium", "high", "xhigh"]);
+const level = (value: unknown): ThinkingLevel => (typeof value === "string" && THINKING_LEVELS.has(value) ? (value as ThinkingLevel) : "off");
+
+/**
+ * The thinking level a refresh is built with, read from the captured payload as it was sent rather than from Pi's state
+ * at some moment. Only the output limit is taken from what the adapter builds (the rest is the captured payload), and
+ * the absolute cap stands behind it; where the payload shows no level, "off", which builds the smallest limit.
+ * - anthropic-messages: `thinking.type` "adaptive" with `output_config.effort`; "disabled" or none is off (a budget,
+ *   `thinking.type: "enabled"`, is never re-sent: see canReplay);
+ * - openai-completions: `reasoning_effort`;
+ * - openai-responses: `reasoning.effort`.
+ */
+export function payloadThinking(api: string, payload: Payload): ThinkingLevel {
+	if (api === "anthropic-messages") {
+		const thinking = payload.thinking;
+		const config = payload.output_config;
+		return isPlainObject(thinking) && thinking.type === "adaptive" && isPlainObject(config) ? level(config.effort) : "off";
+	}
+	if (api === "openai-completions") return level(payload.reasoning_effort);
+	if (api === "openai-responses") return isPlainObject(payload.reasoning) ? level(payload.reasoning.effort) : "off";
+	return "off";
 }
 
 /** A warm-up that read less than this share of its prompt from the cache wrote it again instead, so warming stops. */
@@ -53,20 +124,16 @@ export function canReplay(captured: Payload): boolean {
 
 /**
  * The warm-up payload: the captured request exactly as it was sent, with only its output limit taken from `params`,
- * which the provider built for maxTokens 1 (some APIs raise that to their minimum). Refused when it would not carry
- * that capped limit: none of the known keys in `params`, or a value that is the captured one.
+ * which the provider built for maxTokens 1 (some APIs raise that to their minimum). Whether that limit may leave is the
+ * last gate's check (limitWithinCap), not this one's.
  */
 export function warmPayload(params: unknown, captured: Payload): { payload: Payload } | { reason: string } {
 	if (!isPlainObject(params)) return { reason: "the provider payload is not an object" };
 	const payload: Payload = { ...captured };
-	let capped = false;
 	for (const key of OUTPUT_LIMIT_KEYS) {
-		if (key in params) {
-			payload[key] = params[key];
-			if (typeof params[key] === "number" && params[key] !== captured[key]) capped = true;
-		} else delete payload[key];
+		if (key in params) payload[key] = params[key];
+		else delete payload[key];
 	}
-	if (!capped) return { reason: "the provider did not build a capped output limit the extension knows, so the refresh could generate a full answer" };
 	return { payload };
 }
 

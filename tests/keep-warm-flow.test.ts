@@ -91,7 +91,7 @@ function harness(options: Options = {}) {
 		{ type: "message", id: "a", parentId: "u", timestamp: new Date(1_000).toISOString(), message: reply },
 	];
 	const sent: Record<string, unknown> & { messages: unknown[] } = (options.sent as never) ?? { model: "claude", max_tokens: 64_000, system: "s", messages: [{ role: "user", content: "hi" }], thinking: options.thinking ?? { type: "adaptive" } };
-	const warms: { payload: unknown; options: Record<string, unknown>; at: number }[] = [];
+	const warms: { payload: unknown; options: Record<string, unknown>; at: number; attempt?: number }[] = [];
 	// What the provider reports for a refresh: the cached prompt read back, priced at the model's prices.
 	const refreshUsage = (fields: Fields = {}) => {
 		const usage = { input: 2, output: 1, cacheRead: cached, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, ...fields };
@@ -139,7 +139,7 @@ function harness(options: Options = {}) {
 						...options2,
 						onPayload: async (params: unknown) => {
 							const out = await options2.onPayload(params);
-							warms.push({ payload: out, options: options2, at: Date.now() });
+							warms.push({ payload: out, options: options2, at: Date.now(), attempt: state.attempts });
 							return out;
 						},
 					});
@@ -152,7 +152,7 @@ function harness(options: Options = {}) {
 					thrown = error;
 				}
 				if (thrown) return { result: () => Promise.reject(thrown) };
-				warms.push({ payload, options: options2, at: Date.now() });
+				warms.push({ payload, options: options2, at: Date.now(), attempt: state.attempts });
 				const n = warms.length;
 				const answer = respond?.(n) ?? {};
 				const usage = refreshUsage(answer.usage);
@@ -892,7 +892,7 @@ test("R7/1: at the last moment, a refresh whose payload would not carry the prov
 		const stops = traces().filter((r) => r.stop);
 		assert.equal(stops.length, 1);
 		assert.equal(stops[0].stop, "unable");
-		assert.match(stops[0].reason, /did not build a capped output limit/);
+		assert.match(stops[0].reason, /no output limit the extension knows|above the 1 a refresh of anthropic-messages may/);
 		assert.equal(stops[0].budget.spent, 0, "nothing reserved");
 	}
 });
@@ -903,8 +903,8 @@ test("R7/2: a lifetime that reads differently during a period ends warming (unab
 	t.after(() => (saved === undefined ? delete process.env.PI_CACHE_RETENTION : (process.env.PI_CACHE_RETENTION = saved)));
 	delete process.env.PI_CACHE_RETENTION;
 	const cases: [string, (h: ReturnType<typeof harness>) => void, RegExp][] = [
-		// The retention switched to long in the settings 60 s into the period: the request was written for 5 min.
-		["retention switched to long", () => (process.env.PI_CACHE_RETENTION = "long"), /^the cache lifetime now reads 60 min, the cached request was written with 5 min$/],
+		// The model's declared lifetime for the request's tier changed (new model data).
+		["model data changed", (h) => (h.model.promptCache = { short: 3600, long: 3600 }), /^the cache lifetime now reads 60 min, the cached request was written with 5 min$/],
 		// A proxy said another upstream answered, whose lifetime is unknown.
 		["lifetime unknown", (h) => delete h.model.promptCache, /^the cache lifetime is now unknown, the cached request was written with 5 min$/],
 		// The declared lifetime fell from 300 s to 30 s.
@@ -1114,6 +1114,209 @@ test("R7/1: a refresh is built with the thinking level its request was sent with
 	await flush();
 	assert.equal(h.warms.length, 1);
 	assert.equal((h.warms[0].payload as Record<string, unknown>).max_tokens, 1);
+});
+
+// ------------------------------------------------- R7, second look: money is safe by construction at the door
+
+const noNetwork = (t: { after: (fn: () => void) => void }) => {
+	const realFetch = globalThis.fetch;
+	globalThis.fetch = (async () => {
+		throw new Error("no network in tests");
+	}) as typeof fetch;
+	t.after(() => (globalThis.fetch = realFetch));
+};
+test("R7b/1: Shift+Tab while the request awaited credentials: the refresh is built with the thinking its payload shows, and leaves capped at 1", { skip: noCatalog }, async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	noNetwork(t);
+	fresh({ compactBeforeExpiry: false });
+	// Claude Sonnet 4.5 (budget-based thinking): the request went out with thinking off, but Pi's level read "minimal"
+	// when the extension captured it.
+	const real = MODELS.anthropic["claude-sonnet-4-5"];
+	const sent = await adapterPayload(real, { maxTokens: 64_000 });
+	assert.deepEqual(sent.thinking, { type: "disabled" });
+	const h = harness({ lifetime: 300, level: "minimal", model: { ...real, cost: WITH_WRITE, promptCache: { short: 300, long: 300 } }, sent, stream: viaRealAdapter(real) });
+	h.emit("agent_settled");
+	await h.idle(280_000);
+	await flush();
+	assert.equal(h.warms.length, 1);
+	const out = h.warms[0].payload as Record<string, unknown>;
+	assert.equal(out.max_tokens, 1, "not 1,025");
+	assert.deepEqual(out.thinking, { type: "disabled" });
+});
+
+test("R7b/1: a limit of 1,025 or 16,385 never leaves: withheld at the door, warming ends (unable), nothing reserved", { skip: noCatalog }, async (t) => {
+	t.after(() => mock.timers.reset());
+	noNetwork(t);
+	const real = MODELS.anthropic["claude-sonnet-4-5"];
+	const cases: [string, Options][] = [
+		["the provider built 1,025", { params: { model: "rebuilt", max_tokens: 1025, messages: [] } }],
+		["the provider built 16,385", { params: { model: "rebuilt", max_tokens: 16_385, messages: [] } }],
+		[
+			"pi's real adapter built 16,385 (thinking read as high from the payload)",
+			{
+				model: { ...real, promptCache: { short: 300, long: 300 } },
+				sent: { model: real.id, max_tokens: 8192, thinking: { type: "adaptive" }, output_config: { effort: "high" }, messages: [{ role: "user", content: "hi" }] },
+				stream: viaRealAdapter(real),
+			},
+		],
+	];
+	for (const [label, options] of cases) {
+		clock();
+		fresh({ compactBeforeExpiry: false });
+		const h = harness({ lifetime: 300, ...options, model: { ...(options.model ?? {}), cost: WITH_WRITE } });
+		h.emit("agent_settled");
+		await h.idle(280_000);
+		await flush();
+		assert.equal(h.state.attempts, 1, label);
+		assert.equal(h.warms.length, 0, `${label}: nothing reached the transport`);
+		const stop = traces().find((r) => r.stop);
+		assert.equal(stop?.stop, "unable", label);
+		assert.match(stop.reason, /above the 1 a refresh of anthropic-messages may/);
+		assert.equal(stop.budget.spent, 0, "nothing reserved");
+		await h.idle(HOUR);
+		assert.equal(h.state.attempts, 1, "never tried again");
+	}
+});
+
+test("R7b/1: an OpenAI Responses request already at 16 output tokens is refreshed", { skip: noCatalog }, async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	noNetwork(t);
+	fresh({ compactBeforeExpiry: false });
+	const real = MODELS.openai["gpt-6.1-sol"];
+	const sent = await adapterPayload(real, { maxTokens: 16 });
+	assert.equal(sent.max_output_tokens, 16);
+	const h = harness({ lifetime: 300, model: { ...real, cost: WITH_WRITE, promptCache: { short: 300, long: 300 } }, sent, stream: viaRealAdapter(real) });
+	h.emit("agent_settled");
+	await h.idle(280_000);
+	await flush();
+	assert.equal(h.warms.length, 1);
+	assert.deepEqual(h.warms[0].payload, sent);
+});
+
+test("R7b/2: retention switched to long while the answer streamed: the request was sent for 5 min, and is refreshed at that lifetime", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	const saved = process.env.PI_CACHE_RETENTION;
+	t.after(() => (saved === undefined ? delete process.env.PI_CACHE_RETENTION : (process.env.PI_CACHE_RETENTION = saved)));
+	delete process.env.PI_CACHE_RETENTION;
+	fresh({ compactBeforeExpiry: false });
+	// The harness sends the request (retention short) and its answer lands; the switch comes before the run settles.
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, model: { promptCache: { short: 300, long: 3600 } } });
+	process.env.PI_CACHE_RETENTION = "long";
+	h.emit("agent_settled");
+	await h.idle(400_000);
+	assert.equal(h.warms[0]?.at, 276_000, "25 s before the 5-minute expiry, not the 1-hour one");
+	assert.equal(traces().find((r) => r.event === "warm" && r.action === "warm").lifetimeSeconds, 300);
+	// Later in the period the setting moves no fact of the request: warming goes on at 5 min.
+	await h.idle(HOUR);
+	assert.deepEqual(h.warms.slice(0, 3).map((w) => w.at), [276_000, 551_000, 826_000]);
+	assert.equal(traces().filter((r) => r.stop === "unable").length, 0);
+});
+
+test("R7b/2: an Anthropic payload shows its tier: a 1-hour cache_control is refreshed at the 1-hour lifetime whatever the setting", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	const saved = process.env.PI_CACHE_RETENTION;
+	t.after(() => (saved === undefined ? delete process.env.PI_CACHE_RETENTION : (process.env.PI_CACHE_RETENTION = saved)));
+	delete process.env.PI_CACHE_RETENTION;
+	fresh({ compactBeforeExpiry: false });
+	const sent = { model: "claude", max_tokens: 64_000, system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "1h" } }], messages: [{ role: "user", content: "hi" }] };
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, model: { promptCache: { short: 300, long: 3600 } }, sent });
+	h.emit("agent_settled");
+	await h.idle(2 * HOUR);
+	assert.equal(h.warms[0]?.at, 3_421_000, "3 min before the 1-hour expiry");
+});
+
+test("R7b/3: upstream or keepWarmMinutes changed while the refresh was being prepared: nothing leaves, nothing is reserved, warming ends", async (t) => {
+	t.after(() => mock.timers.reset());
+	const cases: [string, (h: ReturnType<typeof harness>) => void, RegExp][] = [
+		["the proxy's upstream now has no lifetime", (h) => delete h.model.promptCache, /^the cache lifetime is now unknown, the cached request was written with 5 min$/],
+		["keepWarmMinutes set to 0", () => settings({ keepWarmMinutes: 0, minContextTokens: 100_000, compactBeforeExpiry: false }), /^keep-warm was turned off$/],
+	];
+	for (const [label, change, reason] of cases) {
+		clock();
+		fresh({ compactBeforeExpiry: false });
+		const h = harness({ lifetime: 300, cost: WITH_WRITE });
+		h.state.beforePayload = () => {
+			if (h.state.attempts === 1) change(h);
+		};
+		h.emit("agent_settled");
+		await h.idle(280_000);
+		await flush();
+		assert.equal(h.state.attempts, 1, label);
+		assert.equal(h.warms.length, 0, `${label}: nothing reached the transport`);
+		const stop = traces().find((r) => r.stop);
+		assert.equal(stop?.stop, "unable", label);
+		assert.match(stop.reason, reason);
+		assert.equal(stop.budget.spent, 0, "nothing reserved");
+		await h.idle(HOUR);
+		assert.equal(h.state.attempts, 1, `${label}: not tried again`);
+	}
+});
+
+test("R7b/3: retention switched while the refresh was being prepared changes nothing the period reads: the 5-minute request leaves, capped", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	const saved = process.env.PI_CACHE_RETENTION;
+	t.after(() => (saved === undefined ? delete process.env.PI_CACHE_RETENTION : (process.env.PI_CACHE_RETENTION = saved)));
+	delete process.env.PI_CACHE_RETENTION;
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, model: { promptCache: { short: 300, long: 3600 } } });
+	h.state.beforePayload = () => {
+		if (h.state.attempts === 1) process.env.PI_CACHE_RETENTION = "long";
+	};
+	h.emit("agent_settled");
+	await h.idle(280_000);
+	assert.deepEqual(h.warms.map((w) => w.at), [276_000]);
+	assert.equal((h.warms[0].payload as Record<string, unknown>).max_tokens, 1);
+});
+
+test("R7b/3: the last gate is the only path: with each single condition broken, the hook makes no transport call and reserves nothing", async (t) => {
+	t.after(() => mock.timers.reset());
+	const own = (h: ReturnType<typeof harness>, usage: Record<string, number>) => ({ role: "assistant", content: [], timestamp: 1_000, stopReason: "stop", provider: h.model.provider, model: h.model.id, usage });
+	const cases: [string, (h: ReturnType<typeof harness>) => void, Options?][] = [
+		["the refresh was cancelled", (h) => {
+			h.state.idle = false;
+			h.emit("agent_start");
+		}],
+		["keep-warm is off in the current settings", () => settings({ keepWarmMinutes: 0 })],
+		["the period is not the one the refresh was started for", (h) => h.emit("session_start")],
+		["the model changed", (h) => (h.ctx.model = { ...h.model, id: "another" })],
+		["the lifetime changed", (h) => (h.model.promptCache = { short: 60, long: 60 })],
+		// The model's own answer now reports a 1-hour write; both tiers declare 5 min, so only the tier differs.
+		["the tier changed", (h) => h.branch.splice(1, 0, { type: "message", id: "x", parentId: null, timestamp: new Date(500).toISOString(), message: own(h, { input: 1, output: 1, cacheRead: 0, cacheWrite: 10, cacheWrite1h: 10 }) } as never)],
+		["Pi is busy", (h) => (h.state.idle = false)],
+		["a message is queued", (h) => (h.state.pending = true)],
+		["the last safe moment passed", () => mock.timers.setTime(Date.now() + 20_000)],
+		["the limit is above the cap", () => {}, { params: { model: "rebuilt", max_tokens: 2, messages: [] } }],
+	];
+	for (const [label, breakIt, options] of cases) {
+		clock();
+		fresh({ compactBeforeExpiry: false });
+		const h = harness({ lifetime: 300, cost: WITH_WRITE, ...options });
+		h.state.beforePayload = () => {
+			if (h.state.attempts === 1) breakIt(h);
+		};
+		h.emit("agent_settled");
+		await h.idle(276_000);
+		await flush();
+		assert.ok(h.state.attempts >= 1, `${label}: the hook was reached`);
+		assert.ok(!h.warms.some((w) => w.attempt === 1), `${label}: no transport call`);
+		if (label === "the period is not the one the refresh was started for") {
+			// The old period ends there, with nothing reserved; the new one (session_start) refreshes for itself.
+			const ended = traces().find((r) => r.reason === "a new idle period started");
+			assert.equal(ended?.budget.spent, 0, `${label}: nothing reserved`);
+			continue;
+		}
+		assert.equal(h.state.attempts, 1, label);
+		assert.ok(traces().every((r) => (r.budget?.spent ?? 0) === 0 && r.action !== "cancelled"), `${label}: nothing reserved`);
+		// While a run is active /cache-keeper shows no amounts; otherwise it shows what the period has spent.
+		if (label !== "the refresh was cancelled") {
+			assert.match((await h.command("cache-keeper")).match(/keep warm: .*/)?.[0] ?? "", /^keep warm: (off|.*\$0 spent.*)$/, `${label}: nothing counted`);
+		}
+	}
 });
 
 test("no file imports evaluateCacheWarming (missing before pi-ai 1.5.1)", () => {

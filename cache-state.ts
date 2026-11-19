@@ -32,10 +32,10 @@ export interface CacheState {
 }
 
 /**
- * The cache tier in use: the one the latest cache write reported (Anthropic says which it wrote), else the one Pi asks
- * for. A compaction starts over.
+ * The cache tier in use: the one the latest cache write reported (Anthropic says which it wrote), else `requested` (the
+ * tier a request was sent with), else the one Pi asks for now. A compaction starts over.
  */
-export function cacheTier(entries: SessionEntry[], model?: { provider: string; id: string }): "short" | "long" {
+export function cacheTier(entries: SessionEntry[], model?: { provider: string; id: string }, requested?: "short" | "long"): "short" | "long" {
 	let reported: "short" | "long" | undefined;
 	for (const entry of entries) {
 		if (entry.type === "compaction") reported = undefined;
@@ -46,7 +46,7 @@ export function cacheTier(entries: SessionEntry[], model?: { provider: string; i
 			if (cacheWrite > 0 && cacheWrite1h !== undefined) reported = cacheWrite1h > 0 ? "long" : "short";
 		}
 	}
-	return reported ?? (process.env.PI_CACHE_RETENTION === "long" ? "long" : "short");
+	return reported ?? requested ?? (process.env.PI_CACHE_RETENTION === "long" ? "long" : "short");
 }
 
 /**
@@ -60,8 +60,10 @@ export function cacheTier(entries: SessionEntry[], model?: { provider: string; i
  *   streaming, with the timestamp of its start, so Pi's refresh during a long answer can come before it on the branch;
  * - the tier is the one the model's own answers reported (as `cacheTier` with a model): another model's cache is
  *   another cache.
+ * `requested`, the tier the cached request was sent with, stands in for the retention Pi asks for now where no answer
+ * reported one.
  */
-export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?: number, keepWarmOn = false): CacheState {
+export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?: number, keepWarmOn = false, requested?: "short" | "long"): CacheState {
 	let refreshedAt: number | undefined;
 	let latestWarm: number | undefined;
 	let answer: { at: number; prompt: number } | undefined;
@@ -93,13 +95,14 @@ export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?
 	if (keepWarmOn && refreshedAt !== undefined && latestWarm !== undefined) refreshedAt = Math.max(refreshedAt, latestWarm);
 	// A refresh before the latest real request (or before a compaction, which leaves refreshedAt unset) is stale.
 	if (refreshedAt !== undefined && warmedAt !== undefined) refreshedAt = Math.max(refreshedAt, warmedAt);
-	const declared = model.promptCache?.[reported ?? (process.env.PI_CACHE_RETENTION === "long" ? "long" : "short")];
+	const asked = requested ?? (process.env.PI_CACHE_RETENTION === "long" ? "long" : "short");
+	const declared = model.promptCache?.[reported ?? asked];
 	let lifetime: CacheState["lifetime"];
 	if (declared !== undefined) lifetime = { ms: declared * 1000, source: "declared by the model" };
 	else if (reported) lifetime = { ms: REPORTED_TIER_SECONDS[reported] * 1000, source: "reported by the provider" };
 	else if (hasExplicitPromptCache(model)) lifetime = { ms: OPENAI_MIN_LIFETIME_SECONDS * 1000, source: "OpenAI's minimum" };
 	else if (isKimiOnMoonshot(model)) {
-		const long = process.env.PI_CACHE_RETENTION === "long" && (model.compat as OpenAICompletionsCompat | undefined)?.supportsLongCacheRetention !== false;
+		const long = asked === "long" && (model.compat as OpenAICompletionsCompat | undefined)?.supportsLongCacheRetention !== false;
 		lifetime = { ms: KIMI_TTL_SECONDS[long ? "long" : "short"] * 1000, source: long ? "Kimi's 1-hour option" : "Kimi's default" };
 	}
 	const expiresAt = lifetime && refreshedAt !== undefined ? refreshedAt + lifetime.ms : undefined;
