@@ -40,9 +40,13 @@ test("out → ended: it settled any other way, with the reason", () => {
 	}
 });
 
-test("waiting or out → ended: budget, time limit, unable, a failure before it left", () => {
+test("waiting → ended: the refresh failed before it left, so nothing was sent", () => {
+	assert.deepEqual(end(WAITING, "failed", "no API key"), { phase: "ended", stop: "failed", reason: "no API key" });
+});
+
+test("waiting or out → ended: budget, time limit, unable", () => {
 	for (const from of [WAITING, out(5)]) {
-		for (const stop of ["budget", "limit", "unable", "failed"] as const) {
+		for (const stop of ["budget", "limit", "unable"] as const) {
 			const ended = end(from, stop, `because ${stop}`);
 			assert.deepEqual(ended, { phase: "ended", stop, reason: `because ${stop}` });
 			assert.equal(mayLeave(ended), false);

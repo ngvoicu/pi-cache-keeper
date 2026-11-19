@@ -2034,6 +2034,23 @@ test("the period's rule: while its refresh is out nothing else leaves, also afte
 	assert.equal(traces().filter((r) => r.action === "warm" || r.action === "cancelled").length, 1);
 });
 
+test("the period's rule: a refresh that fails before it leaves ends warming (\"failed\") with its notice once; nothing was sent, so nothing is spent or counted", async (t) => {
+	t.after(() => mock.timers.reset());
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	// The adapter fails before it builds the payload (credentials, say): onPayload never runs.
+	const h = harness({ ui: true, lifetime: 300, cost: WITH_WRITE, stream: () => ({ result: () => Promise.resolve({ stopReason: "error", errorMessage: "no API key for cliproxyapi", usage: h.usage({ input: 0, output: 0, cacheRead: 0 }) }) }) });
+	h.emit("agent_settled");
+	await h.idle(HOUR);
+	assert.equal(h.state.attempts, 1, "tried once, not again");
+	assert.equal(h.warms.length, 0, "nothing sent");
+	const records = traces().filter((r) => r.event === "warm" && r.stop);
+	assert.deepEqual(records.map((r) => [r.action, r.stop, r.reason]), [["failed", "failed", "no API key for cliproxyapi"]]);
+	assert.equal(records[0].budget.spent, 0, "nothing spent");
+	assert.equal(countOf(), 0, "nothing counted toward two in a row");
+	assert.deepEqual(h.notes.filter((n) => n.includes("could not keep the cache warm")), ["pi-cache-keeper could not keep the cache warm: no API key for cliproxyapi"]);
+});
+
 test("R9: one miss counted, then the command with only a count to clear", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());

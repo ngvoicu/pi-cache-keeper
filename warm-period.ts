@@ -6,14 +6,17 @@ import type { WarmStop } from "./trace.ts";
  * | State   | Event                                                                 | Next                          |
  * |---------|-----------------------------------------------------------------------|-------------------------------|
  * | waiting | the refresh passes the last gate and leaves (`leave`)                 | out                           |
+ * | waiting | the refresh fails before it leaves (`end`, "failed"): nothing sent, nothing spent or counted | ended |
  * | out     | it settles having reported a hit, however it ended afterwards        | waiting, refreshed at its send |
  * | out     | it settles any other way (a miss, no prompt usage, cancelled or failed before reporting) | ended   |
- * | waiting, out | budget, time limit, unable, a failure before it left (`end`)     | ended                         |
+ * | waiting, out | budget, time limit, unable (`end`)                              | ended                         |
  * | ended   | nothing: only a new real answer starts a new period (a new state)     |                               |
  *
  * In `out` nothing leaves for the period, whatever else happens (a run that sent nothing, Pi's own refresh moving the
  * expiry, the 10-minute release of the per-model hold): only the settlement of that refresh, by its id, takes it out.
- * Being left to Pi (two refreshes in a row without a hit) is not a state here: the period is no longer owned.
+ * Being left to Pi (two refreshes in a row without a hit) is not a state here: the period is no longer owned. Passing
+ * hold-ups move nothing and the period stays waiting: too late for this expiry, Pi busy, held by another refresh of the
+ * model, cancelled before it left.
  */
 export type WarmPhase =
 	| { readonly phase: "waiting"; /** The send time of the latest refresh that reported a hit, if any. */ readonly refreshedAt?: number }
@@ -45,7 +48,7 @@ export function settle(state: WarmPhase, id: number, outcome: WarmSettlement): W
 	return outcome.hit ? { phase: "waiting", refreshedAt: state.sentAt } : { phase: "ended", stop: outcome.stop, reason: outcome.reason };
 }
 
-/** waiting or out → ended (budget, time limit, unable, a failure before the refresh left). Once ended, it stays. */
+/** waiting or out → ended (budget, time limit, unable; from waiting also a failure before the refresh left). Once ended, it stays. */
 export function end(state: WarmPhase, stop: WarmStop, reason: string): WarmPhase {
 	return state.phase === "ended" ? state : { phase: "ended", stop, reason };
 }
