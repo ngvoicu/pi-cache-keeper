@@ -224,7 +224,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	let warming: AbortController | undefined;
 	let piWarmAt: number | undefined;
 	// The cache lifetime of a proxy model follows what answered (see servedModel below).
-	const stateOf = (model: Model<Api>, entries: SessionEntry[]) => cacheState(servedModel(model), entries, warmedAt);
+	// With keep-warm on the expiry is counted from the latest real answer, an aborted one that used the cache included.
+	const stateOf = (model: Model<Api>, entries: SessionEntry[]) => cacheState(servedModel(model), entries, warmedAt, config.keepWarmMinutes > 0);
 	// Why the extension cannot keep a period warm itself, from facts that last for the period; undefined when it can.
 	const whyNotOwned = (state: CacheState | undefined): string | undefined => {
 		if (state?.answeredAt === undefined) return "no answer has read or written the prompt cache yet";
@@ -740,7 +741,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			// Whatever the outcome: once the period's spending reached its limit, warming ends.
 			const reached = () => (out && budgetReached(budget, spending) ? endWarm(p, "budget", budgetReason(p, false)) : undefined);
 			// A real request started (or the session moved on); it refreshes the cache itself. What went out stays counted.
+			// If that run sent nothing, the refresh for this expiry is tried again, as for any passing hold-up.
 			if (controller.signal.aborted || response?.stopReason === "aborted") {
+				if (p.doneFor === expiresAt) p.doneFor = undefined;
 				if (!out) return;
 				ifSessionAlive(() => {
 					trace(ctx, { ...base, action: "cancelled", seconds, ...(reached() ?? {}), reason: "a new request or a change of session cancelled it", usage, budget: budgetRecord(p) });

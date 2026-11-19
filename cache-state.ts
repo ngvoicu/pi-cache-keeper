@@ -49,8 +49,10 @@ export function cacheTier(entries: SessionEntry[], model?: { provider: string; i
 /**
  * `warmedAt` is when this extension last re-sent the cached request to keep it warm. Pi's own refreshes are
  * `cache_warm` usage entries; the extension's are kept in memory, because an extension cannot add usage entries.
+ * `fromRealAnswer` (keep-warm on): the expiry is counted from the latest real answer, so a failed or aborted answer
+ * whose usage reports a cache read or write moves it too; otherwise such an answer is skipped, as before.
  */
-export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?: number): CacheState {
+export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?: number, fromRealAnswer = false): CacheState {
 	let refreshedAt: number | undefined;
 	let answer: { at: number; prompt: number } | undefined;
 	let reported: "short" | "long" | undefined;
@@ -64,7 +66,10 @@ export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?
 			if (cacheWrite > 0 && cacheWrite1h !== undefined) reported = cacheWrite1h > 0 ? "long" : "short";
 			if (cacheRead + cacheWrite > 0) answer = { at: entry.message.timestamp, prompt: input + cacheRead + cacheWrite };
 			// A failed request may not have reached the cache.
-			if (entry.message.stopReason === "error" || entry.message.stopReason === "aborted") continue;
+			if (entry.message.stopReason === "error" || entry.message.stopReason === "aborted") {
+				if (fromRealAnswer && cacheRead + cacheWrite > 0) refreshedAt = entry.message.timestamp;
+				continue;
+			}
 			replied = true;
 			refreshedAt = cacheRead + cacheWrite > 0 ? entry.message.timestamp : undefined;
 		} else if (entry.type === "usage" && entry.kind === "cache_warm" && refreshedAt !== undefined) {
