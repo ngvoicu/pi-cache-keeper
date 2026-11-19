@@ -37,7 +37,7 @@ export function limitWithinCap(api: string, payload: Payload): { ok: true } | { 
 	if (keys.length === 0) return { reason: "the refresh carries no output limit the extension knows, so it could generate a full answer" };
 	for (const key of keys) {
 		const value = payload[key];
-		if (typeof value !== "number" || !(value <= cap)) {
+		if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > cap) {
 			return { reason: `the refresh would ask for up to ${String(value)} output tokens (${key}), above the ${cap} a refresh of ${api} may` };
 		}
 	}
@@ -69,6 +69,36 @@ export function payloadTier(api: string, payload: Payload): "short" | "long" | u
 }
 
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+/** "30m", "1h", "12h", "300s" in milliseconds; null for a lifetime written otherwise. */
+export function ttlMs(value: unknown): number | null {
+	const match = typeof value === "string" ? /^(\d+)(s|m|h)$/.exec(value) : null;
+	if (!match) return null;
+	return Number(match[1]) * { s: 1_000, m: 60_000, h: 3_600_000 }[match[2] as "s" | "m" | "h"];
+}
+
+/**
+ * The cache lifetimes a payload states itself: the conversation's (`prompt_cache_options.ttl`, OpenAI Responses and
+ * Kimi), and each one given to a part of the request (an explicit `ttl` on a `prompt_cache_breakpoint` or a
+ * `cache_control`). A lifetime written in a way the extension does not read is null.
+ */
+export function statedLifetimes(payload: Payload): { conversation?: number | null; parts: (number | null)[] } {
+	const parts: (number | null)[] = [];
+	const visit = (value: unknown): void => {
+		if (Array.isArray(value)) value.forEach(visit);
+		else if (isPlainObject(value)) {
+			for (const [key, field] of Object.entries(value)) {
+				if ((key === "prompt_cache_breakpoint" || key === "cache_control") && isPlainObject(field)) {
+					if (field.ttl !== undefined) parts.push(ttlMs(field.ttl));
+				} else visit(field);
+			}
+		}
+	};
+	for (const [key, field] of Object.entries(payload)) if (key !== "prompt_cache_options") visit(field);
+	const options = payload.prompt_cache_options;
+	const conversation = isPlainObject(options) && options.ttl !== undefined ? ttlMs(options.ttl) : undefined;
+	return conversation === undefined ? { parts } : { conversation, parts };
+}
+
 const THINKING_LEVELS: ReadonlySet<string> = new Set(["minimal", "low", "medium", "high", "xhigh"]);
 const level = (value: unknown): ThinkingLevel => (typeof value === "string" && THINKING_LEVELS.has(value) ? (value as ThinkingLevel) : "off");
 

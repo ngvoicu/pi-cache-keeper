@@ -15,6 +15,8 @@ import {
 	payloadTier,
 	REFRESH_LIMITS,
 	reserveFor,
+	statedLifetimes,
+	ttlMs,
 	spendingText,
 	wantsWarm,
 	warmBudget,
@@ -133,6 +135,7 @@ test("the absolute cap: a refresh payload carries its limit in a known key, at m
 	assert.match((limitWithinCap("openai-responses", { max_output_tokens: 17 }) as { reason: string }).reason, /above the 16/);
 	assert.match((limitWithinCap("openai-completions", { max_tokens: 1, max_completion_tokens: 8192 }) as { reason: string }).reason, /8192/, "every known key");
 	assert.match((limitWithinCap("anthropic-messages", { max_tokens: "1" }) as { reason: string }).reason, /above the 1/, "not a number");
+	for (const value of [-1, 0, 0.5]) assert.ok("reason" in limitWithinCap("anthropic-messages", { max_tokens: value }), `${value}: a positive integer only`);
 	assert.deepEqual(limitWithinCap("anthropic-messages", { inferenceConfig: { maxTokens: 1 } }), { reason: "the refresh carries no output limit the extension knows, so it could generate a full answer" });
 	assert.deepEqual(limitWithinCap("bedrock-converse-stream", { max_tokens: 1 }), { reason: "this API's requests are not re-sent by the extension (bedrock-converse-stream)" });
 });
@@ -145,6 +148,17 @@ test("the thinking level of a refresh is read from the captured payload", () => 
 	assert.equal(payloadThinking("openai-completions", { reasoning_effort: "low" }), "low");
 	assert.equal(payloadThinking("openai-completions", {}), "off");
 	assert.equal(payloadThinking("openai-responses", { reasoning: { effort: "medium" } }), "medium");
+});
+
+test("the cache lifetimes a payload states itself", () => {
+	assert.deepEqual([ttlMs("30m"), ttlMs("1h"), ttlMs("12h"), ttlMs("300s"), ttlMs("1d"), ttlMs(30)], [1_800_000, 3_600_000, 43_200_000, 300_000, null, null]);
+	assert.deepEqual(statedLifetimes({ input: [] }), { parts: [] });
+	assert.deepEqual(statedLifetimes({ prompt_cache_options: { ttl: "30m" }, input: [{ role: "developer", content: [{ type: "input_text", text: "s", prompt_cache_breakpoint: { mode: "explicit", ttl: "12h" } }] }] }), {
+		conversation: 1_800_000,
+		parts: [43_200_000],
+	});
+	assert.deepEqual(statedLifetimes({ system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "1h" } }], messages: [{ role: "user", content: [{ type: "text", text: "x", cache_control: { type: "ephemeral" } }] }] }), { parts: [3_600_000] }, "a cache_control without a ttl states none");
+	assert.deepEqual(statedLifetimes({ prompt_cache_options: { mode: "implicit", ttl: "1h" } }), { conversation: 3_600_000, parts: [] }, "Kimi's long cache");
 });
 
 test("the cache tier a payload shows it was sent for", () => {

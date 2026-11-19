@@ -81,6 +81,7 @@ import {
 	payloadThinking,
 	payloadTier,
 	REPLAYABLE_APIS,
+	statedLifetimes,
 	reserveFor,
 	spendingText,
 	wantsWarm,
@@ -132,6 +133,8 @@ interface CapturedRequest {
 	 * (payloadTier), else the retention in force at that instant. A setting changed later does not change it.
 	 */
 	tier: "short" | "long";
+	/** The extension's shared-prefix cache (a 12-hour prefix) was applied: the request carries two cache lifetimes. */
+	sharedPrefix?: boolean;
 }
 
 /** A cache lifetime under this cannot carry a refresh: Pi's own warming keeps such a session, if anything does. */
@@ -154,6 +157,8 @@ interface WarmPeriod {
 	spending: WarmSpending;
 	/** Why keeping warm ended for the rest of the period. */
 	ended?: { stop: WarmStop; reason: string };
+	/** Keep-warm read on when the period started; a period started while it read off is never owned. */
+	onAtStart: boolean;
 	/** The expiry the refresh was decided for (sent, or too late), so it is not tried again for it. */
 	doneFor?: number;
 	/** The expiry for which "Pi is busy" was logged, so a refresh tried on every tick logs it once. */
@@ -233,6 +238,24 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// agent_settled), when this extension last refreshed the cache, the refresh in flight, and when Pi last decided to
 	// refresh it itself.
 	let period: WarmPeriod | undefined;
+	// Whether keep-warm is on and for how long, from the saved settings, so a switch in any Pi window holds in every one
+	// from the next decision on. Ownership, the decision handler, the countdown and the last gate all read it here.
+	// Undefined when the settings cannot be read: then no refresh is sent and the handler returns nothing. A reading is
+	// kept for the current millisecond (the countdown asks several times per tick); `fresh` reads again.
+	let keepWarmRead: { at: number; value: { minutes: number } | undefined } | undefined;
+	const keepWarmSetting = (fresh = false): { minutes: number } | undefined => {
+		const now = Date.now();
+		if (!fresh && keepWarmRead?.at === now) return keepWarmRead.value;
+		let value: { minutes: number } | undefined;
+		try {
+			value = { minutes: loadConfig().keepWarmMinutes };
+		} catch {
+			value = undefined;
+		}
+		keepWarmRead = { at: now, value };
+		return value;
+	};
+	const warmMinutes = (fresh = false) => keepWarmSetting(fresh)?.minutes ?? 0;
 	// The request whose answer was the latest to read or write the cache: a later request that failed before using the
 	// cache does not replace it.
 	let answerRequest: CapturedRequest | undefined;
@@ -245,7 +268,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// With keep-warm on the tier, where no answer reported one, is the one the cached request was sent for, not the
 	// retention set now.
 	const stateOf = (model: Model<Api>, entries: SessionEntry[], requested?: "short" | "long") =>
-		config.keepWarmMinutes > 0
+		warmMinutes() > 0
 			? cacheState(servedModel(model), entries, warmedAt, true, requested ?? period?.fixed?.requested ?? answerRequest?.tier)
 			: cacheState(servedModel(model), entries, warmedAt);
 	// Why the extension cannot keep a period warm itself, from facts that last for the period; undefined when it can.
@@ -264,6 +287,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (!messageArrayKey(request.payload)) return `the ${request.model.api} request has no message list the extension can check`;
 		if (!outputLimitKey(request.payload)) return "the request carries no output limit the extension can cap";
 		if (!canReplay(request.payload)) return "Claude's budget-based thinking changes the cache key when the answer is capped";
+		// One lifetime for the whole request, the one the period would fix; no attempt to work out another.
+		const stated = statedLifetimes(request.payload);
+		if (request.sharedPrefix || stated.parts.some((ms) => ms !== state.lifetime?.ms)) return "the request carries more than one cache lifetime";
+		if (stated.conversation !== undefined && stated.conversation !== state.lifetime.ms) return "the request's cache lifetime does not match the model data";
 		return undefined;
 	};
 	// Pi is idle. After a run that brought a new real answer (or at a session's start) a new period starts; after one that
@@ -280,6 +307,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			answeredAt,
 			idleSince: Date.now(),
 			notOwned,
+			onAtStart: warmMinutes(true) > 0,
 			request,
 			budget: request && state?.answerPrompt !== undefined ? warmBudget(request.model, state.answerPrompt) : undefined,
 			spending: { spent: 0, refreshes: 0 },
@@ -297,7 +325,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	};
 	// The extension keeps this period's cache warm: keep-warm on and the period's facts hold.
 	const owns = (p: WarmPeriod | undefined): p is WarmPeriod & { budget: WarmBudget; fixed: NonNullable<WarmPeriod["fixed"]> } =>
-		config.keepWarmMinutes > 0 && p !== undefined && p.notOwned === undefined && p.budget !== undefined && p.fixed !== undefined;
+		warmMinutes() > 0 && p !== undefined && p.onAtStart && p.notOwned === undefined && p.budget !== undefined && p.fixed !== undefined;
 	// What differs from what the period's cached request was written with, if anything.
 	const driftReason = (fixed: NonNullable<WarmPeriod["fixed"]>, model: Model<Api>, state: CacheState, tier: "short" | "long"): string | undefined => {
 		const now = `${model.provider}/${model.id}`;
@@ -670,7 +698,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			? { unit: "usd", spent: p.spending.spent, limit: p.budget.missCost, next: reserveFor(p.budget, p.spending) }
 			: { unit: "refreshes", spent: p.spending.refreshes, limit: MAX_UNPRICED_REFRESHES };
 	const endedStatus = (p: WarmPeriod & { budget: WarmBudget }): string | undefined =>
-		p.ended && `keep-warm ended (${stopLabel(p.ended.stop, keepWarmLabel(config.keepWarmMinutes))}): ${spendingText(p.budget, p.spending)}`;
+		p.ended && `keep-warm ended (${stopLabel(p.ended.stop, keepWarmLabel(warmMinutes()))}): ${spendingText(p.budget, p.spending)}`;
 	const warmBase = (ctx: ExtensionContext, p: WarmPeriod, expiresAt: number, timer: TimerContext) => ({
 		event: "warm" as const,
 		secondsLeft: Math.ceil((expiresAt - Date.now()) / 1000),
@@ -691,7 +719,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			? `refreshing has cost ${formatUsd(spending.spent)} since the last answer; another refresh (${formatUsd(reserveFor(budget, spending))}) would pass the ${formatUsd(budget.missCost)} one cache miss costs`
 			: `refreshing has cost ${formatUsd(spending.spent)} since the last answer, as much as the ${formatUsd(budget.missCost)} one cache miss costs`;
 	};
-	const limitReason = () => `the cache lasts to the end of the ${keepWarmLabel(config.keepWarmMinutes)} limit after Pi went idle`;
+	const limitReason = () => `the cache lasts to the end of the ${keepWarmLabel(warmMinutes())} limit after Pi went idle`;
 
 	// What the countdown reads. In a period the extension keeps warm, the expiry is counted with the lifetime the period
 	// started with, and each read is compared with what the period started with (model, lifetime, tier): on any
@@ -725,7 +753,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// this period. Recorded when it happens. A refresh of the extension's that carries the cache there says so itself.
 	const noteLimit = (ctx: ExtensionContext, expiresAt: number, timer: TimerContext) => {
 		const p = period;
-		if (!owns(p) || p.ended || running || wantsWarm(expiresAt, p.idleSince, config.keepWarmMinutes)) return;
+		if (!owns(p) || p.ended || running || wantsWarm(expiresAt, p.idleSince, warmMinutes())) return;
 		trace(ctx, { ...warmBase(ctx, p, expiresAt, timer), action: "skip", ...endWarm(p, "limit", limitReason()), budget: budgetRecord(p) });
 	};
 
@@ -747,13 +775,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		unbuilt?: string,
 	): GateVerdict => {
 		if (signal.aborted) return { hold: "cancelled", reason: "the refresh was cancelled before it went out" };
-		let saved: CacheKeeperConfig;
-		try {
-			saved = loadConfig();
-		} catch (error) {
-			return { refuse: `the settings could not be read: ${error instanceof Error ? error.message : String(error)}` };
-		}
-		if (config.keepWarmMinutes <= 0 || saved.keepWarmMinutes <= 0) return { refuse: "keep-warm was turned off" };
+		const setting = keepWarmSetting(true);
+		if (!setting) return { refuse: "the settings could not be read" };
+		if (setting.minutes <= 0) return { refuse: "keep-warm was turned off" };
 		if (period !== p) return { refuse: "a new idle period started" };
 		if (p.ended) return { refuse: `keep-warm ended: ${p.ended.reason}` };
 		const drift = readDrift(ctx, p);
@@ -766,6 +790,16 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		return { pass: true };
 	};
 
+	// Keep-warm now reads off (in this window or another) in a period that started while it read on and was kept warm by
+	// the extension: warming ends there, said once. Pi's own warming may already have been stopped for the period.
+	const noteSwitchOff = (ctx: ExtensionContext, expiresAt: number, timer: TimerContext) => {
+		const p = period;
+		if (!p || !p.onAtStart || p.notOwned !== undefined || !p.budget || !p.fixed || p.ended || running) return;
+		const budget = p.budget;
+		const reason = keepWarmSetting() ? "keep-warm was turned off" : "the settings could not be read";
+		trace(ctx, { ...warmBase(ctx, p, expiresAt, timer), action: "skip", ...endWarm(p, "unable", reason), budget: budgetRecord({ ...p, budget }) });
+	};
+
 	// Shortly before the cache expires, while Pi is idle in a period the extension owns, inside the keep-warm window and
 	// the budget, re-sends the period's request exactly as it was sent with a one-token answer, so the cache entry is
 	// read and its lifetime starts again. Called on every tick from `warmLead` before expiry: a refresh held back for a
@@ -773,7 +807,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// until the last safe moment, half the lead before expiry; a lasting reason ends warming for the period.
 	const keepWarm = (ctx: ExtensionContext, expiresAt: number, warmLead: number, timer: TimerContext) => {
 		const p = period;
-		if (!owns(p) || p.ended || running || p.doneFor === expiresAt || !wantsWarm(expiresAt, p.idleSince, config.keepWarmMinutes)) return;
+		if (!owns(p) || p.ended || running || p.doneFor === expiresAt || !wantsWarm(expiresAt, p.idleSince, warmMinutes())) return;
 		const base = warmBase(ctx, p, expiresAt, timer);
 		const lastSafe = expiresAt - Math.floor(warmLead / 2);
 		if (Date.now() > lastSafe) {
@@ -903,7 +937,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 						reached() ??
 						(missed
 							? endWarm(p, "missed", `the refresh read only ${Math.floor(100 * share)}% from the cache, so it wrote the context again`)
-							: after !== undefined && !wantsWarm(after, p.idleSince, config.keepWarmMinutes)
+							: after !== undefined && !wantsWarm(after, p.idleSince, warmMinutes())
 								? endWarm(p, "limit", limitReason())
 								: {});
 					trace(ctx, { ...base, action: missed ? "missed" : "warm", seconds, ...ended, usage, budget: budgetRecord(p) });
@@ -935,8 +969,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const tick = () => {
 			if (++ticks % 15 === 0 || expiresAt - Date.now() <= Math.max(EXPIRY_LEAD_MS, warmLead)) expiresAt = readState()?.expiresAt ?? expiresAt;
 			const remaining = expiresAt - Date.now();
-			const keepWarmOn = config.keepWarmMinutes > 0;
+			const keepWarmOn = warmMinutes() > 0;
 			if (keepWarmOn && remaining > 0 && !warming) noteLimit(ctx, expiresAt, timer);
+			if (!keepWarmOn) noteSwitchOff(ctx, expiresAt, timer);
 			const ended = keepWarmOn && owns(period) ? endedStatus(period) : undefined;
 			const text = warming ? "cache warm · refreshing" : `${formatCacheStatus(remaining)}${ended ? ` · ${ended}` : ""}`;
 			if (ctx.hasUI && text !== shown) {
@@ -982,10 +1017,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (!ctx.model || !isPlainObject(event.payload)) return;
 		const sharedKey = sharedPrefixKey(ctx.model, ctx.cwd);
 		let payload = sharedKey ? withSharedPrefixCache(event.payload, sharedKey) : event.payload;
+		const sharedPrefix = payload !== event.payload;
 		if (isKimiOnMoonshot(ctx.model)) payload = withKimiLongCache(payload);
 		if (transcript) {
 			const tier = payloadTier(ctx.model.api, payload) ?? (process.env.PI_CACHE_RETENTION === "long" ? "long" : "short");
-			captured = { transcript, payload, model: ctx.model, at: Date.now(), tier };
+			captured = { transcript, payload, model: ctx.model, at: Date.now(), tier, sharedPrefix };
 		}
 		return payload === event.payload ? undefined : payload;
 	});
@@ -1023,6 +1059,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// answered "stop". In any other state, and with keep-warm off, it returns nothing and Pi's decision stands.
 	pi.on("cache_warming_decision", (event, ctx) => {
 		const p = period;
+		// A fresh read of the saved setting: a switch-off in any window holds from this decision on.
+		keepWarmSetting(true);
 		if (owns(p) && !running && ctx.isIdle()) {
 			const state = ctx.model ? stateOf(ctx.model, ctx.sessionManager.getBranch()) : undefined;
 			const expiresAt = state?.expiresAt ?? Date.now();
@@ -1280,9 +1318,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	};
 	const expiryNote = () => (config.compactBeforeExpiry ? `on, from ${formatTokens(config.minContextTokens)} tokens of context` : "off");
 	const keepWarmNote = (model: Model<Api> | undefined) => {
-		if (config.keepWarmMinutes <= 0) return "off";
+		const minutes = warmMinutes(true);
+		if (minutes <= 0) return "off";
 		const p = period;
-		const rule = keepWarmRule(config.keepWarmMinutes, p?.budget ? p.budget.priced : !model || hasPrices(model));
+		const rule = keepWarmRule(minutes, p?.budget ? p.budget.priced : !model || hasPrices(model));
 		if (!p || running) return rule;
 		if (p.notOwned !== undefined) return `${rule}; this session is left to Pi's own warming: ${p.notOwned}`;
 		if (!owns(p)) return rule;
@@ -1312,7 +1351,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					`pi-cache-keeper settings (${settingsKeyInUse()} in ~/.pi/agent/settings.json; /cache-keeper-settings in the TUI changes them and saves them to ${SETTINGS_KEY})`,
 					`compactAtPercent: ${config.compactAtPercent} · compactAtTokens: ${config.compactAtTokens} (${fullNote(ctx.model)})`,
 					`compactBeforeExpiry: ${config.compactBeforeExpiry} · minContextTokens: ${config.minContextTokens}`,
-					`keepWarmMinutes: ${config.keepWarmMinutes} (${keepWarmNote(ctx.model)})`,
+					`keepWarmMinutes: ${warmMinutes(true)} (${keepWarmNote(ctx.model)})`,
 					`cacheRetention: ${config.cacheRetention}`,
 					`modelData: ${config.modelData} (${dataNote(ctx)})`,
 				].join("\n"),

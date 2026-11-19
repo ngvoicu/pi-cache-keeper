@@ -1024,10 +1024,10 @@ const { MODELS } = existsSync(catalogFile) ? await import(catalogFile.href) : { 
 const noCatalog = MODELS ? false : "the installed pi-ai has no model catalog";
 const adapterUser = { role: "user", content: [{ type: "text", text: "Explain the changes in detail." }], timestamp: 1000 };
 const realAdapter = async (model: { api: string }) => (await import(`@earendil-works/pi-ai/api/${model.api}`)) as { streamSimple: (model: unknown, context: unknown, options: unknown) => { result: () => Promise<unknown> } };
-async function adapterPayload(model: { api: string }, options: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function adapterPayload(model: { api: string }, options: Record<string, unknown>, messages: unknown[] = [adapterUser]): Promise<Record<string, unknown>> {
 	const { streamSimple } = await realAdapter(model);
 	let got: Record<string, unknown> | undefined;
-	await streamSimple(model, { messages: [adapterUser] }, {
+	await streamSimple(model, { messages }, {
 		apiKey: "sk-fixture",
 		cacheRetention: "short",
 		sessionId: "s1",
@@ -1317,6 +1317,176 @@ test("R7b/3: the last gate is the only path: with each single condition broken, 
 			assert.match((await h.command("cache-keeper")).match(/keep warm: .*/)?.[0] ?? "", /^keep warm: (off|.*\$0 spent.*)$/, `${label}: nothing counted`);
 		}
 	}
+});
+
+// --------------------------------------------- R7, third look: narrower, never more (one lifetime; one setting)
+
+const withRetention = (t: { after: (fn: () => void) => void }, value: string | undefined) => {
+	const saved = process.env.PI_CACHE_RETENTION;
+	t.after(() => (saved === undefined ? delete process.env.PI_CACHE_RETENTION : (process.env.PI_CACHE_RETENTION = saved)));
+	if (value === undefined) delete process.env.PI_CACHE_RETENTION;
+	else process.env.PI_CACHE_RETENTION = value;
+};
+// GPT-6.1 Sol with the values providers.dev gives it: a 30-minute conversation cache, and 12 hours with long retention.
+const GPT_DATA = { short: 1800, long: 43_200 };
+const systemAndUser = [{ role: "system", content: "You are pi.", timestamp: 0 }, adapterUser];
+
+for (const windowMinutes of [120, 1440]) {
+	test(`R7c/1: GPT Responses with long retention and the shared 12-hour prefix (two lifetimes) is Pi's, with a ${windowMinutes / 60} h window`, { skip: noCatalog || noWarmer }, async (t) => {
+		t.after(() => mock.timers.reset());
+		noNetwork(t);
+		withRetention(t, "long");
+		const real = MODELS.openai["gpt-6.1-sol"];
+		const sent = await adapterPayload(real, { maxTokens: 8192, cacheRetention: "long" }, systemAndUser);
+		assert.deepEqual(sent.prompt_cache_options, { ttl: "30m" }, "the conversation: 30 minutes");
+		const runOnce = async (keepWarmMinutes: number) => {
+			clock();
+			fresh({ keepWarmMinutes, compactBeforeExpiry: false });
+			const h = harness({ model: { ...real, cost: WITH_WRITE, promptCache: GPT_DATA }, sent, stream: viaRealAdapter(real) });
+			const pi = withPiWarmer(h);
+			pi.start();
+			h.emit("agent_settled");
+			pi.warmer.onAgentSettled();
+			const decided = h.decide();
+			// 13 h covers the 2-hour window and the 11 h 24 min at which a 12-hour lifetime would be refreshed.
+			await pi.advance(Math.min(windowMinutes * 60_000 + HOUR, 13 * HOUR));
+			const shown = await h.command("cache-keeper");
+			pi.warmer.cancel();
+			mock.timers.reset();
+			return { pi: pi.piRefreshes, answers: pi.decisions.map((d) => d.answer), decided, attempts: h.state.attempts, shown };
+		};
+		const off = await runOnce(0);
+		const on = await runOnce(windowMinutes);
+		assert.equal(on.decided, undefined, "the handler returns nothing");
+		assert.ok(on.answers.every((a) => a === undefined));
+		assert.deepEqual(on.pi, off.pi, "Pi decides as with keep-warm off");
+		assert.equal(on.attempts, 0, "the extension sends nothing");
+		assert.match(on.shown, /left to Pi's own warming: the request carries more than one cache lifetime/);
+	});
+}
+
+test("R7c/1: GPT Responses with short retention states no lifetime: owned at 30 min, refreshed before the conversation's cache expires", { skip: noCatalog }, async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	noNetwork(t);
+	withRetention(t, undefined);
+	fresh({ compactBeforeExpiry: false });
+	const real = MODELS.openai["gpt-6.1-sol"];
+	const sent = await adapterPayload(real, { maxTokens: 8192, cacheRetention: "short" }, systemAndUser);
+	assert.equal(sent.prompt_cache_options, undefined, "the payload states no lifetime");
+	assert.deepEqual((sent.input as unknown[])[0], { role: "developer", content: "You are pi." }, "and has no shared prefix");
+	for (const promptCache of [GPT_DATA, undefined]) {
+		clock();
+		fresh({ compactBeforeExpiry: false });
+		const h = harness({ model: { ...real, cost: WITH_WRITE, promptCache }, sent, stream: viaRealAdapter(real) });
+		h.emit("agent_settled");
+		assert.deepEqual(h.decide(), { action: "stop" }, "owned");
+		await h.idle(1_800_000);
+		await flush();
+		assert.equal(h.warms[0]?.at, 1_711_000, "90 s before the 30-minute expiry at 1,801 s");
+		const warm = traces().find((r) => r.event === "warm" && r.action !== "pi-stopped");
+		assert.equal(warm.lifetimeSeconds, 1800);
+		assert.equal(warm.lifetimeSource, promptCache ? "declared by the model" : "OpenAI's minimum");
+	}
+});
+
+test("R7c/1: a payload that states its own lifetime: owned only where it matches the period's", async (t) => {
+	t.after(() => mock.timers.reset());
+	const cases: [string, Record<string, unknown>, { short: number; long: number }, RegExp | undefined][] = [
+		["the conversation's lifetime differs from the model data", { prompt_cache_options: { ttl: "30m" } }, { short: 3600, long: 3600 }, /the request's cache lifetime does not match the model data/],
+		["the conversation's lifetime matches", { prompt_cache_options: { ttl: "60m" } }, { short: 3600, long: 3600 }, undefined],
+		["a part with its own lifetime", { prompt_cache_options: { ttl: "60m" }, input: [{ role: "developer", content: [{ type: "input_text", text: "s", prompt_cache_breakpoint: { mode: "explicit", ttl: "12h" } }] }, { role: "user", content: "hi" }] }, { short: 3600, long: 3600 }, /the request carries more than one cache lifetime/],
+		["a lifetime the extension does not read", { prompt_cache_options: { ttl: "1d" } }, { short: 3600, long: 3600 }, /does not match the model data/],
+	];
+	for (const [label, extra, promptCache, reason] of cases) {
+		clock();
+		fresh({ compactBeforeExpiry: false });
+		const sent = { model: "o", input: [{ role: "user", content: "hi" }], max_output_tokens: 8192, ...extra };
+		const h = harness({ cost: WITH_WRITE, model: { api: "openai-responses", promptCache }, sent, params: { max_output_tokens: 16 } });
+		h.emit("agent_settled");
+		if (reason) {
+			assert.equal(h.decide(), undefined, label);
+			assert.match(await h.command("cache-keeper"), reason, label);
+		} else assert.deepEqual(h.decide(), { action: "stop" }, label);
+	}
+});
+
+test("R7c/2: keep-warm saved off in another window before the request: the handler returns nothing, Pi refreshes as on main, the extension sends nothing", { skip: noWarmer }, async (t) => {
+	t.after(() => mock.timers.reset());
+	const runOnce = async (otherWindow: boolean) => {
+		clock();
+		fresh({ keepWarmMinutes: otherWindow ? 1440 : 0, compactBeforeExpiry: false });
+		// Window A loaded its settings with keep-warm on; window B then saved it off.
+		const h = harness({ lifetime: 300, cost: WITH_WRITE });
+		if (otherWindow) settings({ keepWarmMinutes: 0, minContextTokens: 100_000, compactBeforeExpiry: false });
+		const pi = withPiWarmer(h);
+		pi.start();
+		h.emit("agent_settled");
+		pi.warmer.onAgentSettled();
+		await pi.advance(40 * 60_000);
+		pi.warmer.cancel();
+		mock.timers.reset();
+		return { pi: pi.piRefreshes, answers: pi.decisions.map((d) => d.answer), attempts: h.state.attempts };
+	};
+	const main = await runOnce(false);
+	const twoWindows = await runOnce(true);
+	assert.equal(twoWindows.pi[0], 271_000, "Pi refreshes at 270 s after the request");
+	assert.deepEqual(twoWindows.pi, main.pi);
+	assert.ok(twoWindows.answers.length > 0 && twoWindows.answers.every((a) => a === undefined));
+	assert.equal(twoWindows.attempts, 0);
+	assert.deepEqual(traces(), []);
+});
+
+test("R7c/2: keep-warm saved off in another window during a period it owns: warming ends there, the handler returns nothing from then on", { skip: noWarmer }, async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ keepWarmMinutes: 1440, compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE });
+	h.emit("agent_settled");
+	assert.deepEqual(h.decide(), { action: "stop" });
+	await h.idle(100_000);
+	settings({ keepWarmMinutes: 0, minContextTokens: 100_000, compactBeforeExpiry: false });
+	assert.equal(h.decide(), undefined, "from the next decision on");
+	await h.idle(HOUR);
+	assert.equal(h.state.attempts, 0);
+	const stops = traces().filter((r) => r.stop);
+	assert.deepEqual(stops.map((r) => [r.stop, r.reason]), [["unable", "keep-warm was turned off"]], "said once");
+	// Back on: the period started while it read on, but warming ended; a period started while it read off is never owned.
+	settings({ keepWarmMinutes: 1440, minContextTokens: 100_000, compactBeforeExpiry: false });
+	assert.deepEqual(h.decide(), { action: "stop" }, "the period's own facts, as decided for after forget()");
+	settings({ keepWarmMinutes: 0, minContextTokens: 100_000, compactBeforeExpiry: false });
+	h.run(true);
+	settings({ keepWarmMinutes: 1440, minContextTokens: 100_000, compactBeforeExpiry: false });
+	assert.equal(h.decide(), undefined, "started while off: never owned");
+	await h.idle(HOUR);
+	assert.equal(h.state.attempts, 0);
+});
+
+test("R7c/2: settings that cannot be read: no refresh is sent and the handler returns nothing", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE });
+	h.emit("agent_settled");
+	writeFileSync(join(dir, "settings.json"), "{ not json");
+	assert.equal(h.decide(), undefined);
+	await h.idle(HOUR);
+	assert.equal(h.state.attempts, 0);
+	assert.ok(traces().some((r) => r.reason === "the settings could not be read"));
+});
+
+test("R7c/3: a refresh limit must be a positive integer: -1 never leaves", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, params: { model: "rebuilt", max_tokens: -1, messages: [] } });
+	h.emit("agent_settled");
+	await h.idle(HOUR);
+	assert.equal(h.state.attempts, 1);
+	assert.equal(h.warms.length, 0);
+	const stop = traces().find((r) => r.stop);
+	assert.deepEqual([stop.stop, stop.budget.spent], ["unable", 0]);
+	assert.match(stop.reason, /up to -1 output tokens/);
 });
 
 test("no file imports evaluateCacheWarming (missing before pi-ai 1.5.1)", () => {
