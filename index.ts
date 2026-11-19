@@ -119,6 +119,7 @@ import {
 	type Fetch,
 	type Found,
 } from "./model-data.ts";
+import { end, leave, mayLeave, settle, WAITING, type WarmPhase } from "./warm-period.ts";
 import { formatFooter, lifetimesView, priceAt, sentView, type Countdown, type DataView, type FooterView, type KeepWarmView, type PriceView } from "./footer.ts";
 
 interface CapturedRequest {
@@ -165,6 +166,8 @@ const MISSES_IN_A_ROW = 2;
  */
 const NO_USAGE = "the refresh reported no usage, so what it cost is unknown";
 const NO_USAGE_CANCELLED = "the refresh was cancelled before it reported usage, so what it cost is unknown";
+/** Why a refresh does not leave while another of the same period is out (see warm-period.ts). */
+const OUT_REASON = "an earlier refresh of this idle period has not settled, and only a hit it reports lets the next one go out";
 const SETTLING_REASON = "an earlier refresh of this model has not settled yet, and it may have missed the cache; tried again until the last safe moment";
 const REFRESH_HOLD_MAX_MS = 10 * 60_000;
 /** A refresh that did not show a hit and counts: a miss, or one that settled successfully without reported usage. */
@@ -220,8 +223,10 @@ interface WarmPeriod {
 	request?: CapturedRequest;
 	budget?: WarmBudget;
 	spending: WarmSpending;
-	/** Why keeping warm ended for the rest of the period. */
-	ended?: { stop: WarmStop; reason: string };
+	/** Where the period's refreshes stand: waiting, one out, or ended (see warm-period.ts). Only its functions move it. */
+	warm: WarmPhase;
+	/** Why keeping warm ended for the rest of the period: a read of `warm`. */
+	readonly ended?: { stop: WarmStop; reason: string };
 	/** Keep-warm read on when the period started; a period started while it read off is never owned. */
 	onAtStart: boolean;
 	/** The expiry the refresh was decided for (sent, or too late), so it is not tried again for it. */
@@ -442,6 +447,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const request = why === undefined ? answerRequest : undefined;
 		const model = ctx.model;
 		period = {
+			warm: WAITING,
+			get ended() {
+				return this.warm.phase === "ended" ? { stop: this.warm.stop, reason: this.warm.reason } : undefined;
+			},
 			answeredAt,
 			idleSince: Date.now(),
 			notOwned: why?.reason,
@@ -695,13 +704,17 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const otherTier = !owned && ((tier !== undefined && countdownTier !== tier) || latestAnswerIsOthers(entries, key)) ? countdownTier : undefined;
 		return { lifetimes, ...(sent ? { sent } : {}), ...(otherTier ? { countdownTier: otherTier } : {}), price, data: dataView };
 	};
-	// Whether the latest answer that read or wrote the cache, the one a countdown counts from, is another model's.
+	// Whether the answer the countdown counts from is another model's. Read as `cacheState` reads it where the extension
+	// does not keep the period warm (the only case this is asked for): the latest answer that did not fail or get
+	// aborted, where it read or wrote the cache; a failed or aborted one is skipped, whatever it read.
 	const latestAnswerIsOthers = (entries: SessionEntry[], key: string): boolean => {
 		let latest: string | undefined;
 		for (const entry of entries) {
 			if (entry.type === "compaction") latest = undefined;
-			else if (entry.type === "message" && entry.message.role === "assistant" && entry.message.usage.cacheRead + entry.message.usage.cacheWrite > 0) {
-				latest = `${entry.message.provider}/${entry.message.model}`;
+			else if (entry.type === "message" && entry.message.role === "assistant") {
+				const { stopReason, usage, provider, model } = entry.message;
+				if (stopReason === "error" || stopReason === "aborted") continue;
+				latest = usage.cacheRead + usage.cacheWrite > 0 ? `${provider}/${model}` : undefined;
 			}
 		}
 		return latest !== undefined && latest !== key;
@@ -943,7 +956,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// Keeping warm ends for the rest of the period, once: returns the fields of the one record that says so.
 	const endWarm = (p: WarmPeriod, stop: WarmStop, reason: string): { stop: WarmStop; reason: string } | Record<string, never> => {
 		if (p.ended) return {};
-		p.ended = { stop, reason };
+		p.warm = end(p.warm, stop, reason);
 		return { stop, reason };
 	};
 	const budgetReason = (p: WarmPeriod & { budget: WarmBudget }, gate: boolean): string => {
@@ -998,7 +1011,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// last safe moment has not passed; the payload's output limit is within the API's proven refresh limit. "hold": a
 	// passing reason, tried again per R2 (a cancelled refresh, by the run that cancelled it); "refuse": withheld for good,
 	// and warming ends for the period where it has not ended yet.
-	type GateVerdict = { pass: true } | { hold: "cancelled" | "busy" | "late" | "settling"; reason: string } | { refuse: string };
+	type GateVerdict = { pass: true } | { hold: "cancelled" | "busy" | "late" | "settling" | "out"; reason: string } | { refuse: string };
 	const lastGate = (
 		ctx: ExtensionContext,
 		p: WarmPeriod & { fixed: NonNullable<WarmPeriod["fixed"]> },
@@ -1014,10 +1027,13 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (setting.minutes <= 0) return { refuse: "keep-warm was turned off" };
 		if (period !== p) return { refuse: "a new idle period started" };
 		if (p.ended) return { refuse: `keep-warm ended: ${p.ended.reason}` };
+		// One of this period's refreshes is out: nothing else leaves for the period until it settles.
+		if (!mayLeave(p.warm)) return { hold: "out", reason: OUT_REASON };
 		// Two misses in a row on this model since the period started (another period's refresh): it is Pi's now.
 		const fellBackAt = misses.fallback.get(p.fixed.model);
 		if (fellBackAt !== undefined) return { refuse: fallbackLine(p.fixed.model, fellBackAt) };
 		// An earlier refresh of this model has not settled: it may be the second miss. Held, and tried again.
+		// An earlier refresh of this model from another period or session has not settled: it may be the second miss.
 		if (unsettled(p.fixed.model)) return { hold: "settling", reason: SETTLING_REASON };
 		const drift = readDrift(ctx, p);
 		if (drift) return { refuse: drift };
@@ -1046,7 +1062,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// until the last safe moment, half the lead before expiry; a lasting reason ends warming for the period.
 	const keepWarm = (ctx: ExtensionContext, expiresAt: number, warmLead: number, timer: TimerContext) => {
 		const p = period;
-		if (!owns(p) || p.ended || running || p.doneFor === expiresAt || !wantsWarm(expiresAt, p.idleSince, warmMinutes())) return;
+		// Only while waiting: with one of the period's refreshes out, or warming ended, nothing leaves.
+		if (!owns(p) || !mayLeave(p.warm) || running || p.doneFor === expiresAt || !wantsWarm(expiresAt, p.idleSince, warmMinutes())) return;
 		const base = warmBase(ctx, p, expiresAt, timer);
 		const lastSafe = expiresAt - Math.floor(warmLead / 2);
 		if (Date.now() > lastSafe) {
@@ -1089,6 +1106,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		let late = false;
 		let held = false;
 		let settling = false;
+		// Held because another refresh of this period was out (two prepared at once): it never left.
+		let waitingOut = false;
 		let refused: string | undefined;
 
 		const controller = new AbortController();
@@ -1126,6 +1145,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 							if ("hold" in verdict) {
 								if (verdict.hold === "busy") held = true;
 								if (verdict.hold === "settling") settling = true;
+								if (verdict.hold === "out") waitingOut = true;
 								if (verdict.hold === "late") late = true;
 								throw new Error(verdict.reason);
 							}
@@ -1135,6 +1155,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 							}
 							// It goes out: reserved at the larger of its expected cost and what the last refresh really cost.
 							out = true;
+							p.warm = leave(p.warm, refreshId, started);
 							open.set(refreshId, Date.now());
 							misses.inFlight.set(p.fixed.model, open);
 							reserved = reserveFor(budget, spending);
@@ -1164,7 +1185,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			const usage = out && used && used.input + used.cacheRead + used.cacheWrite + used.output > 0 ? traceUsage(used) : undefined;
 			const seconds = (Date.now() - started) / 1000;
 			const aborted = controller.signal.aborted || response?.stopReason === "aborted";
-			const failed = !aborted && !held && !settling && !refused && !late && (!response || response.stopReason === "error");
+			const failed = !aborted && !held && !settling && !waitingOut && !refused && !late && (!response || response.stopReason === "error");
 			const failure = error ?? response?.errorMessage ?? "the request failed";
 			// Whatever the outcome: once the period's spending reached its limit, warming ends.
 			const reached = () => (out && budgetReached(budget, spending) ? endWarm(p, "budget", budgetReason(p, false)) : undefined);
@@ -1178,27 +1199,31 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			// misses (two in a row and it is left to Pi), the period's end, the timer's bookkeeping.
 			// A refresh that settled successfully without a prompt in its usage counts too; one cancelled or failed before it
 			// reported any does not.
-			const unreported = out && verdict === undefined && !aborted && !failed && !held && !settling && !late && !refused;
+			const unreported = out && verdict === undefined && !aborted && !failed;
 			const fellBack = verdict ? recordRefresh(p.fixed.model, verdict, started) : unreported ? recordRefresh(p.fixed.model, "unreported", started) : false;
 			let ended: ReturnType<typeof endWarm> | undefined;
-			// Inside a period the next refresh goes out only after the one before it reported a hit: one that left and came back
-			// otherwise (a miss, a failure, or no prompt in its usage, so what it cost is unknown) ends warming for the period.
+			// Inside a period the next refresh goes out only after the one before it reported a hit (see warm-period.ts): a hit,
+			// however the refresh ended afterwards, moves the period back to waiting, refreshed from its send time; one that
+			// settled any other way (a miss, a failure or a cancellation before it reported, no prompt in its usage) ends it.
 			if (out) {
-				ended =
-					reached() ??
-					(verdict === "miss"
-						? endWarm(p, "missed", failed ? `${missReason} before it failed: ${failure}` : missReason)
-						: failed
-							? endWarm(p, "failed", failure)
-							: verdict === undefined
-								? endWarm(p, "unknown", aborted ? NO_USAGE_CANCELLED : NO_USAGE)
-								: undefined);
+				ended = reached();
+				const why: [WarmStop, string] | undefined =
+					verdict === "hit"
+						? undefined
+						: verdict === "miss"
+							? ["missed", failed ? `${missReason} before it failed: ${failure}` : missReason]
+							: failed
+								? ["failed", failure]
+								: ["unknown", aborted ? NO_USAGE_CANCELLED : NO_USAGE];
+				const before = p.warm;
+				p.warm = settle(p.warm, refreshId, why ? { hit: false, stop: why[0], reason: why[1] } : { hit: true });
+				if (!ended && why && p.warm !== before) ended = { stop: why[0], reason: why[1] };
 			} else if (refused) ended = endWarm(p, "unable", refused);
 			else if (failed) ended = endWarm(p, "failed", failure);
 			// Tried again for the same expiry only when it never left; a refresh that left is never sent again.
-			if (!out && (aborted || held || settling) && p.doneFor === expiresAt) p.doneFor = undefined;
-			// Either way the provider refreshed (or wrote) the entry when it received the request.
-			if (out && !aborted && !failed) warmedAt = started;
+			if (!out && (aborted || held || settling || waitingOut) && p.doneFor === expiresAt) p.doneFor = undefined;
+			// Either way the provider refreshed (or wrote) the entry when it received the request; a reported hit shows it did.
+			if (out && ((!aborted && !failed) || verdict === "hit")) warmedAt = started;
 			const fallback = fellBack ? { leftToPi: fallbackLine(p.fixed.model, started) } : {};
 			// What is said and shown, only while the session is alive.
 			ifSessionAlive(() => {
@@ -1215,11 +1240,15 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				if (!out) return;
 				ifSessionAlive(() => {
 					trace(ctx, { ...base, action: "cancelled", seconds, ...ended, reason: "a new request or a change of session cancelled it", usage, budget: budgetRecord(p), ...fallback });
+					// A hit reported before the cancellation: the period waits for the next expiry, counted from it.
+					if (verdict === "hit" && period === p && !running && ctx.isIdle()) startTimer(ctx);
 				});
 				return;
 			}
 			ifSessionAlive(() => {
-				if (settling) {
+				if (waitingOut) {
+					// It settles first; a hit lets the next one go out.
+				} else if (settling) {
 					// Tried again on the next ticks, until the last safe moment.
 					if (p.busyFor !== expiresAt) trace(ctx, { ...base, action: "skip", seconds, reason: SETTLING_REASON });
 					p.busyFor = expiresAt;
@@ -1233,7 +1262,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				} else if (late) {
 					trace(ctx, { ...base, action: "skip", seconds, reason: "too late: the cache was about to expire before the refresh went out, so it was not sent" });
 				} else if (failed) {
-					if (ctx.hasUI) ctx.ui.notify(`pi-cache-keeper could not keep the cache warm: ${failure}`, "warning");
+					// A hit reported before the failure kept the cache warm: nothing to warn of.
+					if (ctx.hasUI && verdict !== "hit") ctx.ui.notify(`pi-cache-keeper could not keep the cache warm: ${failure}`, "warning");
 					trace(ctx, { ...base, action: "failed", seconds, ...ended, reason: failure, usage, budget: budgetRecord(p), ...fallback });
 				} else {
 					const after = timerState(ctx)?.expiresAt;
@@ -1268,6 +1298,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			const remaining = expiresAt - Date.now();
 			const keepWarmOn = warmMinutes() > 0;
 			if (keepWarmOn && remaining > 0 && !warming) noteLimit(ctx, expiresAt, timer);
+			// One of the period's refreshes is out (also after a run that sent nothing cancelled it): wait for it to settle.
+			const out = period?.warm.phase === "out";
 			if (!keepWarmOn) noteSwitchOff(ctx, expiresAt, timer);
 			countdown = warming ? { state: "refreshing" } : remaining > 0 ? { state: "warm", ms: remaining } : { state: "cold" };
 			renderFooter(ctx);
@@ -1289,7 +1321,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				}
 			} else {
 				if (remaining <= warmLead) keepWarm(ctx, expiresAt, warmLead, timer);
-				if (!warming && remaining <= EXPIRY_LEAD_MS && !attempted) {
+				if (!warming && !out && remaining <= EXPIRY_LEAD_MS && !attempted) {
 					if (piWarmAt !== undefined && Date.now() - piWarmAt < 30_000) return;
 					attempted = true;
 					compactBeforeExpiry(ctx, remaining, timer);

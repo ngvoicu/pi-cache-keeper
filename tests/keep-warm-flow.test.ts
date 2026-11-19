@@ -103,7 +103,7 @@ function harness(options: Options = {}) {
 		return usage;
 	};
 	let pending: (() => void) | undefined;
-	const state = { compacts: 0, compactedAt: 0, idle: true, pending: false, abortReports: true, attempts: 0, beforePayload: undefined as (() => void) | undefined };
+	const state = { compacts: 0, compactedAt: 0, idle: true, pending: false, abortReports: true, ignoresAbort: false, attempts: 0, beforePayload: undefined as (() => void) | undefined };
 	const statuses: { at: number; text: string | undefined }[] = [];
 	const notes: string[] = [];
 	const ctx = {
@@ -165,7 +165,8 @@ function harness(options: Options = {}) {
 						options.hold?.(n)
 							? new Promise((resolve) => {
 									pending = () => resolve(response);
-									options2.signal.addEventListener("abort", () => resolve({ stopReason: "aborted", usage: state.abortReports ? usage : refreshUsage({ input: 0, output: 0, cacheRead: 0 }) }));
+									// A transport that does not pass the cancellation on keeps the request open.
+									if (!state.ignoresAbort) options2.signal.addEventListener("abort", () => resolve({ stopReason: "aborted", usage: state.abortReports ? usage : refreshUsage({ input: 0, output: 0, cacheRead: 0 }) }));
 								})
 							: Promise.resolve(response),
 				};
@@ -669,21 +670,23 @@ test("R3: an error or an abort leaves the reported cost, or else the reserve, in
 		[true, REPORTED],
 		[false, EXPECTED],
 	] as const) {
-		// An error: warming ends ("failed").
+		// An error: after a reported hit the period waits for the next expiry (warm-period.ts); without reported usage
+		// warming ends ("failed").
 		clock();
 		fresh({ compactBeforeExpiry: false });
 		let h = harness({ lifetime: 300, cost: WITH_WRITE, respond: () => ({ stopReason: "error", errorMessage: "stream broke", usage: reports ? {} : { input: 0, output: 0, cacheRead: 0 } }) });
 		h.emit("agent_settled");
 		await h.idle(HOUR);
-		assert.equal(h.warms.length, 1);
+		assert.equal(h.warms.length, reports ? 11 : 1, reports ? "each reported a hit, so the next went out, until the budget" : "one, then ended");
 		const failed = traces().find((r) => r.action === "failed");
 		assert.equal(failed.reason, "stream broke");
-		assert.equal(failed.stop, "failed");
+		assert.equal(failed.stop, reports ? undefined : "failed");
 		assert.ok(near(failed.budget.spent, spent));
 		assert.equal(failed.usage?.cost, reports ? REPORTED : undefined);
 
-		// An abort by a run that sent nothing: counted, and never sent again. With a reported hit nothing ends; without
-		// reported usage what it cost is unknown, and warming ends for the period.
+		// An abort by a run that sent nothing: counted, and never sent again for that expiry. With a reported hit the period
+		// waits for the next expiry, counted from the cancelled refresh's send time; without reported usage what it cost is
+		// unknown, and warming ends for the period.
 		clock();
 		fresh({ compactBeforeExpiry: false });
 		h = harness({ lifetime: 300, cost: WITH_WRITE, hold: (n) => n === 1 });
@@ -696,7 +699,8 @@ test("R3: an error or an abort leaves the reported cost, or else the reserve, in
 		assert.ok(near(cancelled.budget.spent, spent));
 		assert.equal(cancelled.stop, reports ? undefined : "unknown");
 		await h.idle(HOUR);
-		assert.equal(h.warms.length, 1, "a refresh that left is not sent again for that expiry");
+		if (reports) assert.deepEqual(h.warms.map((w) => w.at).slice(0, 2), [276_000, 551_000], "the next one 275 s after the cancelled hit, as after an answered one");
+		else assert.equal(h.warms.length, 1, "a refresh that left is not sent again");
 	}
 });
 
@@ -806,8 +810,8 @@ test("R4: each end reason is recorded once, with the amounts, in the log, the fo
 	// Something gone wrong is marked, right after the countdown.
 	assert.equal(r.footer, `cache warm · 5m left · ⚠ keep-warm ended (a refresh missed the cache): $1.22 spent, a miss costs $2.07${values("5m")}`);
 
-	// failed: a refresh ended in an error.
-	r = await ended({ lifetime: 300, cost: WITH_WRITE, respond: () => ({ stopReason: "error", errorMessage: "overloaded" }) });
+	// failed: a refresh ended in an error before it reported usage (one that reported a hit first is waiting again).
+	r = await ended({ lifetime: 300, cost: WITH_WRITE, respond: () => ({ stopReason: "error", errorMessage: "overloaded", usage: { input: 0, output: 0, cacheRead: 0 } }) });
 	assert.deepEqual([r.stop.action, r.stop.stop, r.h.warms.length], ["failed", "failed", 1]);
 	assert.equal(r.footer, `cache warm · 0:25 left · ⚠ keep-warm ended (a refresh failed): $0.18 spent, a miss costs $2.07${values("5m")}`);
 
@@ -2002,6 +2006,34 @@ test("R9: the count is of refreshes in a row without a hit: unreported ones coun
 	assert.deepEqual(h.decide(), { action: "stop" }, "still owned");
 });
 
+test("the period's rule: while its refresh is out nothing else leaves, also after Pi's own refresh moved the expiry, a run that sent nothing cancelled it, and the 10-minute hold released (the reviewer's second sequence)", async (t) => {
+	t.after(() => mock.timers.reset());
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	// GPT-like 30-minute cache; the refresh's transport does not pass a cancellation on, so it never settles.
+	const h = harness({ lifetime: 1800, cost: WITH_WRITE, hold: () => true });
+	h.state.ignoresAbort = true;
+	h.emit("agent_settled");
+	for (let s = 0; s < 1800 && h.warms.length === 0; s += 10) await h.idle(10_000);
+	assert.equal(h.warms.length, 1, "the period's refresh went out");
+	const sentAt = h.warms[0].at;
+	// Pi's own refresh from the run before lands: the expiry moves 30 minutes on.
+	mock.timers.tick(30_000);
+	h.ctx.sessionManager.appendUsage("cache_warm", h.model.provider, h.model.id, h.usage());
+	// A run that sends nothing cancels the refresh; the transport keeps it open.
+	mock.timers.tick(10_000);
+	h.run(false);
+	await flush();
+	// Past the 10-minute release of the model's hold and past the moved expiry's refresh time.
+	await h.idle(2 * HOUR);
+	assert.deepEqual(h.warms.map((w) => w.at), [sentAt], "one request in the period: it is out until it settles");
+	assert.deepEqual(h.decide(), { action: "stop" }, "the period is still the extension's");
+	// It settles at last, having reported a hit: waiting again, and the next one goes out.
+	h.release();
+	await flush();
+	assert.equal(traces().filter((r) => r.action === "warm" || r.action === "cancelled").length, 1);
+});
+
 test("R9: one miss counted, then the command with only a count to clear", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
@@ -2393,6 +2425,37 @@ test("footer: a countdown counted from another model's answer is said to be so, 
 		h.emit("agent_start");
 		assert.doesNotMatch(lastFooter(h) ?? "", /another model's/, `${keepWarmMinutes}: during a run`);
 		h.state.idle = true;
+		mock.timers.reset();
+	}
+});
+
+test("footer: an aborted answer that read the cache is not the one the countdown counts from, so the other-model warning follows the answer it does count from", async (t) => {
+	t.after(() => mock.timers.reset());
+	online(t);
+	shortRetention(t);
+	const kimi = { provider: "moonshotai", id: "kimi-k3", api: "openai-completions", baseUrl: "https://api.moonshot.ai/v1", promptCache: { short: 300, long: 3600 } };
+	const claude = { provider: "anthropic", id: "claude-sonnet-4-6", api: "anthropic-messages", baseUrl: "https://api.anthropic.com", promptCache: { short: 300, long: 3600 }, cost: WITH_WRITE, contextWindow: 1_000_000, maxTokens: 64_000 };
+	for (const keepWarmMinutes of [0, 120]) {
+		clock();
+		fresh({ keepWarmMinutes, compactBeforeExpiry: false });
+		// A Kimi answer at the short cache; then Claude, whose answer read the cache and was interrupted.
+		const h = harness({ ui: true, cost: WITH_WRITE, model: kimi, cached: 120_000 });
+		h.emit("agent_settled");
+		mock.timers.tick(10_000);
+		h.ctx.model = claude as never;
+		h.emit("model_select");
+		const aborted = { role: "assistant", content: [], timestamp: Date.now(), stopReason: "aborted", provider: claude.provider, model: claude.id, usage: { input: 2, output: 0, cacheRead: 120_000, cacheWrite: 0 } };
+		h.branch.push({ type: "message", id: "claude-aborted", parentId: null, timestamp: new Date().toISOString(), message: aborted } as never);
+		h.emit("session_start", { reason: "reload" });
+		mock.timers.tick(1000);
+		// The countdown is Kimi's answer's: said beside it while Claude is selected.
+		assert.match(lastFooter(h) ?? "", /^cache warm · \d+m left · ⚠ countdown on another model's \w+ tier · /, `${keepWarmMinutes}: Claude selected`);
+		h.ctx.model = { ...h.model } as never;
+		h.emit("model_select");
+		h.emit("session_start", { reason: "reload" });
+		mock.timers.tick(1000);
+		assert.match(lastFooter(h) ?? "", /^cache warm · \d+m left · /, `${keepWarmMinutes}: back on Kimi`);
+		assert.doesNotMatch(lastFooter(h) ?? "", /another model's/, `${keepWarmMinutes}: back on Kimi, its own answer's countdown`);
 		mock.timers.reset();
 	}
 });

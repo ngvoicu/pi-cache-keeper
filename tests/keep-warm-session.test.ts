@@ -30,7 +30,8 @@ const sessionModule = await load("pi-coding-agent/dist/core/session-manager.js")
 const catalog = await load("pi-ai/dist/models.generated.js");
 const anthropic = await load("pi-ai/dist/api/anthropic-messages.js");
 const transcript = await load("pi-ai/dist/utils/transcript.js");
-const skip = runtimeModule && servicesModule && sessionModule && catalog && anthropic && transcript ? false : "the installed Pi has no session runtime to drive";
+const warmerModule = await load("pi-coding-agent/dist/core/cache-warmer.js");
+const skip = runtimeModule && servicesModule && sessionModule && catalog && anthropic && transcript && warmerModule ? false : "the installed Pi has no session runtime to drive";
 
 const tools = [{ name: "read", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } }];
 const STORE = Symbol.for("pi-cache-keeper.warm-misses");
@@ -62,6 +63,8 @@ interface Session {
 	/** The clock, second by second, letting what is due land. */
 	ticks: (seconds: number) => Promise<void>;
 	decide: () => Promise<unknown>;
+	/** The real request of the latest answer, as Pi's own warming would keep it warm. */
+	request: () => { model: Any; context: Any; options: Any };
 }
 
 // Pi's real session runtime with this extension, Claude Sonnet 4.6 at the 5-minute cache, keep-warm on for 2 h. Each of
@@ -102,6 +105,7 @@ async function inRuntime(refresh: (n: number, signal: AbortSignal) => Response, 
 	mock.timers.reset();
 	mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"], now: 100_000_000 });
 	const prior: unknown[] = [];
+	let lastRequest: { model: Any; context: Any; options: Any } | undefined;
 	const session: Session = {
 		runtime,
 		runner,
@@ -111,6 +115,7 @@ async function inRuntime(refresh: (n: number, signal: AbortSignal) => Response, 
 			prior.push(ask);
 			sessions.appendMessage(ask);
 			const messages = await runner.emitContext(transcript.normalizeContext({ systemPrompt: "Review code.", messages: prior, tools }).messages);
+			lastRequest = { model, context: { messages }, options: { apiKey: "sk-fixture", maxTokens: 8192, cacheRetention: "short" } };
 			const answer = await anthropic
 				.streamSimple(model, { messages }, {
 					apiKey: "sk-fixture",
@@ -133,6 +138,7 @@ async function inRuntime(refresh: (n: number, signal: AbortSignal) => Response, 
 			}
 		},
 		decide: () => runner.emitCacheWarmingDecision({ type: "cache_warming_decision", action: "warm", timestamp: Date.now() }),
+		request: () => lastRequest!,
 	};
 	try {
 		await scenario(session);
@@ -223,3 +229,67 @@ for (const [when, releaseAt] of [
 		if (releaseAt < 270) assert.equal(decisions[0], "warm", "known before Pi's proposal: not stopped");
 	});
 }
+
+// The reviewer's first sequence, with Pi's real CacheWarmer asking at its own cadence (and the extension answering):
+// the extension's refresh at 275 s reports a hit, then a run that sends nothing cancels it at 277 s. The hit moves the
+// period back to waiting with the expiry counted from that refresh, so the next one goes out 275 s later, before the
+// 5-minute entry expires; at 8a2d287 none went out and the cache expired at 575 s.
+test("a refresh that reported a hit, then cancelled by a run that sent nothing: the next refresh goes out on time, with Pi's real CacheWarmer told to stop", { skip }, async () => {
+	const sentAt: number[] = [];
+	const piSent: number[] = [];
+	const decisions: unknown[] = [];
+	const respond = (n: number, signal: AbortSignal) => {
+		sentAt.push(Date.now());
+		if (n > 1) return closed([messageStart(120_000, 0), ...end]);
+		// Reports the hit, then stays open until cancelled.
+		return sse(
+			new ReadableStream({
+				start(controller) {
+					controller.enqueue(packet(messageStart(120_000, 0)));
+					signal.addEventListener("abort", () => controller.error(new Error("cancelled")), { once: true });
+				},
+			}),
+		);
+	};
+	let answeredAt = 0;
+	const result = await inRuntime(respond, async (s) => {
+		await s.answer();
+		answeredAt = Date.now();
+		// Pi's own warming for that answer, as Pi starts it with the request and switches it to idle when the run settles.
+		const warmer = new warmerModule.CacheWarmer(
+			{
+				streamSimple: (m: Any, context: Any, options: Any) => {
+					piSent.push(Date.now());
+					return anthropic.streamSimple(m, context, { ...options, fetch: async () => closed([messageStart(120_000, 0), ...end]) });
+				},
+			},
+			s.runtime.session.sessionManager,
+			() => "idle",
+			async (event: Any) => {
+				const action = await s.runner.emitCacheWarmingDecision(event);
+				decisions.push({ at: (Date.now() - answeredAt) / 1000, proposed: event.action, answer: action });
+				return action;
+			},
+		);
+		warmer.start(s.request(), () => true);
+		warmer.onAgentSettled();
+		await s.ticks(277);
+		// A run that sends nothing: it cancels the refresh, which had reported its hit.
+		await s.runner.emit({ type: "agent_start" });
+		await s.runner.emit({ type: "agent_settled", aborted: true });
+		await s.ticks(330);
+		warmer.cancel();
+	});
+	assert.deepEqual(result.thrown, []);
+	const seconds = sentAt.map((at) => Math.round((at - answeredAt) / 1000));
+	assert.equal(seconds[0], 275, "the first refresh, 25 s before the 5-minute expiry");
+	assert.equal(seconds[1], 550, "the next one 275 s after the cancelled hit, before the entry it refreshed expires at 575 s");
+	assert.deepEqual(piSent, [], "Pi's warming sent nothing: told to stop");
+	// At this harness's 120k-token prompt Pi's own economics propose "stop" too; the extension's answer is "stop" either way.
+	assert.deepEqual(
+		decisions.map((d) => ({ ...(d as object), proposed: undefined })),
+		[{ at: 270, proposed: undefined, answer: "stop" }],
+		"Pi asked once, at its own 270 s, and was answered stop",
+	);
+	assert.deepEqual(result.counts, {}, "a hit: nothing counted");
+});
