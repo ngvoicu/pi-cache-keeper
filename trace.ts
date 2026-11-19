@@ -110,7 +110,7 @@ export interface WarmTrace extends TimerContext {
 	/** Set on the one record where keeping warm ended for the rest of the idle period. */
 	stop?: WarmStop;
 	/**
-	 * Set on the first refresh of a model that missed the cache: from then on, until Pi is restarted or reloaded, this
+	 * Set on the first refresh of a model that missed the cache: from then on, until the Pi process ends, this
 	 * model's idle periods are left to Pi's own warming. The line `/cache-keeper` shows.
 	 */
 	leftToPi?: string;

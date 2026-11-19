@@ -95,10 +95,15 @@ export interface CacheMarker {
  *   default; `prompt_cache_options.ttl` (OpenAI's explicit mode, Kimi's 1-hour option as `"1h"`): `"1h"` is the
  *   extended cache, any other duration the default cache with that lifetime; a `prompt_cache_breakpoint` with its own
  *   `ttl` states a lifetime for a part of the request.
- * A request with no marker at all asks for the provider's default (automatic) cache: tier `short`.
+ * A request with no marker at all asks for the provider's default (automatic) cache: tier `short`. A `cache_control`
+ * whose `type` is not `"ephemeral"`, or an option or breakpoint with a `mode` other than `"implicit"` or `"explicit"`,
+ * is a marker the extension does not read, with or without a `ttl`.
  * `unreadable` names a marker written in a way the extension does not read; `mixed` says the markers ask for different
  * tiers or state different lifetimes. Either way the request is not one the extension keeps warm.
  */
+/** The cache modes OpenAI's explicit prompt cache and Kimi's option are known to take; absent is fine. */
+const knownMode = (mode: unknown) => mode === undefined || mode === "implicit" || mode === "explicit";
+
 export function requestCache(payload: Payload): { tier: "short" | "long"; markers: CacheMarker[]; unreadable?: string; mixed: boolean } {
 	const markers: CacheMarker[] = [];
 	let unreadable: string | undefined;
@@ -109,12 +114,12 @@ export function requestCache(payload: Payload): { tier: "short" | "long"; marker
 			for (const [key, field] of Object.entries(value)) {
 				const at = path ? `${path}.${key}` : key;
 				if (key === "cache_control") {
-					if (!isPlainObject(field)) bad(at, field);
+					if (!isPlainObject(field) || field.type !== "ephemeral") bad(at, field);
 					else if (field.ttl === undefined || field.ttl === "5m") markers.push({ at, tier: "short", ms: 300_000 });
 					else if (field.ttl === "1h") markers.push({ at, tier: "long", ms: 3_600_000 });
 					else bad(at, field);
 				} else if (key === "prompt_cache_breakpoint") {
-					if (!isPlainObject(field)) bad(at, field);
+					if (!isPlainObject(field) || !knownMode(field.mode)) bad(at, field);
 					else if (field.ttl !== undefined) {
 						const ms = ttlMs(field.ttl);
 						if (ms === null) bad(at, field);
@@ -127,7 +132,8 @@ export function requestCache(payload: Payload): { tier: "short" | "long"; marker
 				} else if (key === "prompt_cache_options") {
 					if (!isPlainObject(field)) {
 						if (field !== undefined && field !== null) bad(at, field);
-					} else if (field.ttl !== undefined) {
+					} else if (!knownMode(field.mode)) bad(at, field);
+					else if (field.ttl !== undefined) {
 						const ms = ttlMs(field.ttl);
 						if (ms === null) bad(at, field);
 						else markers.push({ at: `${at}.ttl`, tier: field.ttl === "1h" ? "long" : "short", ms });
@@ -192,8 +198,18 @@ export function wantsWarm(expiresAt: number, idleSince: number, keepWarmMinutes:
  * cache on that budget; Pi's own warming skips these requests for the same reason. Adaptive thinking is fine.
  */
 export function canReplay(captured: Payload): boolean {
+	return whyNotReplayable(captured) === undefined;
+}
+
+/**
+ * Why `canReplay` says no, by what the request carries, for any provider: `thinking: { type: "enabled" }` (Claude's
+ * budget-based thinking; on Chat Completions DeepSeek, GLM, Kimi K2, MiMo and others with thinking on).
+ */
+export function whyNotReplayable(captured: Payload): string | undefined {
 	const thinking = captured.thinking;
-	return !(isPlainObject(thinking) && thinking.type === "enabled");
+	if (!(isPlainObject(thinking) && thinking.type === "enabled")) return undefined;
+	const budget = typeof thinking.budget_tokens === "number" ? ` with a budget of ${thinking.budget_tokens} tokens` : "";
+	return `the request turns thinking on (thinking: { type: "enabled" }${budget}), which a refresh capped at one output token cannot re-send as it was`;
 }
 
 /**
@@ -287,6 +303,14 @@ export function reserveFor(budget: WarmBudget, spending: WarmSpending): number {
 /** The gate: a refresh may go out only if what has been spent plus what it is reserved at stays within the limit. */
 export function gateAllows(budget: WarmBudget, spending: WarmSpending): boolean {
 	return spending.spent + reserveFor(budget, spending) <= spendingLimit(budget);
+}
+
+/**
+ * Whether a refresh can pay for itself at all: with prices, one refresh must cost less than the miss it avoids (the
+ * same figures as the gate). Where it does not, the extension does not take the period: Pi's own warming decides it.
+ */
+export function refreshCanPay(budget: WarmBudget): boolean {
+	return !budget.priced || budget.refreshCost < spendingLimit(budget);
 }
 
 /** Whether the period's spending has reached its limit: warming ends ("budget"), whatever the last refresh's outcome. */

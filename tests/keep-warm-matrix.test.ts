@@ -337,10 +337,10 @@ async function runCombo(combo: Combo): Promise<Outcome> {
 				if (refresh.at >= ANSWER_AT + earliest) fail("never late", `the refresh left at ${refresh.at - ANSWER_AT} ms, after the request's own lifetime of ${earliest / 1000} s`);
 				if (refreshes.length > 1) fail("never uncapped", `${refreshes.length} refreshes reached the transport for one expiry`);
 			} else {
-				// Owned, and no refresh left: it must have ended with a reason (the budget allows none, for example).
+				// Owned or left alone, never in between: an owned period sends its refresh before the cache expires.
 				const end = traces().find((r) => r.stop);
 				if (end) outcome.ended = `${String(end.stop)}: ${String(end.reason)}`;
-				else fail("never late", "owned, but no refresh left before the cache expired and warming did not end with a reason");
+				fail("owned or left alone", `owned, but no refresh left before the cache expired${end ? ` (warming ended: ${outcome.ended})` : ""}`);
 			}
 		} else {
 			if (onWarm !== undefined) fail("owned or left alone", `left to Pi, but Pi's "warm" decision was answered ${JSON.stringify(onWarm)}`);
@@ -433,12 +433,15 @@ const reasonOf = (reason: string) =>
 	reason
 		.replace(/ \((?:anthropic|openai|google|mistral|bedrock|azure|pi)-[a-z-]+\)$/, "")
 		.replace(/, not at \S+; declare one with modelOverrides\.promptCache$/, ", not at this base URL")
-		.replace(/ \(\d+ s\) is under a minute$/, " is under a minute");
+		.replace(/ \(\d+ s\) is under a minute$/, " is under a minute")
+		.replace(/ with a budget of \d+ tokens\)/, ")");
 /** The short label a reason has in the per-provider table. */
 const SHORT: [RegExp, string][] = [
 	[/^the cache lifetime is unknown$/, "no lifetime"],
 	[/^this API's requests are not re-sent/, "API not re-sent"],
-	[/^Claude's budget-based thinking/, "budget thinking"],
+	[/^the request turns thinking on/, "thinking enabled"],
+	[/^at this model's prices a refresh costs as much as a miss$/, "refresh costs a miss"],
+	[/^the request carries a cache marker the extension does not read/, "unread marker"],
 	[/^the request's cache lifetime does not match the model data$/, "stated lifetime ≠ data"],
 	[/^the request carries more than one cache lifetime$/, "two lifetimes"],
 	[/^the request carries no output limit/, "no output limit"],
@@ -458,10 +461,9 @@ const n = (x: number) => x.toLocaleString("en-US");
 const sum = (list: Outcome[]) => {
 	const warm = list.filter((o) => o.owned);
 	const lifetimes = [...new Set(warm.map((o) => o.lifetime!))].sort((a, b) => a - b).map(duration);
-	const idle = warm.filter((o) => !o.refreshed).length;
 	const pi = new Map<string, number>();
 	for (const o of list.filter((x) => !x.owned)) pi.set(shortOf(reasonOf(o.reason ?? "")), (pi.get(shortOf(reasonOf(o.reason ?? ""))) ?? 0) + 1);
-	return { warm: warm.length, lifetimes, idle, pi: [...pi].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])) };
+	return { warm: warm.length, lifetimes, pi: [...pi].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])) };
 };
 
 function coverageDocument(): string {
@@ -479,22 +481,22 @@ function coverageDocument(): string {
 		`- model data: Pi's catalog only, or a cache lifetime for both tiers as providers.dev would supply it (the extension writes one only for a tier the catalog has none for; the sweep uses ${DATA.short} s and ${n(DATA.long)} s, so this shows the extension's behaviour with data, not the data);`,
 		"- thinking off, and `high` where the model has it.",
 		"",
-		"Each request is built by pi's own adapter for the model's API, with a system prompt, one tool and one user message, and passes through the extension as Pi sends it. Its answer reads the cached prompt and writes a little, reporting the 1-hour share of the write where pi's adapter reports one (Anthropic Messages, Bedrock). Keep-warm is on for 2 hours. \"Kept warm\" means the extension owns the idle period (Pi's own idle warming is told to stop) and, unless its budget allows none, sends one capped refresh before the cache expires; \"Pi\" means it is left to Pi's own warming and the extension sends nothing.",
+		"Each request is built by pi's own adapter for the model's API, with a system prompt, one tool and one user message, and passes through the extension as Pi sends it. Its answer reads the cached prompt and writes a little, reporting the 1-hour share of the write where pi's adapter reports one (Anthropic Messages, Bedrock). Keep-warm is on for 2 hours. \"Kept warm\" means the extension owns the idle period (Pi's own idle warming is told to stop) and sends one capped refresh before the cache expires; \"Pi\" means it is left to Pi's own warming and the extension sends nothing.",
 		"",
 		"## Totals",
 		"",
-		"| Retention, model data | Combinations | Kept warm (lifetimes) | of which the budget allows no refresh | Left to Pi |",
-		"| --- | --- | --- | --- | --- |",
+		"| Retention, model data | Combinations | Kept warm (lifetimes) | Left to Pi |",
+		"| --- | --- | --- | --- |",
 	);
 	for (const setup of SETUPS) {
 		const list = outcomes.filter((o) => o.retention === setup[0] && o.data === setup[1]);
 		const t = sum(list);
-		push(`| ${setupLabel(setup)} | ${n(list.length)} | ${n(t.warm)} (${t.lifetimes.join(", ") || "none"}) | ${n(t.idle)} | ${n(list.length - t.warm)} |`);
+		push(`| ${setupLabel(setup)} | ${n(list.length)} | ${n(t.warm)} (${t.lifetimes.join(", ") || "none"}) | ${n(list.length - t.warm)} |`);
 	}
 	const total = sum(outcomes);
-	push(`| all | ${n(outcomes.length)} | ${n(total.warm)} | ${n(total.idle)} | ${n(outcomes.length - total.warm)} |`, "");
+	push(`| all | ${n(outcomes.length)} | ${n(total.warm)} | ${n(outcomes.length - total.warm)} |`, "");
 	push(
-		"\"The budget allows no refresh\": the model's prices make one refresh cost at least as much as the cache miss it would avoid (a cached read priced like an uncached one, or no discount at all), so warming ends at once with the reason `budget`, as Pi's own warming would decide.",
+		"A period the extension keeps warm always sends its refresh: where the model's prices make one refresh cost at least as much as the cache miss it would avoid (a cached read priced like an uncached one, or no discount at all), the period is left to Pi (*refresh costs a miss*).",
 		"",
 		"## Left to Pi, by reason",
 		"",
@@ -511,7 +513,7 @@ function coverageDocument(): string {
 		"",
 		"## Per provider and API",
 		"",
-		"Counted in model setups: each model once with thinking off, and once more with thinking on where it has thinking. *Warm* is kept warm by the extension, at the lifetimes given (*n idle*: the budget allows no refresh); *Pi* is left to Pi, with the reasons in the short form of the table above.",
+		"Counted in model setups: each model once with thinking off, and once more with thinking on where it has thinking. *Warm* is kept warm by the extension, at the lifetimes given; *Pi* is left to Pi, with the reasons in the short form of the table above.",
 		"",
 		`| Provider | API | Models | ${SETUPS.map(setupLabel).join(" | ")} |`,
 		`| --- | --- | --- | ${SETUPS.map(() => "---").join(" | ")} |`,
@@ -522,7 +524,7 @@ function coverageDocument(): string {
 		const [provider, api] = group.split("\u0000");
 		const cells = SETUPS.map(([r, d]) => {
 			const t = sum(list.filter((o) => o.retention === r && o.data === d));
-			const warm = t.warm ? `warm ${t.warm} (${t.lifetimes.join(", ")}${t.idle ? `; ${t.idle} idle` : ""})` : "";
+			const warm = t.warm ? `warm ${t.warm} (${t.lifetimes.join(", ")})` : "";
 			const pi = t.pi.length ? `Pi ${t.pi.reduce((a, [, c]) => a + c, 0)} (${t.pi.map(([label, c]) => (t.pi.length > 1 ? `${label} ${c}` : label)).join(", ")})` : "";
 			return [warm, pi].filter(Boolean).join(" · ");
 		});
@@ -552,7 +554,7 @@ test("the README's table of who keeps a session warm holds for the models it nam
 	// Claude on the Anthropic API: 1 hour (5 minutes with short); Pi with budget-based thinking.
 	for (const o of where((x) => x.provider === "anthropic")) {
 		if (o.owned) assert.equal(o.lifetime, tierLifetime(o), o.key);
-		else assert.match(o.reason ?? "", /^Claude's budget-based thinking/, o.key);
+		else assert.match(o.reason ?? "", /^the request turns thinking on \(thinking: \{ type: "enabled" \} with a budget of \d+ tokens\)/, o.key);
 	}
 	// Kimi K3 on Moonshot's API: 1 hour (5 minutes with short).
 	for (const o of where((x) => (x.provider === "moonshotai" || x.provider === "moonshotai-cn") && x.id.startsWith("kimi-k3"))) {

@@ -15,7 +15,9 @@ import {
 	payloadTier,
 	REFRESH_LIMITS,
 	reserveFor,
+	refreshCanPay,
 	requestCache,
+	whyNotReplayable,
 	ttlMs,
 	spendingText,
 	wantsWarm,
@@ -190,6 +192,23 @@ test("the cache a request asks for, from every marker wherever it sits (R8)", ()
 	assert.deepEqual(read({ input: [{ prompt_cache_breakpoint: { mode: "explicit" } }] }).markers, [], "a breakpoint without its own ttl states nothing");
 	assert.match(read({ prompt_cache_options: { ttl: "1d" } }).unreadable ?? "", /prompt_cache_options/);
 	assert.equal(read({ prompt_cache_retention: "24h", cache_control: five }).mixed, true, "an extended and a default marker");
+	// An unknown type or mode is not read as the default cache.
+	assert.match(read({ cache_control: { type: "future-type" } }).unreadable ?? "", /future-type/);
+	assert.match(read({ cache_control: { type: "future-type", ttl: "1h" } }).unreadable ?? "", /future-type/);
+	assert.match(read({ prompt_cache_options: { mode: "future-mode" } }).unreadable ?? "", /future-mode/);
+	assert.match(read({ input: [{ prompt_cache_breakpoint: { mode: "future-mode" } }] }).unreadable ?? "", /future-mode/);
+	assert.deepEqual(read({ prompt_cache_options: { mode: "explicit" } }).markers, [], "a known mode without a ttl states nothing");
+});
+
+test("a refresh that cannot pay for itself; a reason for thinking by what the request carries", () => {
+	assert.equal(refreshCanPay({ priced: true, refreshCost: 0.18, missCost: 2.07 }), true);
+	assert.equal(refreshCanPay({ priced: true, refreshCost: 2.07, missCost: 2.07 }), false, "as much as a miss");
+	assert.equal(refreshCanPay({ priced: true, refreshCost: 0.6, missCost: 0 }), false, "no discount at all");
+	assert.equal(refreshCanPay({ priced: false, refreshCost: 0, missCost: 0 }), true, "without prices the budget counts refreshes");
+	assert.equal(whyNotReplayable({ thinking: { type: "adaptive" } }), undefined);
+	assert.equal(whyNotReplayable({ messages: [] }), undefined);
+	assert.equal(whyNotReplayable({ thinking: { type: "enabled" } }), 'the request turns thinking on (thinking: { type: "enabled" }), which a refresh capped at one output token cannot re-send as it was');
+	assert.match(whyNotReplayable({ thinking: { type: "enabled", budget_tokens: 1024 } }) ?? "", /with a budget of 1024 tokens/);
 });
 
 test("the cache tier a payload shows it was sent for", () => {

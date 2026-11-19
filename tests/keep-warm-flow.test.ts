@@ -228,7 +228,10 @@ const allTraces = () =>
 		.filter(Boolean)
 		.map((line) => JSON.parse(line));
 const traces = () => allTraces().filter((record) => record.event === "warm" || record.event === "expiry");
+// The models a missed refresh left to Pi belong to the Pi process (R9); each test starts as a new process.
+const newProcess = () => delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-cache-keeper.missed-models")];
 const fresh = (keepWarm: Record<string, unknown> = {}) => {
+	newProcess();
 	settings({ keepWarmMinutes: 120, minContextTokens: 100_000, ...keepWarm });
 	writeFileSync(join(dir, "cache-keeper.jsonl"), "");
 };
@@ -407,7 +410,7 @@ test("R1: /cache-keeper says why a period is left to Pi's own warming", async (t
 	assert.match(await h.command("cache-keeper"), /left to Pi's own warming: claude-bridge requests cannot be re-sent/);
 	h = harness({ lifetime: 300, thinking: { type: "enabled", budget_tokens: 8000 } });
 	h.emit("agent_settled");
-	assert.match(await h.command("cache-keeper"), /at most 10 refreshes \(this model has no prices, so the cost of a miss is unknown\); this session is left to Pi's own warming: Claude's budget-based thinking/);
+	assert.match(await h.command("cache-keeper"), /at most 10 refreshes \(this model has no prices, so the cost of a miss is unknown\); this session is left to Pi's own warming: the request turns thinking on \(thinking: \{ type: "enabled" \} with a budget of 8000 tokens\)/);
 	h = harness({ lifetime: 300, model: { api: "bedrock-converse-stream" }, sent: { modelId: "m", messages: [], inferenceConfig: { maxTokens: 8192 } } });
 	h.emit("agent_settled");
 	assert.match(await h.command("cache-keeper"), /left to Pi's own warming: this API's requests are not re-sent by the extension \(bedrock-converse-stream\)/);
@@ -1025,11 +1028,20 @@ const catalogFile = new URL("../node_modules/@earendil-works/pi-ai/dist/models.g
 const { MODELS } = existsSync(catalogFile) ? await import(catalogFile.href) : { MODELS: undefined };
 const noCatalog = MODELS ? false : "the installed pi-ai has no model catalog";
 const adapterUser = { role: "user", content: [{ type: "text", text: "Explain the changes in detail." }], timestamp: 1000 };
+// As every Pi session sends a request: a system prompt and at least one tool, carried by the leading system message the
+// way Pi 1.5.2 builds it (normalizeContext). A leading system message in `messages` gives the system prompt.
+const piTools = [{ name: "read", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } }];
+const { normalizeContext } = (await import("@earendil-works/pi-ai/utils/transcript")) as { normalizeContext: (context: unknown) => { messages: unknown[] } };
+const piContext = (messages: unknown[] = [adapterUser], tools: unknown[] = piTools) => {
+	const [first, ...rest] = messages as { role: string; content: unknown }[];
+	const system = first?.role === "system" && typeof first.content === "string" ? first.content : undefined;
+	return { messages: normalizeContext({ systemPrompt: system ?? "You are pi.", messages: system === undefined ? messages : rest, tools }).messages };
+};
 const realAdapter = async (model: { api: string }) => (await import(`@earendil-works/pi-ai/api/${model.api}`)) as { streamSimple: (model: unknown, context: unknown, options: unknown) => { result: () => Promise<unknown> } };
-async function adapterPayload(model: { api: string }, options: Record<string, unknown>, messages: unknown[] = [adapterUser]): Promise<Record<string, unknown>> {
+async function adapterPayload(model: { api: string }, options: Record<string, unknown>, messages: unknown[] = [adapterUser], tools: unknown[] = piTools): Promise<Record<string, unknown>> {
 	const { streamSimple } = await realAdapter(model);
 	let got: Record<string, unknown> | undefined;
-	await streamSimple(model, { messages }, {
+	await streamSimple(model, piContext(messages, tools), {
 		apiKey: "sk-fixture",
 		cacheRetention: "short",
 		sessionId: "s1",
@@ -1049,7 +1061,7 @@ function viaRealAdapter(model: { api: string }) {
 		return {
 			result: async () => {
 				const { streamSimple } = await realAdapter(model);
-				stream = streamSimple(model, { messages: [adapterUser] }, {
+				stream = streamSimple(model, piContext(), {
 					...options,
 					apiKey: "sk-fixture",
 					cacheRetention: "short",
@@ -1338,9 +1350,11 @@ for (const windowMinutes of [120, 1440]) {
 		t.after(() => mock.timers.reset());
 		noNetwork(t);
 		withRetention(t, "long");
-		const real = MODELS.openai["gpt-6.1-sol"];
+		// With Pi's tools only a model whose request starts with the system prompt gets the shared prefix: gpt-5.6-cyber.
+		const real = MODELS.openai["gpt-5.6-cyber"];
 		const sent = await adapterPayload(real, { maxTokens: 8192, cacheRetention: "long" }, systemAndUser);
 		assert.deepEqual(sent.prompt_cache_options, { ttl: "30m" }, "the conversation: 30 minutes");
+		assert.equal((sent.input as { role?: string }[])[0].role, "developer", "the request starts with the system prompt");
 		const runOnce = async (keepWarmMinutes: number) => {
 			clock();
 			fresh({ keepWarmMinutes, compactBeforeExpiry: false });
@@ -1367,21 +1381,23 @@ for (const windowMinutes of [120, 1440]) {
 	});
 }
 
-test("R7c/1: with the default settings (long retention), Claude on the Anthropic API and Kimi K3 on Moonshot are kept warm, GPT on OpenAI's Responses API is left to Pi", { skip: noCatalog }, async (t) => {
+test("R7c/1: with the default settings (long retention) and Pi's tools, Claude on the Anthropic API, Kimi K3 on Moonshot and GPT-6.1 Sol on OpenAI are kept warm; GPT with the shared prefix (gpt-5.6-cyber) is left to Pi", { skip: noCatalog }, async (t) => {
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
 	withRetention(t, "long");
 	const cases: [string, string, unknown, string | undefined][] = [
 		["anthropic", "claude-sonnet-4-6", { action: "stop" }, "lifetime 60 min"],
 		["moonshotai", "kimi-k3", { action: "stop" }, "lifetime 60 min"],
-		["openai", "gpt-6.1-sol", undefined, undefined],
+		// With tools first in its request, no shared prefix: the conversation's 30 minutes only.
+		["openai", "gpt-6.1-sol", { action: "stop" }, "lifetime 30 min, OpenAI's minimum"],
+		["openai", "gpt-5.6-cyber", undefined, undefined],
 	];
 	for (const [provider, id, decision, source] of cases) {
 		clock();
 		fresh({ compactBeforeExpiry: false });
 		const real = MODELS[provider][id];
 		const sent = await adapterPayload(real, { maxTokens: 8192, cacheRetention: "long" }, systemAndUser);
-		const h = harness({ model: real, sent, stream: viaRealAdapter(real) });
+		const h = harness({ model: { ...real, promptCache: real.promptCache ?? (provider === "openai" ? undefined : { short: 3600, long: 3600 }) }, sent, stream: viaRealAdapter(real) });
 		h.emit("agent_settled");
 		assert.deepEqual(h.decide(), decision, id);
 		const shown = await h.command("cache-keeper");
@@ -1399,7 +1415,7 @@ test("R7c/1: GPT Responses with short retention states no lifetime: owned at 30 
 	const real = MODELS.openai["gpt-6.1-sol"];
 	const sent = await adapterPayload(real, { maxTokens: 8192, cacheRetention: "short" }, systemAndUser);
 	assert.equal(sent.prompt_cache_options, undefined, "the payload states no lifetime");
-	assert.deepEqual((sent.input as unknown[])[0], { role: "developer", content: "You are pi." }, "and has no shared prefix");
+	assert.ok(!JSON.stringify(sent).includes("prompt_cache_breakpoint"), "and has no shared prefix");
 	for (const promptCache of [GPT_DATA, undefined]) {
 		clock();
 		fresh({ compactBeforeExpiry: false });
@@ -1705,17 +1721,83 @@ test("R8: a lifetime assumed for a model family is owned only on the provider's 
 	}
 });
 
-test("R9: after a refresh that missed, this model is left to Pi for the rest of the window; another model is still owned; a restart owns again", async (t) => {
+test("a period left to Pi reads its cache as with keep-warm off: GPT-6.1 Sol asking for 12 hours is not compacted at 29m40s, with or without tools", { skip: noCatalog }, async (t) => {
+	t.after(() => mock.timers.reset());
+	noNetwork(t);
+	withRetention(t, "long");
+	// The reviewer's request: a model option asks for 12 hours on the conversation; providers.dev's 30 min and 12 h.
+	const model = { ...MODELS.openai["gpt-6.1-sol"], samplingParams: { prompt_cache_options: { ttl: "12h" } }, promptCache: GPT_DATA, cost: WITH_WRITE };
+	for (const tools of [[], piTools]) {
+		const sent = await adapterPayload(model, { maxTokens: 8192, cacheRetention: "long" }, systemAndUser, tools);
+		assert.deepEqual(sent.prompt_cache_options, { ttl: "12h" });
+		const runOnce = async (keepWarmMinutes: number, ms: number) => {
+			clock();
+			fresh({ keepWarmMinutes, compactBeforeExpiry: true, minContextTokens: 140_000 });
+			const h = harness({ model, sent, cached: 180_000, stream: viaRealAdapter(model) });
+			h.emit("agent_settled");
+			const decided = h.decide();
+			await h.idle(ms);
+			const shown = (await h.command("cache-keeper")).split("\n").find((l) => l.startsWith("cache:"));
+			return { decided, compacts: h.state.compacts, compactedAt: h.state.compactedAt, attempts: h.state.attempts, traces: allTraces(), shown };
+		};
+		const label = tools.length ? "with tools" : "as the reviewer built it, without tools";
+		const on = await runOnce(120, 35 * 60_000);
+		const off = await runOnce(0, 35 * 60_000);
+		assert.equal(on.decided, undefined, label);
+		assert.match(on.shown ?? "", /lifetime 720 min/, `${label}: the countdown follows 12 hours`);
+		assert.deepEqual([on.compacts, on.attempts], [0, 0], `${label}: no summary at 29m40s, nothing sent`);
+		assert.deepEqual(on, off, `${label}: the same as with keep-warm off`);
+		// To the end of the 12 hours: the same compaction, at the same time.
+		const onLong = await runOnce(120, 12 * HOUR);
+		const offLong = await runOnce(0, 12 * HOUR);
+		assert.equal(onLong.compacts, 1, label);
+		assert.deepEqual(onLong, offLong, `${label}: compacted 20 s before the 12 hours, as with keep-warm off`);
+		mock.timers.reset();
+	}
+});
+
+test("owned or left alone: where one refresh costs as much as the miss it avoids, the period is Pi's from its start", { skip: noWarmer }, async (t) => {
+	t.after(() => mock.timers.reset());
+	// A cached read priced like an uncached one, no cache-write price: a miss costs nothing more than a refresh.
+	const flat = { input: 1, output: 1, cacheRead: 1, cacheWrite: 0 };
+	await leftToPi(() => harness({ lifetime: 300, cost: flat }), /at this model's prices a refresh costs as much as a miss/);
+	// A real discount: owned, and the refresh goes out.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	assert.equal(await ownedRefresh(harness({ lifetime: 300, cost: WITH_WRITE })), 276_000);
+});
+
+test("the reason for thinking names what the request carries, for any provider: DeepSeek on Chat Completions with thinking on", { skip: noCatalog }, async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	noNetwork(t);
+	fresh({ compactBeforeExpiry: false });
+	const real = MODELS.deepseek["deepseek-v4-pro"];
+	const sent = await adapterPayload(real, { maxTokens: 8192, reasoning: "high" }, systemAndUser);
+	assert.equal((sent.thinking as { type?: string } | undefined)?.type, "enabled", "the real adapter turns thinking on");
+	const h = harness({ model: { ...real, cost: WITH_WRITE }, sent, stream: viaRealAdapter(real) });
+	h.emit("agent_settled");
+	assert.equal(h.decide(), undefined);
+	const shown = await h.command("cache-keeper");
+	assert.match(shown, /left to Pi's own warming: the request turns thinking on \(thinking: \{ type: "enabled" \}\), which a refresh capped at one output token cannot re-send as it was/);
+	assert.doesNotMatch(shown, /Claude/);
+});
+
+test("R9: after a refresh that missed, this model is left to Pi for the rest of the process, also in the instance /new makes; another model is still owned; a new process owns again", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	fresh({ compactBeforeExpiry: false });
-	const h = harness({ lifetime: 300, cost: WITH_WRITE, respond: () => ({ usage: { cacheRead: 0, cacheWrite: 600_000 } }) });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true, respond: () => ({ usage: { cacheRead: 0, cacheWrite: 600_000 } }) });
 	h.emit("agent_settled");
 	assert.deepEqual(h.decide(), { action: "stop" });
 	await h.idle(300_000);
 	assert.equal(h.warms.length, 1);
 	const at = new Date(h.warms[0].at).toTimeString().slice(0, 5);
-	const line = `a refresh missed the cache at ${at}, so this model is left to Pi's own warming until Pi is restarted or reloaded`;
+	const line = `a refresh missed the cache at ${at}, so this model is left to Pi's own warming until Pi is restarted`;
+	assert.ok(
+		h.notes.includes(`Keeping the cache warm read only 0% from the cache, so it wrote the context again. ${line.charAt(0).toUpperCase()}${line.slice(1)}.`),
+		"the notification says what happens now",
+	);
 	const noted = traces().filter((r) => r.leftToPi);
 	assert.deepEqual(noted.map((r) => [r.action, r.leftToPi]), [["missed", line]], "a trace record notes it once");
 	assert.ok((await h.command("cache-keeper")).includes(line), "said while the missed period lasts");
@@ -1726,8 +1808,6 @@ test("R9: after a refresh that missed, this model is left to Pi for the rest of 
 	assert.ok((await h.command("cache-keeper-settings")).includes(line), "the settings line");
 	await h.idle(HOUR);
 	assert.equal(h.warms.length, 1, "nothing more is sent");
-	h.run(true);
-	assert.equal(h.decide(), undefined, "and the next");
 	assert.equal(traces().filter((r) => r.leftToPi).length, 1);
 	// Another model in the same window: still owned.
 	mock.timers.tick(1000);
@@ -1736,14 +1816,105 @@ test("R9: after a refresh that missed, this model is left to Pi for the rest of 
 	assert.deepEqual(h.decide(), { action: "stop" }, "another model");
 	const keepWarmLine = (await h.command("cache-keeper")).split("\n").find((l) => l.startsWith("keep warm:"));
 	assert.equal(keepWarmLine, "keep warm: up to 2 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; so far $0 spent, a miss costs $2.07");
-	// A new extension instance (a restart or reload): owned again.
+	// /new: Pi makes a new extension instance in the same process. The model is left to Pi from the start, twice over.
+	for (const n of [1, 2]) {
+		clock();
+		const afterNew = harness({ lifetime: 300, cost: WITH_WRITE, respond: () => ({ usage: { cacheRead: 0, cacheWrite: 600_000 } }) });
+		afterNew.emit("agent_settled");
+		assert.equal(afterNew.decide(), undefined, `after /new ${n}`);
+		assert.ok((await afterNew.command("cache-keeper")).includes(`stops once refreshing has cost as much as one cache miss; ${line}`), `after /new ${n}`);
+		await afterNew.idle(HOUR);
+		assert.equal(afterNew.state.attempts, 0, `after /new ${n}: nothing sent`);
+		const other = harness({ lifetime: 300, cost: WITH_WRITE, model: { id: "sub/other" } });
+		other.emit("agent_settled");
+		assert.deepEqual(other.decide(), { action: "stop" }, `after /new ${n}: another model`);
+	}
+	// A new Pi process: owned again.
+	newProcess();
 	clock();
 	const again = harness({ lifetime: 300, cost: WITH_WRITE });
 	again.emit("agent_settled");
 	assert.deepEqual(again.decide(), { action: "stop" }, "after a restart");
 });
 
-test("R8: the ordinary cases with Pi's real adapters are unchanged: Claude and Kimi K3, long and short; GPT short owned at 30 min, GPT long left to Pi", { skip: noCatalog }, async (t) => {
+test("R9: a miss is a miss however the refresh ended: an error or abort after usage that shows a miss sets it; without usage nothing", async (t) => {
+	t.after(() => mock.timers.reset());
+	// Half the prompt read from the cache: a miss that stays within the budget, so it ends warming as "missed".
+	const missUsage = { cacheRead: 300_000, cacheWrite: 300_000 };
+	const cases: [string, Partial<Options>, (h: ReturnType<typeof harness>) => void, boolean, string][] = [
+		["error after usage", { respond: () => ({ stopReason: "error", errorMessage: "stream failed", usage: missUsage }) }, () => {}, true, "failed"],
+		["abort after usage", { respond: () => ({ usage: missUsage }), hold: () => true }, (h) => h.run(true), true, "cancelled"],
+		["error without usage", { respond: () => ({ stopReason: "error", errorMessage: "stream failed", usage: { input: 0, output: 0, cacheRead: 0 } }) }, () => {}, false, "failed"],
+		["abort without usage", { respond: () => ({ usage: missUsage }), hold: () => true }, (h) => ((h.state.abortReports = false), h.run(true)), false, "cancelled"],
+	];
+	for (const [label, options, settle, miss, action] of cases) {
+		clock();
+		fresh({ compactBeforeExpiry: false });
+		const h = harness({ lifetime: 300, cost: WITH_WRITE, ...options });
+		h.emit("agent_settled");
+		assert.deepEqual(h.decide(), { action: "stop" }, label);
+		await h.idle(276_000);
+		await flush();
+		assert.equal(h.warms.length, 1, label);
+		settle(h);
+		await flush();
+		const record = traces().find((r) => r.action === action);
+		assert.ok(record, `${label}: ${JSON.stringify(traces())}`);
+		if (miss) {
+			assert.equal(record.stop, "missed", label);
+			assert.match(record.leftToPi, /^a refresh missed the cache at /, label);
+			assert.ok(record.budget.spent > 1, `${label}: the cost is counted`);
+		} else {
+			assert.equal(record.leftToPi, undefined, label);
+			assert.notEqual(record.stop, "missed", label);
+		}
+		// The next real answer.
+		mock.timers.tick(1000);
+		if (action === "failed") h.run(true);
+		else {
+			mock.timers.tick(1000);
+			h.run(true);
+		}
+		assert.deepEqual(h.decide(), miss ? undefined : { action: "stop" }, `${label}: the next period`);
+	}
+});
+
+test("R9: with Pi's real Anthropic adapter, a refresh whose stream fails after reporting 120,000 written and none read is a miss", { skip: noCatalog }, async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	noNetwork(t);
+	withRetention(t, "long");
+	fresh({ compactBeforeExpiry: false });
+	const real = claude();
+	const sent = await adapterPayload(real, { maxTokens: 8192, cacheRetention: "long" }, systemAndUser);
+	// In memory: what the provider's stream would say, a message_start with its usage, then an error.
+	const events = [
+		{ type: "message_start", message: { id: "m", type: "message", role: "assistant", model: real.id, content: [], stop_reason: null, usage: { input_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 120_000, output_tokens: 1 } } },
+		{ type: "error", error: { type: "overloaded_error", message: "Overloaded" } },
+	];
+	const fetch = async () => new Response(events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+	const stream = (options: Record<string, unknown> & { onPayload: (p: unknown) => unknown; signal: AbortSignal }) => ({
+		result: async () => {
+			const { streamSimple } = await realAdapter(real);
+			return streamSimple(real, piContext(), { ...options, apiKey: "sk-fixture", cacheRetention: "long", maxRetries: 0, fetch }).result();
+		},
+	});
+	const h = harness({ model: { ...real, cost: WITH_WRITE }, sent, stream, cached: 120_000 });
+	h.emit("agent_settled");
+	assert.deepEqual(h.decide(), { action: "stop" });
+	await h.idle(3_420_000);
+	await flush();
+	const record = traces().find((r) => r.action === "failed");
+	assert.ok(record?.usage, JSON.stringify(traces()));
+	assert.deepEqual([record.usage.cacheRead, record.usage.cacheWrite], [0, 120_000]);
+	// Writing 120,000 tokens costs more than the miss it was to avoid: warming ends on the budget, and it is a miss.
+	assert.equal(record.stop, "budget");
+	assert.match(record.leftToPi, /^a refresh missed the cache at /);
+	h.run(true);
+	assert.equal(h.decide(), undefined, "the next period is Pi's");
+});
+
+test("R8: the ordinary cases with Pi's real adapters and tools: Claude and Kimi K3, long and short; GPT-6.1 Sol owned at 30 min with either retention; GPT with the shared prefix left to Pi", { skip: noCatalog }, async (t) => {
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
 	const cases: [string, string, "long" | "short", number | undefined][] = [
@@ -1752,7 +1923,9 @@ test("R8: the ordinary cases with Pi's real adapters are unchanged: Claude and K
 		["moonshotai", "kimi-k3", "long", 3_421_000],
 		["moonshotai", "kimi-k3", "short", 276_000],
 		["openai", "gpt-6.1-sol", "short", 1_711_000],
-		["openai", "gpt-6.1-sol", "long", undefined],
+		// With Pi's tools first in the request, GPT-6.1 Sol gets no shared prefix: owned at 30 min (without tools: Pi's).
+		["openai", "gpt-6.1-sol", "long", 1_711_000],
+		["openai", "gpt-5.6-cyber", "long", undefined],
 	];
 	for (const [provider, id, retention, at] of cases) {
 		withRetention(t, retention === "long" ? "long" : undefined);

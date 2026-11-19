@@ -8,19 +8,19 @@ Who keeps an idle cache warm, for every model in the catalog of pi-ai 1.5.2 (1,6
 - model data: Pi's catalog only, or a cache lifetime for both tiers as providers.dev would supply it (the extension writes one only for a tier the catalog has none for; the sweep uses 300 s and 3,600 s, so this shows the extension's behaviour with data, not the data);
 - thinking off, and `high` where the model has it.
 
-Each request is built by pi's own adapter for the model's API, with a system prompt, one tool and one user message, and passes through the extension as Pi sends it. Its answer reads the cached prompt and writes a little, reporting the 1-hour share of the write where pi's adapter reports one (Anthropic Messages, Bedrock). Keep-warm is on for 2 hours. "Kept warm" means the extension owns the idle period (Pi's own idle warming is told to stop) and, unless its budget allows none, sends one capped refresh before the cache expires; "Pi" means it is left to Pi's own warming and the extension sends nothing.
+Each request is built by pi's own adapter for the model's API, with a system prompt, one tool and one user message, and passes through the extension as Pi sends it. Its answer reads the cached prompt and writes a little, reporting the 1-hour share of the write where pi's adapter reports one (Anthropic Messages, Bedrock). Keep-warm is on for 2 hours. "Kept warm" means the extension owns the idle period (Pi's own idle warming is told to stop) and sends one capped refresh before the cache expires; "Pi" means it is left to Pi's own warming and the extension sends nothing.
 
 ## Totals
 
-| Retention, model data | Combinations | Kept warm (lifetimes) | of which the budget allows no refresh | Left to Pi |
-| --- | --- | --- | --- | --- |
-| short, Pi's catalog | 3,046 | 557 (5 min, 30 min) | 15 | 2,489 |
-| short, with lifetimes | 3,046 | 2,078 (5 min) | 144 | 968 |
-| long, Pi's catalog | 3,046 | 551 (5 min, 30 min, 1 h) | 15 | 2,495 |
-| long, with lifetimes | 3,046 | 2,056 (5 min, 1 h) | 144 | 990 |
-| all | 12,184 | 5,242 | 318 | 6,942 |
+| Retention, model data | Combinations | Kept warm (lifetimes) | Left to Pi |
+| --- | --- | --- | --- |
+| short, Pi's catalog | 3,046 | 542 (5 min, 30 min) | 2,504 |
+| short, with lifetimes | 3,046 | 1,934 (5 min) | 1,112 |
+| long, Pi's catalog | 3,046 | 536 (5 min, 30 min, 1 h) | 2,510 |
+| long, with lifetimes | 3,046 | 1,912 (5 min, 1 h) | 1,134 |
+| all | 12,184 | 4,924 | 7,260 |
 
-"The budget allows no refresh": the model's prices make one refresh cost at least as much as the cache miss it would avoid (a cached read priced like an uncached one, or no discount at all), so warming ends at once with the reason `budget`, as Pi's own warming would decide.
+A period the extension keeps warm always sends its refresh: where the model's prices make one refresh cost at least as much as the cache miss it would avoid (a cached read priced like an uncached one, or no discount at all), the period is left to Pi (*refresh costs a miss*).
 
 ## Left to Pi, by reason
 
@@ -28,68 +28,69 @@ Each request is built by pi's own adapter for the model's API, with a system pro
 | --- | --- | --- | --- | --- | --- |
 | the cache lifetime is unknown (*no lifetime*) | 1,843 | 0 | 1,843 | 0 | 3,686 |
 | this API's requests are not re-sent by the extension (*API not re-sent*) | 380 | 663 | 380 | 663 | 2,086 |
-| Claude's budget-based thinking changes the cache key when the answer is capped (*budget thinking*) | 266 | 305 | 266 | 305 | 1,142 |
+| the request turns thinking on (thinking: { type: "enabled" }), which a refresh capped at one output token cannot re-send as it was (*thinking enabled*) | 266 | 305 | 266 | 305 | 1,142 |
+| at this model's prices a refresh costs as much as a miss (*refresh costs a miss*) | 15 | 144 | 15 | 144 | 318 |
 | the request's cache lifetime does not match the model data (*stated lifetime ≠ data*) | 0 | 0 | 0 | 16 | 16 |
 | the request carries more than one cache lifetime (*two lifetimes*) | 0 | 0 | 6 | 6 | 12 |
 
 ## Per provider and API
 
-Counted in model setups: each model once with thinking off, and once more with thinking on where it has thinking. *Warm* is kept warm by the extension, at the lifetimes given (*n idle*: the budget allows no refresh); *Pi* is left to Pi, with the reasons in the short form of the table above.
+Counted in model setups: each model once with thinking off, and once more with thinking on where it has thinking. *Warm* is kept warm by the extension, at the lifetimes given; *Pi* is left to Pi, with the reasons in the short form of the table above.
 
 | Provider | API | Models | short, Pi's catalog | short, with lifetimes | long, Pi's catalog | long, with lifetimes |
 | --- | --- | --- | --- | --- | --- | --- |
 | amazon-bedrock | bedrock-converse-stream | 202 | Pi 362 (API not re-sent) | Pi 362 (API not re-sent) | Pi 362 (API not re-sent) | Pi 362 (API not re-sent) |
 | ant-ling | openai-completions | 3 | Pi 4 (no lifetime) | warm 4 (5 min) | Pi 4 (no lifetime) | warm 4 (5 min) |
-| anthropic | anthropic-messages | 18 | warm 30 (5 min) · Pi 6 (budget thinking) | warm 30 (5 min) · Pi 6 (budget thinking) | warm 30 (1 h) · Pi 6 (budget thinking) | warm 30 (1 h) · Pi 6 (budget thinking) |
+| anthropic | anthropic-messages | 18 | warm 30 (5 min) · Pi 6 (thinking enabled) | warm 30 (5 min) · Pi 6 (thinking enabled) | warm 30 (1 h) · Pi 6 (thinking enabled) | warm 30 (1 h) · Pi 6 (thinking enabled) |
 | azure | azure-openai-responses | 44 | Pi 77 (no lifetime) | Pi 77 (API not re-sent) | Pi 77 (no lifetime) | Pi 77 (API not re-sent) |
 | azure | openai-completions | 1 | Pi 2 (no lifetime) | warm 2 (5 min) | Pi 2 (no lifetime) | warm 2 (5 min) |
-| baseten | openai-completions | 15 | Pi 30 (no lifetime) | warm 30 (5 min; 2 idle) | Pi 30 (no lifetime) | warm 30 (5 min; 2 idle) |
-| cerebras | openai-completions | 2 | Pi 4 (no lifetime) | warm 4 (5 min; 4 idle) | Pi 4 (no lifetime) | warm 4 (1 h; 4 idle) |
-| cloudflare-ai-gateway | anthropic-messages | 14 | warm 25 (5 min) · Pi 3 (budget thinking) | warm 25 (5 min) · Pi 3 (budget thinking) | warm 25 (1 h) · Pi 3 (budget thinking) | warm 25 (1 h) · Pi 3 (budget thinking) |
-| cloudflare-ai-gateway | openai-completions | 19 | Pi 34 (no lifetime) | warm 31 (5 min; 2 idle) · Pi 3 (budget thinking) | Pi 34 (no lifetime) | warm 31 (5 min; 2 idle) · Pi 3 (budget thinking) |
-| cloudflare-ai-gateway | openai-responses | 26 | Pi 47 (no lifetime) | warm 47 (5 min; 4 idle) | Pi 47 (no lifetime) | warm 47 (1 h; 4 idle) |
-| cloudflare-workers-ai | openai-completions | 19 | Pi 34 (no lifetime) | warm 31 (5 min; 2 idle) · Pi 3 (budget thinking) | Pi 34 (no lifetime) | warm 31 (5 min; 2 idle) · Pi 3 (budget thinking) |
-| deepseek | openai-completions | 2 | Pi 4 (no lifetime) | warm 2 (5 min) · Pi 2 (budget thinking) | Pi 4 (no lifetime) | warm 2 (1 h) · Pi 2 (budget thinking) |
+| baseten | openai-completions | 15 | Pi 30 (no lifetime) | warm 28 (5 min) · Pi 2 (refresh costs a miss) | Pi 30 (no lifetime) | warm 28 (5 min) · Pi 2 (refresh costs a miss) |
+| cerebras | openai-completions | 2 | Pi 4 (no lifetime) | Pi 4 (refresh costs a miss) | Pi 4 (no lifetime) | Pi 4 (refresh costs a miss) |
+| cloudflare-ai-gateway | anthropic-messages | 14 | warm 25 (5 min) · Pi 3 (thinking enabled) | warm 25 (5 min) · Pi 3 (thinking enabled) | warm 25 (1 h) · Pi 3 (thinking enabled) | warm 25 (1 h) · Pi 3 (thinking enabled) |
+| cloudflare-ai-gateway | openai-completions | 19 | Pi 34 (no lifetime) | warm 29 (5 min) · Pi 5 (thinking enabled 3, refresh costs a miss 2) | Pi 34 (no lifetime) | warm 29 (5 min) · Pi 5 (thinking enabled 3, refresh costs a miss 2) |
+| cloudflare-ai-gateway | openai-responses | 26 | Pi 47 (no lifetime) | warm 43 (5 min) · Pi 4 (refresh costs a miss) | Pi 47 (no lifetime) | warm 43 (1 h) · Pi 4 (refresh costs a miss) |
+| cloudflare-workers-ai | openai-completions | 19 | Pi 34 (no lifetime) | warm 29 (5 min) · Pi 5 (thinking enabled 3, refresh costs a miss 2) | Pi 34 (no lifetime) | warm 29 (5 min) · Pi 5 (thinking enabled 3, refresh costs a miss 2) |
+| deepseek | openai-completions | 2 | Pi 4 (no lifetime) | warm 2 (5 min) · Pi 2 (thinking enabled) | Pi 4 (no lifetime) | warm 2 (1 h) · Pi 2 (thinking enabled) |
 | fireworks | anthropic-messages | 16 | warm 32 (5 min) | warm 32 (5 min) | warm 32 (5 min) | warm 32 (5 min) |
 | fireworks | openai-completions | 11 | Pi 22 (no lifetime) | warm 22 (5 min) | Pi 22 (no lifetime) | warm 22 (5 min) |
-| github-copilot | anthropic-messages | 10 | warm 19 (5 min) · Pi 1 (budget thinking) | warm 19 (5 min) · Pi 1 (budget thinking) | warm 19 (1 h) · Pi 1 (budget thinking) | warm 19 (1 h) · Pi 1 (budget thinking) |
+| github-copilot | anthropic-messages | 10 | warm 19 (5 min) · Pi 1 (thinking enabled) | warm 19 (5 min) · Pi 1 (thinking enabled) | warm 19 (1 h) · Pi 1 (thinking enabled) | warm 19 (1 h) · Pi 1 (thinking enabled) |
 | github-copilot | openai-completions | 3 | Pi 6 (no lifetime) | warm 6 (5 min) | Pi 6 (no lifetime) | warm 6 (1 h) |
 | github-copilot | openai-responses | 14 | Pi 28 (no lifetime) | warm 28 (5 min) | Pi 28 (no lifetime) | warm 28 (1 h) |
 | google-vertex | google-vertex | 13 | Pi 26 (no lifetime) | Pi 26 (API not re-sent) | Pi 26 (no lifetime) | Pi 26 (API not re-sent) |
 | google | google-generative-ai | 23 | Pi 46 (no lifetime) | Pi 46 (API not re-sent) | Pi 46 (no lifetime) | Pi 46 (API not re-sent) |
-| groq | openai-completions | 7 | Pi 12 (no lifetime) | warm 12 (5 min; 8 idle) | Pi 12 (no lifetime) | warm 12 (1 h; 8 idle) |
+| groq | openai-completions | 7 | Pi 12 (no lifetime) | warm 4 (5 min) · Pi 8 (refresh costs a miss) | Pi 12 (no lifetime) | warm 4 (1 h) · Pi 8 (refresh costs a miss) |
 | huggingface | openai-completions | 78 | Pi 139 (no lifetime) | warm 139 (5 min) | Pi 139 (no lifetime) | warm 139 (1 h) |
-| kimi-coding | openai-completions | 6 | Pi 12 (no lifetime) | warm 11 (5 min) · Pi 1 (budget thinking) | Pi 12 (no lifetime) | warm 11 (1 h) · Pi 1 (budget thinking) |
+| kimi-coding | openai-completions | 6 | Pi 12 (no lifetime) | warm 11 (5 min) · Pi 1 (thinking enabled) | Pi 12 (no lifetime) | warm 11 (1 h) · Pi 1 (thinking enabled) |
 | meta | openai-responses | 7 | Pi 14 (no lifetime) | warm 14 (5 min) | Pi 14 (no lifetime) | warm 14 (1 h) |
-| minimax-cn | anthropic-messages | 4 | warm 5 (5 min) · Pi 3 (budget thinking) | warm 5 (5 min) · Pi 3 (budget thinking) | warm 5 (1 h) · Pi 3 (budget thinking) | warm 5 (1 h) · Pi 3 (budget thinking) |
-| minimax | anthropic-messages | 4 | warm 5 (5 min) · Pi 3 (budget thinking) | warm 5 (5 min) · Pi 3 (budget thinking) | warm 5 (1 h) · Pi 3 (budget thinking) | warm 5 (1 h) · Pi 3 (budget thinking) |
+| minimax-cn | anthropic-messages | 4 | warm 5 (5 min) · Pi 3 (thinking enabled) | warm 5 (5 min) · Pi 3 (thinking enabled) | warm 5 (1 h) · Pi 3 (thinking enabled) | warm 5 (1 h) · Pi 3 (thinking enabled) |
+| minimax | anthropic-messages | 4 | warm 5 (5 min) · Pi 3 (thinking enabled) | warm 5 (5 min) · Pi 3 (thinking enabled) | warm 5 (1 h) · Pi 3 (thinking enabled) | warm 5 (1 h) · Pi 3 (thinking enabled) |
 | mistral | mistral-conversations | 34 | Pi 48 (no lifetime) | Pi 48 (API not re-sent) | Pi 48 (no lifetime) | Pi 48 (API not re-sent) |
-| moonshotai-cn | openai-completions | 6 | warm 6 (5 min) · Pi 6 (no lifetime) | warm 9 (5 min) · Pi 3 (budget thinking) | warm 6 (1 h) · Pi 6 (no lifetime) | warm 9 (1 h) · Pi 3 (budget thinking) |
-| moonshotai | openai-completions | 6 | warm 6 (5 min) · Pi 6 (no lifetime) | warm 9 (5 min) · Pi 3 (budget thinking) | warm 6 (1 h) · Pi 6 (no lifetime) | warm 9 (1 h) · Pi 3 (budget thinking) |
-| nvidia | openai-completions | 20 | Pi 35 (no lifetime) | warm 34 (5 min) · Pi 1 (budget thinking) | Pi 35 (no lifetime) | warm 34 (5 min) · Pi 1 (budget thinking) |
+| moonshotai-cn | openai-completions | 6 | warm 6 (5 min) · Pi 6 (no lifetime) | warm 9 (5 min) · Pi 3 (thinking enabled) | warm 6 (1 h) · Pi 6 (no lifetime) | warm 9 (1 h) · Pi 3 (thinking enabled) |
+| moonshotai | openai-completions | 6 | warm 6 (5 min) · Pi 6 (no lifetime) | warm 9 (5 min) · Pi 3 (thinking enabled) | warm 6 (1 h) · Pi 6 (no lifetime) | warm 9 (1 h) · Pi 3 (thinking enabled) |
+| nvidia | openai-completions | 20 | Pi 35 (no lifetime) | warm 34 (5 min) · Pi 1 (thinking enabled) | Pi 35 (no lifetime) | warm 34 (5 min) · Pi 1 (thinking enabled) |
 | openai-codex | openai-codex-responses | 8 | Pi 16 (no lifetime) | Pi 16 (API not re-sent) | Pi 16 (no lifetime) | Pi 16 (API not re-sent) |
-| openai | openai-responses | 44 | warm 22 (30 min) · Pi 55 (no lifetime) | warm 77 (5 min; 8 idle) | warm 16 (30 min) · Pi 61 (no lifetime 55, two lifetimes 6) | warm 55 (1 h; 8 idle) · Pi 22 (stated lifetime ≠ data 16, two lifetimes 6) |
-| opencode-go | anthropic-messages | 5 | warm 6 (5 min) · Pi 4 (budget thinking) | warm 6 (5 min) · Pi 4 (budget thinking) | warm 6 (1 h) · Pi 4 (budget thinking) | warm 6 (1 h) · Pi 4 (budget thinking) |
+| openai | openai-responses | 44 | warm 22 (30 min) · Pi 55 (no lifetime) | warm 69 (5 min) · Pi 8 (refresh costs a miss) | warm 16 (30 min) · Pi 61 (no lifetime 55, two lifetimes 6) | warm 47 (1 h) · Pi 30 (stated lifetime ≠ data 16, refresh costs a miss 8, two lifetimes 6) |
+| opencode-go | anthropic-messages | 5 | warm 6 (5 min) · Pi 4 (thinking enabled) | warm 6 (5 min) · Pi 4 (thinking enabled) | warm 6 (1 h) · Pi 4 (thinking enabled) | warm 6 (1 h) · Pi 4 (thinking enabled) |
 | opencode-go | google-generative-ai | 1 | Pi 2 (no lifetime) | Pi 2 (API not re-sent) | Pi 2 (no lifetime) | Pi 2 (API not re-sent) |
-| opencode-go | openai-completions | 21 | Pi 42 (no lifetime) | warm 40 (5 min) · Pi 2 (budget thinking) | Pi 42 (no lifetime) | warm 40 (1 h) · Pi 2 (budget thinking) |
+| opencode-go | openai-completions | 21 | Pi 42 (no lifetime) | warm 40 (5 min) · Pi 2 (thinking enabled) | Pi 42 (no lifetime) | warm 40 (1 h) · Pi 2 (thinking enabled) |
 | opencode-go | openai-responses | 5 | Pi 10 (no lifetime) | warm 10 (5 min) | Pi 10 (no lifetime) | warm 10 (1 h) |
-| opencode | anthropic-messages | 18 | warm 30 (5 min) · Pi 6 (budget thinking) | warm 30 (5 min) · Pi 6 (budget thinking) | warm 30 (1 h) · Pi 6 (budget thinking) | warm 30 (1 h) · Pi 6 (budget thinking) |
+| opencode | anthropic-messages | 18 | warm 30 (5 min) · Pi 6 (thinking enabled) | warm 30 (5 min) · Pi 6 (thinking enabled) | warm 30 (1 h) · Pi 6 (thinking enabled) | warm 30 (1 h) · Pi 6 (thinking enabled) |
 | opencode | google-generative-ai | 8 | Pi 16 (no lifetime) | Pi 16 (API not re-sent) | Pi 16 (no lifetime) | Pi 16 (API not re-sent) |
-| opencode | openai-completions | 28 | Pi 56 (no lifetime) | warm 55 (5 min) · Pi 1 (budget thinking) | Pi 56 (no lifetime) | warm 55 (5 min, 1 h) · Pi 1 (budget thinking) |
-| opencode | openai-responses | 31 | Pi 62 (no lifetime) | warm 62 (5 min; 4 idle) | Pi 62 (no lifetime) | warm 62 (1 h; 4 idle) |
-| openrouter | anthropic-messages | 20 | warm 36 (5 min) · Pi 4 (budget thinking) | warm 36 (5 min) · Pi 4 (budget thinking) | warm 36 (1 h) · Pi 4 (budget thinking) | warm 36 (1 h) · Pi 4 (budget thinking) |
-| openrouter | openai-completions | 383 | Pi 692 (no lifetime) | warm 692 (5 min; 95 idle) | Pi 692 (no lifetime) | warm 692 (1 h; 95 idle) |
+| opencode | openai-completions | 28 | Pi 56 (no lifetime) | warm 55 (5 min) · Pi 1 (thinking enabled) | Pi 56 (no lifetime) | warm 55 (5 min, 1 h) · Pi 1 (thinking enabled) |
+| opencode | openai-responses | 31 | Pi 62 (no lifetime) | warm 58 (5 min) · Pi 4 (refresh costs a miss) | Pi 62 (no lifetime) | warm 58 (1 h) · Pi 4 (refresh costs a miss) |
+| openrouter | anthropic-messages | 20 | warm 36 (5 min) · Pi 4 (thinking enabled) | warm 36 (5 min) · Pi 4 (thinking enabled) | warm 36 (1 h) · Pi 4 (thinking enabled) | warm 36 (1 h) · Pi 4 (thinking enabled) |
+| openrouter | openai-completions | 383 | Pi 692 (no lifetime) | warm 597 (5 min) · Pi 95 (refresh costs a miss) | Pi 692 (no lifetime) | warm 597 (1 h) · Pi 95 (refresh costs a miss) |
 | qwen-token-plan-cn | openai-completions | 21 | Pi 42 (no lifetime) | warm 42 (5 min) | Pi 42 (no lifetime) | warm 42 (1 h) |
 | qwen-token-plan-individual-cn | openai-completions | 10 | Pi 20 (no lifetime) | warm 20 (5 min) | Pi 20 (no lifetime) | warm 20 (1 h) |
 | qwen-token-plan-individual | openai-completions | 10 | Pi 20 (no lifetime) | warm 20 (5 min) | Pi 20 (no lifetime) | warm 20 (1 h) |
 | qwen-token-plan | openai-completions | 21 | Pi 42 (no lifetime) | warm 42 (5 min) | Pi 42 (no lifetime) | warm 42 (1 h) |
 | radius | pi-messages | 35 | Pi 70 (no lifetime 52, API not re-sent 18) | Pi 70 (API not re-sent) | Pi 70 (no lifetime 52, API not re-sent 18) | Pi 70 (API not re-sent) |
 | together | openai-completions | 16 | Pi 32 (no lifetime) | warm 32 (5 min) | Pi 32 (no lifetime) | warm 32 (5 min) |
-| vercel-ai-gateway | anthropic-messages | 307 | warm 335 (5 min; 15 idle) · Pi 236 (budget thinking) | warm 335 (5 min; 15 idle) · Pi 236 (budget thinking) | warm 335 (1 h; 15 idle) · Pi 236 (budget thinking) | warm 335 (1 h; 15 idle) · Pi 236 (budget thinking) |
+| vercel-ai-gateway | anthropic-messages | 307 | warm 320 (5 min) · Pi 251 (thinking enabled 236, refresh costs a miss 15) | warm 320 (5 min) · Pi 251 (thinking enabled 236, refresh costs a miss 15) | warm 320 (1 h) · Pi 251 (thinking enabled 236, refresh costs a miss 15) | warm 320 (1 h) · Pi 251 (thinking enabled 236, refresh costs a miss 15) |
 | xai | openai-responses | 4 | Pi 8 (no lifetime) | warm 8 (5 min) | Pi 8 (no lifetime) | warm 8 (5 min) |
-| xiaomi-token-plan-ams | openai-completions | 2 | Pi 4 (no lifetime) | warm 2 (5 min) · Pi 2 (budget thinking) | Pi 4 (no lifetime) | warm 2 (1 h) · Pi 2 (budget thinking) |
-| xiaomi-token-plan-cn | openai-completions | 2 | Pi 4 (no lifetime) | warm 2 (5 min) · Pi 2 (budget thinking) | Pi 4 (no lifetime) | warm 2 (1 h) · Pi 2 (budget thinking) |
-| xiaomi-token-plan-sgp | openai-completions | 2 | Pi 4 (no lifetime) | warm 2 (5 min) · Pi 2 (budget thinking) | Pi 4 (no lifetime) | warm 2 (1 h) · Pi 2 (budget thinking) |
-| xiaomi | openai-completions | 3 | Pi 6 (no lifetime) | warm 3 (5 min) · Pi 3 (budget thinking) | Pi 6 (no lifetime) | warm 3 (1 h) · Pi 3 (budget thinking) |
-| zai-coding-cn | openai-completions | 4 | Pi 8 (no lifetime) | warm 4 (5 min) · Pi 4 (budget thinking) | Pi 8 (no lifetime) | warm 4 (1 h) · Pi 4 (budget thinking) |
-| zai | openai-completions | 7 | Pi 14 (no lifetime) | warm 7 (5 min) · Pi 7 (budget thinking) | Pi 14 (no lifetime) | warm 7 (1 h) · Pi 7 (budget thinking) |
+| xiaomi-token-plan-ams | openai-completions | 2 | Pi 4 (no lifetime) | warm 2 (5 min) · Pi 2 (thinking enabled) | Pi 4 (no lifetime) | warm 2 (1 h) · Pi 2 (thinking enabled) |
+| xiaomi-token-plan-cn | openai-completions | 2 | Pi 4 (no lifetime) | warm 2 (5 min) · Pi 2 (thinking enabled) | Pi 4 (no lifetime) | warm 2 (1 h) · Pi 2 (thinking enabled) |
+| xiaomi-token-plan-sgp | openai-completions | 2 | Pi 4 (no lifetime) | warm 2 (5 min) · Pi 2 (thinking enabled) | Pi 4 (no lifetime) | warm 2 (1 h) · Pi 2 (thinking enabled) |
+| xiaomi | openai-completions | 3 | Pi 6 (no lifetime) | warm 3 (5 min) · Pi 3 (thinking enabled) | Pi 6 (no lifetime) | warm 3 (1 h) · Pi 3 (thinking enabled) |
+| zai-coding-cn | openai-completions | 4 | Pi 8 (no lifetime) | warm 4 (5 min) · Pi 4 (thinking enabled) | Pi 8 (no lifetime) | warm 4 (1 h) · Pi 4 (thinking enabled) |
+| zai | openai-completions | 7 | Pi 14 (no lifetime) | warm 7 (5 min) · Pi 7 (thinking enabled) | Pi 14 (no lifetime) | warm 7 (1 h) · Pi 7 (thinking enabled) |
