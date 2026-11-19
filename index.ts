@@ -76,6 +76,8 @@ import {
 	keepWarmRule,
 	MAX_UNPRICED_REFRESHES,
 	MIN_WARM_CACHED_SHARE,
+	outputLimitKey,
+	REPLAYABLE_APIS,
 	reserveFor,
 	spendingText,
 	wantsWarm,
@@ -122,6 +124,11 @@ interface CapturedRequest {
 	at: number;
 	/** The timestamp of the answer to this request, when that answer read or wrote the cache (message_end). */
 	answeredAt?: number;
+	/**
+	 * Pi's thinking level when the request was sent. A refresh is built with it: built with another level, an adapter
+	 * may size its output limit for thinking (Claude's budget-based thinking: 16,385 tokens for a "1-token" answer).
+	 */
+	thinking?: ReturnType<ExtensionAPI["getThinkingLevel"]>;
 }
 
 /** A cache lifetime under this cannot carry a refresh: Pi's own warming keeps such a session, if anything does. */
@@ -148,6 +155,11 @@ interface WarmPeriod {
 	doneFor?: number;
 	/** The expiry for which "Pi is busy" was logged, so a refresh tried on every tick logs it once. */
 	busyFor?: number;
+	/**
+	 * What an owned period's cached request was written with, fixed at the period's start: the model, the cache tier and
+	 * the lifetime. The expiry is counted with this lifetime; reading anything else later ends warming ("unable").
+	 */
+	fixed?: { model: string; tier: "short" | "long"; ms: number; source: string };
 }
 
 interface CachedPath {
@@ -238,6 +250,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const request = answerRequest;
 		if (!request || request.answeredAt !== state.answeredAt) return "the request of the last answer was not captured";
 		if (!request.payload) return `${request.model.api} requests cannot be re-sent`;
+		// The same checks the refresh makes, on the payload as it was sent: only where a refresh is proven to go out with
+		// its output capped (see REPLAYABLE_APIS) does the extension keep the cache warm and stop Pi's warming.
+		if (!REPLAYABLE_APIS.has(request.model.api)) return `this API's requests are not re-sent by the extension (${request.model.api})`;
+		if (!messageArrayKey(request.payload)) return `the ${request.model.api} request has no message list the extension can check`;
+		if (!outputLimitKey(request.payload)) return "the request carries no output limit the extension can cap";
 		if (!canReplay(request.payload)) return "Claude's budget-based thinking changes the cache key when the answer is capped";
 		return undefined;
 	};
@@ -250,6 +267,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (!fresh && period && (answeredAt === undefined || answeredAt === period.answeredAt)) return;
 		const notOwned = whyNotOwned(state);
 		const request = notOwned === undefined ? answerRequest : undefined;
+		const model = ctx.model;
 		period = {
 			answeredAt,
 			idleSince: Date.now(),
@@ -257,10 +275,25 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			request,
 			budget: request && state?.answerPrompt !== undefined ? warmBudget(request.model, state.answerPrompt) : undefined,
 			spending: { spent: 0, refreshes: 0 },
+			fixed:
+				request && model && state?.lifetime
+					? { model: `${model.provider}/${model.id}`, tier: cacheTier(ctx.sessionManager.getBranch(), model), ms: state.lifetime.ms, source: state.lifetime.source }
+					: undefined,
 		};
 	};
 	// The extension keeps this period's cache warm: keep-warm on and the period's facts hold.
-	const owns = (p: WarmPeriod | undefined): p is WarmPeriod & { budget: WarmBudget } => config.keepWarmMinutes > 0 && p !== undefined && p.notOwned === undefined && p.budget !== undefined;
+	const owns = (p: WarmPeriod | undefined): p is WarmPeriod & { budget: WarmBudget; fixed: NonNullable<WarmPeriod["fixed"]> } =>
+		config.keepWarmMinutes > 0 && p !== undefined && p.notOwned === undefined && p.budget !== undefined && p.fixed !== undefined;
+	// What differs from what the period's cached request was written with, if anything.
+	const driftReason = (fixed: NonNullable<WarmPeriod["fixed"]>, model: Model<Api>, state: CacheState, tier: "short" | "long"): string | undefined => {
+		const now = `${model.provider}/${model.id}`;
+		if (now !== fixed.model) return `the model is now ${now}, the cached request was written with ${fixed.model}`;
+		const written = formatDuration(fixed.ms);
+		if (!state.lifetime) return `the cache lifetime is now unknown, the cached request was written with ${written}`;
+		if (state.lifetime.ms !== fixed.ms) return `the cache lifetime now reads ${formatDuration(state.lifetime.ms)}, the cached request was written with ${written}`;
+		if (tier !== fixed.tier) return `the cache tier now reads ${tier}, the cached request was written with ${fixed.tier}`;
+		return undefined;
+	};
 	const abortWarm = () => {
 		warming?.abort();
 		warming = undefined;
@@ -646,6 +679,26 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	};
 	const limitReason = () => `the cache lasts to the end of the ${keepWarmLabel(config.keepWarmMinutes)} limit after Pi went idle`;
 
+	// What the countdown reads. In a period the extension keeps warm, the expiry is counted with the lifetime the period
+	// started with, and each read is compared with what the period started with (model, lifetime, tier): on any
+	// difference warming ends for the period, without another refresh. Otherwise (keep-warm off included) as before.
+	const timerState = (ctx: ExtensionContext): CacheState | undefined => {
+		const model = ctx.model;
+		if (!model) return undefined;
+		const entries = ctx.sessionManager.getBranch();
+		const state = stateOf(model, entries);
+		const p = period;
+		if (!owns(p)) return state;
+		const { fixed } = p;
+		const expiresAt = state.refreshedAt === undefined ? undefined : state.refreshedAt + fixed.ms;
+		const drift = p.ended ? undefined : driftReason(fixed, model, state, cacheTier(entries, model));
+		if (drift) {
+			const timer = { model: fixed.model, lifetimeSeconds: fixed.ms / 1000, lifetimeSource: fixed.source };
+			trace(ctx, { ...warmBase(ctx, p, expiresAt ?? Date.now(), timer), action: "skip", ...endWarm(p, "unable", drift), budget: budgetRecord(p) });
+		}
+		return { ...state, lifetime: { ms: fixed.ms, source: fixed.source }, expiresAt };
+	};
+
 	// The time limit takes effect: the cache already lasts to `idleSince + keepWarmMinutes` or beyond (the answer's own
 	// lifetime covers the window, or Pi's refresh from the run just ended carried it there), so no refresh goes out in
 	// this period. Recorded when it happens. A refresh of the extension's that carries the cache there says so itself.
@@ -677,6 +730,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		}
 		// Pi's own refresh from the run just ended may still be in flight; its usage entry moves the expiry when it lands.
 		if (piWarmAt !== undefined && Date.now() - piWarmAt < 60_000) return;
+		// Read again just before a refresh: a model, lifetime or tier other than the period's ends warming.
+		timerState(ctx);
+		if (p.ended) return;
 		const check = checkRequestPath(ctx.sessionManager.getBranch(), ctx.model, p.request);
 		if ("reason" in check) {
 			trace(ctx, { ...base, action: "skip", ...endWarm(p, "unable", check.reason), budget: budgetRecord(p) });
@@ -693,11 +749,14 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		let out = false;
 		let reserved = 0;
 		let late = false;
+		let held = false;
+		let refused: string | undefined;
 
 		const controller = new AbortController();
 		warming = controller;
 		const started = Date.now();
-		const thinkingLevel = pi.getThinkingLevel();
+		// The level the cached request was sent with, not the one set since.
+		const thinkingLevel = request.thinking ?? pi.getThinkingLevel();
 		void (async () => {
 			let response: AssistantMessage | undefined;
 			let error: string | undefined;
@@ -712,13 +771,25 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 						sessionId: ctx.sessionManager.getSessionId(),
 						signal: controller.signal,
 						onPayload: (params: unknown) => {
-							// The last moment before the request leaves: past the last safe moment it would write, not read.
+							// The last moment before the request leaves, in this order, nothing reserved before the end.
+							// Cancelled while it was being prepared (a run started): nothing goes out or is counted.
+							if (controller.signal.aborted) throw new Error("the refresh was cancelled before it went out");
+							// Pi got busy, or a message was queued, meanwhile: withheld, tried again until the last safe moment.
+							if (running || !ctx.isIdle() || ctx.hasPendingMessages()) {
+								held = true;
+								throw new Error("Pi is busy or has queued messages");
+							}
+							// Past the last safe moment it would write, not read.
 							if (Date.now() > lastSafe) {
 								late = true;
 								throw new Error("the cache was about to expire before the refresh went out");
 							}
+							// Never a refresh whose output is not capped.
 							const built = warmPayload(params, sent);
-							if ("reason" in built) throw new Error(built.reason);
+							if ("reason" in built) {
+								refused = built.reason;
+								throw new Error(built.reason);
+							}
 							// It goes out: reserved at the larger of its expected cost and what the last refresh really cost.
 							out = true;
 							reserved = reserveFor(budget, spending);
@@ -755,7 +826,14 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				return;
 			}
 			ifSessionAlive(() => {
-				if (late) {
+				if (held) {
+					// Tried again on the next ticks, as any passing hold-up.
+					if (p.doneFor === expiresAt) p.doneFor = undefined;
+					if (p.busyFor !== expiresAt) trace(ctx, { ...base, action: "skip", seconds, reason: "Pi got busy or a message was queued while the refresh was being prepared, so it was withheld; tried again until the last safe moment" });
+					p.busyFor = expiresAt;
+				} else if (refused) {
+					trace(ctx, { ...base, action: "skip", seconds, ...endWarm(p, "unable", refused), budget: budgetRecord(p) });
+				} else if (late) {
 					trace(ctx, { ...base, action: "skip", seconds, reason: "too late: the cache was about to expire before the refresh went out, so it was not sent" });
 				} else if (!response || response.stopReason === "error") {
 					const reason = error ?? response?.errorMessage ?? "the request failed";
@@ -767,7 +845,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					warmedAt = started;
 					const share = cachedShare(response.usage);
 					const missed = share < MIN_WARM_CACHED_SHARE;
-					const after = ctx.model ? stateOf(ctx.model, ctx.sessionManager.getBranch()).expiresAt : undefined;
+					const after = timerState(ctx)?.expiresAt;
 					const ended =
 						reached() ??
 						(missed
@@ -787,7 +865,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 
 	const startTimer = (ctx: ExtensionContext, compactAtExpiry = true) => {
 		stopTimer(ctx);
-		const readState = () => (ctx.model ? stateOf(ctx.model, ctx.sessionManager.getBranch()) : undefined);
+		const readState = () => timerState(ctx);
 		const first = readState();
 		if (first?.expiresAt === undefined) return;
 		let expiresAt = first.expiresAt;
@@ -852,7 +930,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const sharedKey = sharedPrefixKey(ctx.model, ctx.cwd);
 		let payload = sharedKey ? withSharedPrefixCache(event.payload, sharedKey) : event.payload;
 		if (isKimiOnMoonshot(ctx.model)) payload = withKimiLongCache(payload);
-		if (transcript) captured = { transcript, payload, model: ctx.model, at: Date.now() };
+		if (transcript) captured = { transcript, payload, model: ctx.model, at: Date.now(), thinking: pi.getThinkingLevel() };
 		return payload === event.payload ? undefined : payload;
 	});
 	pi.on("message_start", (event, ctx) => {
@@ -1207,7 +1285,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			description: "",
 		};
 		const describeWarm = () => {
-			warmItem.description = `Up to this long after Pi goes idle, re-send the last request with a one-token answer shortly before the cache expires, so your next message still reads it cheaply. Each refresh reads the whole context from the cache (about a tenth of the input price on Anthropic), and warming stops once refreshing has cost as much as one cache miss (writing the context again, less the cached read); a model without prices gets at most ${MAX_UNPRICED_REFRESHES} refreshes. While keep-warm is on, this extension is the only thing that keeps an idle cache warm, and Pi's own idle warming is told to stop; Pi still warms during a run. Sessions this extension cannot refresh itself are left to Pi's own warming: no cache lifetime or one under a minute, or a request that cannot be re-sent (Claude through pi-claude-bridge, or Claude's budget-based thinking). When warming ends, compact before expiry takes over. Now: ${keepWarmNote(ctx.model)}.`;
+			warmItem.description = `Up to this long after Pi goes idle, re-send the last request with a one-token answer shortly before the cache expires, so your next message still reads it cheaply. Each refresh reads the whole context from the cache (about a tenth of the input price on Anthropic), and warming stops once refreshing has cost as much as one cache miss (writing the context again, less the cached read); a model without prices gets at most ${MAX_UNPRICED_REFRESHES} refreshes. While keep-warm is on, this extension is the only thing that keeps an idle cache warm, and Pi's own idle warming is told to stop; Pi still warms during a run. Sessions this extension cannot refresh itself are left to Pi's own warming: no cache lifetime or one under a minute, or a request that cannot be re-sent (Claude through pi-claude-bridge, Claude's budget-based thinking, or an API other than Anthropic Messages, OpenAI Completions and OpenAI Responses, whose answer the extension cannot cap). When warming ends, compact before expiry takes over. Now: ${keepWarmNote(ctx.model)}.`;
 		};
 		describeWarm();
 		const items: SettingItem[] = [

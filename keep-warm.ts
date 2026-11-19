@@ -3,6 +3,24 @@ import { isPlainObject, type Payload } from "./cached-request.ts";
 
 const OUTPUT_LIMIT_KEYS = ["max_tokens", "max_output_tokens", "max_completion_tokens"] as const;
 
+/**
+ * The APIs whose requests the extension re-sends: for each, pi 1.5.2's own adapter was checked (tests/replay-adapters
+ * test drives it) to build the output limit of a refresh in one of OUTPUT_LIMIT_KEYS at the top level of the payload,
+ * the key the captured request carries it in:
+ * - anthropic-messages: `max_tokens`, always;
+ * - openai-completions: `max_tokens` or `max_completion_tokens`, as the model's compat says;
+ * - openai-responses: `max_output_tokens`, at least 16, when the model's compat supports it (else the captured request
+ *   has no limit, and the period is left to Pi).
+ * Every other API (Bedrock's `inferenceConfig.maxTokens`, Mistral's `maxTokens`, Gemini's `config.maxOutputTokens`,
+ * Codex without a limit, …) is left to Pi's own warming: a refresh there could generate a full answer.
+ */
+export const REPLAYABLE_APIS: ReadonlySet<string> = new Set(["anthropic-messages", "openai-completions", "openai-responses"]);
+
+/** The key the captured request carries its output limit in, or undefined when it has none the extension knows. */
+export function outputLimitKey(payload: Payload): string | undefined {
+	return OUTPUT_LIMIT_KEYS.find((key) => typeof payload[key] === "number");
+}
+
 /** A warm-up that read less than this share of its prompt from the cache wrote it again instead, so warming stops. */
 export const MIN_WARM_CACHED_SHARE = 0.9;
 
@@ -35,15 +53,20 @@ export function canReplay(captured: Payload): boolean {
 
 /**
  * The warm-up payload: the captured request exactly as it was sent, with only its output limit taken from `params`,
- * which the provider built for maxTokens 1 (some APIs raise that to their minimum).
+ * which the provider built for maxTokens 1 (some APIs raise that to their minimum). Refused when it would not carry
+ * that capped limit: none of the known keys in `params`, or a value that is the captured one.
  */
 export function warmPayload(params: unknown, captured: Payload): { payload: Payload } | { reason: string } {
 	if (!isPlainObject(params)) return { reason: "the provider payload is not an object" };
 	const payload: Payload = { ...captured };
+	let capped = false;
 	for (const key of OUTPUT_LIMIT_KEYS) {
-		if (key in params) payload[key] = params[key];
-		else delete payload[key];
+		if (key in params) {
+			payload[key] = params[key];
+			if (typeof params[key] === "number" && params[key] !== captured[key]) capped = true;
+		} else delete payload[key];
 	}
+	if (!capped) return { reason: "the provider did not build a capped output limit the extension knows, so the refresh could generate a full answer" };
 	return { payload };
 }
 

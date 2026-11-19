@@ -113,7 +113,11 @@ test("the warm-up re-sends the captured request unchanged except for the output 
 	const built = warmPayload({ model: "other", max_tokens: 1, messages: [] }, captured);
 	assert.deepEqual(built, { payload: { ...captured, max_tokens: 1 } });
 	assert.equal(captured.max_tokens, 64_000, "the captured request is not changed");
-	assert.deepEqual(warmPayload({ input: [] }, { input: ["x"], max_output_tokens: 32_000 }), { payload: { input: ["x"] } }, "a limit the provider leaves out is dropped");
+	// Never a refresh whose output is not capped: no known limit key from the provider, or the captured value again.
+	const uncapped = { reason: "the provider did not build a capped output limit the extension knows, so the refresh could generate a full answer" };
+	assert.deepEqual(warmPayload({ input: [] }, { input: ["x"], max_output_tokens: 32_000 }), uncapped, "a limit the provider leaves out");
+	assert.deepEqual(warmPayload({ inferenceConfig: { maxTokens: 1 } }, { messages: [], inferenceConfig: { maxTokens: 8192 } }), uncapped, "a limit under a key the extension does not know");
+	assert.deepEqual(warmPayload({ max_tokens: 64_000 }, captured), uncapped, "the captured value");
 	assert.deepEqual(warmPayload({ max_output_tokens: 16 }, { input: ["x"] }), { payload: { input: ["x"], max_output_tokens: 16 } });
 	assert.deepEqual(warmPayload("nope", captured), { reason: "the provider payload is not an object" });
 });

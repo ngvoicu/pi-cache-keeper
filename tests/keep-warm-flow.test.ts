@@ -41,6 +41,18 @@ interface Options {
 	hold?: (n: number) => boolean;
 	/** Footer statuses and notices are recorded (Pi's UI is there). */
 	ui?: boolean;
+	/** Overrides of the model (api, provider, id, compat, promptCache, …). */
+	model?: Record<string, unknown>;
+	/** The payload of the first request, as the provider adapter built it. */
+	sent?: Record<string, unknown>;
+	/** What the provider adapter builds for a refresh (maxTokens 1), handed to the extension's payload hook. */
+	params?: unknown;
+	/** Replaces the fake transport: given the extension's stream options, returns the stream (a real adapter). */
+	stream?: (options: Record<string, unknown> & { onPayload: (p: unknown) => unknown; signal: AbortSignal }) => { result: () => Promise<unknown> };
+	/** Entries on the branch before the first request. */
+	before?: unknown[];
+	/** Pi's thinking level when the first request is sent (later changed through `thinkingLevel.value`). */
+	level?: string;
 }
 
 function harness(options: Options = {}) {
@@ -53,8 +65,9 @@ function harness(options: Options = {}) {
 		events: { on: () => () => {}, emit: () => {} },
 		registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => unknown }) => commands.set(name, command.handler),
 		appendEntry: () => {},
-		getThinkingLevel: () => "high",
+		getThinkingLevel: () => thinkingLevel.value,
 	};
+	const thinkingLevel = { value: options.level ?? "high" };
 	cacheKeeper(pi as never);
 
 	const lifetime = options.lifetime ?? 3600;
@@ -67,14 +80,17 @@ function harness(options: Options = {}) {
 		contextWindow: 1_000_000,
 		maxTokens: 64_000,
 		cost: options.cost ?? NO_PRICES,
-	};
+		...options.model,
+	} as Record<string, unknown> & { provider: string; id: string; api: string };
 	const user = { role: "user", content: [{ type: "text", text: "hi" }], timestamp: 0 };
-	const reply = { role: "assistant", content: [{ type: "text", text: "hello" }], timestamp: 1_000, stopReason: "stop", usage: { input: 2, output: 5, cacheRead: cached, cacheWrite: 0 } };
+	const by = { provider: model.provider, model: model.id };
+	const reply = { role: "assistant", content: [{ type: "text", text: "hello" }], timestamp: 1_000, stopReason: "stop", ...by, usage: { input: 2, output: 5, cacheRead: cached, cacheWrite: 0 } };
 	const branch = [
+		...((options.before ?? []) as { type: string; id: string; parentId: null; timestamp: string; message: unknown }[]),
 		{ type: "message", id: "u", parentId: null, timestamp: new Date(0).toISOString(), message: user },
 		{ type: "message", id: "a", parentId: "u", timestamp: new Date(1_000).toISOString(), message: reply },
 	];
-	const sent = { model: "claude", max_tokens: 64_000, system: "s", messages: [{ role: "user", content: "hi" }], thinking: options.thinking ?? { type: "adaptive" } };
+	const sent: Record<string, unknown> & { messages: unknown[] } = (options.sent as never) ?? { model: "claude", max_tokens: 64_000, system: "s", messages: [{ role: "user", content: "hi" }], thinking: options.thinking ?? { type: "adaptive" } };
 	const warms: { payload: unknown; options: Record<string, unknown>; at: number }[] = [];
 	// What the provider reports for a refresh: the cached prompt read back, priced at the model's prices.
 	const refreshUsage = (fields: Fields = {}) => {
@@ -113,13 +129,25 @@ function harness(options: Options = {}) {
 			},
 		},
 		modelRegistry: {
+			isUsingOAuth: () => false,
+			getProvider: () => undefined,
 			streamSimple: (_model: unknown, _context: unknown, options2: Record<string, unknown> & { onPayload: (p: unknown) => unknown; signal: AbortSignal }) => {
 				state.attempts++;
 				state.beforePayload?.();
+				if (options.stream) {
+					return options.stream({
+						...options2,
+						onPayload: async (params: unknown) => {
+							const out = await options2.onPayload(params);
+							warms.push({ payload: out, options: options2, at: Date.now() });
+							return out;
+						},
+					});
+				}
 				let payload: unknown;
 				let thrown: unknown;
 				try {
-					payload = options2.onPayload({ model: "rebuilt", max_tokens: 1, messages: [] });
+					payload = options2.onPayload(options.params ?? { model: "rebuilt", max_tokens: 1, messages: [] });
 				} catch (error) {
 					thrown = error;
 				}
@@ -166,7 +194,7 @@ function harness(options: Options = {}) {
 		branch.push({ type: "message", id: `u${runs}`, parentId: null, timestamp: new Date().toISOString(), message } as never);
 		if (answer) {
 			const used = answer === "error" ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } : answer === "uncached" ? { input: 900, output: 5, cacheRead: 0, cacheWrite: 0 } : { input: 2, output: 5, cacheRead: cached, cacheWrite: 0 };
-			const reply2 = { role: "assistant", content: [{ type: "text", text: "ok" }], timestamp: Date.now(), stopReason: answer === true || answer === "uncached" ? "stop" : answer, usage: used };
+			const reply2 = { role: "assistant", content: [{ type: "text", text: "ok" }], timestamp: Date.now(), stopReason: answer === true || answer === "uncached" ? "stop" : answer, ...by, usage: used };
 			request([user, message], { ...sent, messages: [...sent.messages, { role: "user", content: `more ${runs}` }] }, reply2);
 			branch.push({ type: "message", id: `a${runs}`, parentId: null, timestamp: new Date().toISOString(), message: reply2 } as never);
 		}
@@ -188,7 +216,7 @@ function harness(options: Options = {}) {
 		await commands.get(name)?.("", ctx);
 		return notes.join("\n");
 	};
-	return { emit, idle, warms, state, sent, model, branch, statuses, notes, command, decide, run, usage: refreshUsage, ctx, release: () => pending?.() };
+	return { emit, idle, warms, state, sent, model, branch, statuses, notes, command, decide, run, usage: refreshUsage, ctx, thinkingLevel, release: () => pending?.() };
 }
 
 const allTraces = () =>
@@ -329,7 +357,17 @@ for (const [label, options] of [
 	["a 30-second lifetime", { lifetime: 30 }],
 	["a request without a payload (pi-claude-bridge)", { lifetime: 300, bridge: true }],
 	["a request that cannot be replayed (budget-based thinking)", { lifetime: 300, thinking: { type: "enabled", budget_tokens: 8000 } }],
-] as const) {
+	// Output limits under keys the extension does not cap (pi 1.5.2's Bedrock and Mistral adapters, as the review captured
+	// them): a refresh would keep the captured 8,192 and could generate a full answer.
+	["Amazon Bedrock: inferenceConfig.maxTokens", { lifetime: 300, model: { api: "bedrock-converse-stream" }, sent: { modelId: "m", messages: [{ role: "user", content: [{ text: "hi" }] }], inferenceConfig: { maxTokens: 8192 } }, params: { inferenceConfig: { maxTokens: 1 } } }],
+	["Mistral: maxTokens", { lifetime: 300, model: { api: "mistral-conversations" }, sent: { model: "m", stream: true, messages: [{ role: "user", content: "hi" }], maxTokens: 8192 }, params: { maxTokens: 1 } }],
+	// Gemini's `contents`, which the send path does not accept.
+	["Gemini: contents", { lifetime: 300, model: { api: "google-generative-ai" }, sent: { model: "g", contents: [{ role: "user", parts: [{ text: "hi" }] }], config: { maxOutputTokens: 8192 } }, params: { config: { maxOutputTokens: 1 } } }],
+	// Codex sends no output limit at all.
+	["Codex: no output limit", { lifetime: 300, model: { api: "openai-codex-responses" }, sent: { model: "c", instructions: "s", input: [{ role: "user", content: "hi" }] }, params: {} }],
+	// An API the extension re-sends, whose request carried no limit (OpenAI Responses without supportsMaxOutputTokens).
+	["OpenAI Responses without an output limit", { lifetime: 300, model: { api: "openai-responses" }, sent: { model: "o", input: [{ role: "user", content: "hi" }] }, params: {} }],
+] as Array<readonly [string, Options]>) {
 	test(`R1: a period the extension cannot own (${label}) is Pi's: the handler returns nothing, the extension sends nothing, Pi refreshes as with keep-warm off`, { skip: noWarmer }, async (t) => {
 		const runOnce = async (keepWarmMinutes: number) => {
 			clock();
@@ -368,6 +406,12 @@ test("R1: /cache-keeper says why a period is left to Pi's own warming", async (t
 	h = harness({ lifetime: 300, thinking: { type: "enabled", budget_tokens: 8000 } });
 	h.emit("agent_settled");
 	assert.match(await h.command("cache-keeper"), /at most 10 refreshes \(this model has no prices, so the cost of a miss is unknown\); this session is left to Pi's own warming: Claude's budget-based thinking/);
+	h = harness({ lifetime: 300, model: { api: "bedrock-converse-stream" }, sent: { modelId: "m", messages: [], inferenceConfig: { maxTokens: 8192 } } });
+	h.emit("agent_settled");
+	assert.match(await h.command("cache-keeper"), /left to Pi's own warming: this API's requests are not re-sent by the extension \(bedrock-converse-stream\)/);
+	h = harness({ lifetime: 300, model: { api: "openai-responses" }, sent: { model: "o", input: [] } });
+	h.emit("agent_settled");
+	assert.match(await h.command("cache-keeper"), /left to Pi's own warming: the request carries no output limit the extension can cap/);
 });
 
 test("R1: a run whose last request failed before using the cache: the period is its earlier answer's, owned, and that request is re-sent", async (t) => {
@@ -830,6 +874,248 @@ test("R6: what the settings and /cache-keeper say", async (t) => {
 	assert.match(await off.command("cache-keeper"), /\nkeep warm: off\n/);
 });
 
+// ----------------------------------------------------------------- R7: when in doubt, do not send and do not stop Pi
+
+test("R7/1: at the last moment, a refresh whose payload would not carry the provider-built capped limit is withheld, and warming ends (unable)", async (t) => {
+	t.after(() => mock.timers.reset());
+	for (const [label, params] of [
+		["no known key from the provider", { model: "rebuilt", messages: [], inferenceConfig: { maxTokens: 1 } }],
+		["the captured value", { model: "rebuilt", max_tokens: 64_000, messages: [] }],
+	] as const) {
+		clock();
+		fresh({ compactBeforeExpiry: false });
+		const h = harness({ lifetime: 300, cost: WITH_WRITE, params });
+		h.emit("agent_settled");
+		await h.idle(HOUR);
+		assert.equal(h.state.attempts, 1, label);
+		assert.equal(h.warms.length, 0, `${label}: nothing went out`);
+		const stops = traces().filter((r) => r.stop);
+		assert.equal(stops.length, 1);
+		assert.equal(stops[0].stop, "unable");
+		assert.match(stops[0].reason, /did not build a capped output limit/);
+		assert.equal(stops[0].budget.spent, 0, "nothing reserved");
+	}
+});
+
+test("R7/2: a lifetime that reads differently during a period ends warming (unable) without another refresh", async (t) => {
+	t.after(() => mock.timers.reset());
+	const saved = process.env.PI_CACHE_RETENTION;
+	t.after(() => (saved === undefined ? delete process.env.PI_CACHE_RETENTION : (process.env.PI_CACHE_RETENTION = saved)));
+	delete process.env.PI_CACHE_RETENTION;
+	const cases: [string, (h: ReturnType<typeof harness>) => void, RegExp][] = [
+		// The retention switched to long in the settings 60 s into the period: the request was written for 5 min.
+		["retention switched to long", () => (process.env.PI_CACHE_RETENTION = "long"), /^the cache lifetime now reads 60 min, the cached request was written with 5 min$/],
+		// A proxy said another upstream answered, whose lifetime is unknown.
+		["lifetime unknown", (h) => delete h.model.promptCache, /^the cache lifetime is now unknown, the cached request was written with 5 min$/],
+		// The declared lifetime fell from 300 s to 30 s.
+		["lifetime lowered", (h) => (h.model.promptCache = { short: 30, long: 30 }), /^the cache lifetime now reads 30 s, the cached request was written with 5 min$/],
+	];
+	for (const [label, change, reason] of cases) {
+		clock();
+		fresh({ compactBeforeExpiry: false });
+		delete process.env.PI_CACHE_RETENTION;
+		const h = harness({ lifetime: 300, cost: WITH_WRITE, model: { promptCache: { short: 300, long: 3600 } } });
+		h.emit("agent_settled");
+		await h.idle(60_000);
+		change(h);
+		await h.idle(2 * HOUR);
+		assert.equal(h.state.attempts, 0, `${label}: no refresh`);
+		const stops = traces().filter((r) => r.stop);
+		assert.equal(stops.length, 1, label);
+		assert.equal(stops[0].stop, "unable");
+		assert.match(stops[0].reason, reason);
+		assert.equal(stops[0].lifetimeSeconds, 300, "logged with the period's lifetime");
+		assert.deepEqual(h.decide(), { action: "stop" }, "Pi stays as it is for the period");
+	}
+});
+
+test("R7/2: another model's reported tier does not set the lifetime of the period's request", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	// A Claude bridge answer wrote a 1-hour cache; then this model answered, writing its short (5-min) one.
+	const bridge = { role: "assistant", content: [], timestamp: 500, stopReason: "stop", provider: "claude-bridge", model: "opus", usage: { input: 2, output: 5, cacheRead: 0, cacheWrite: 900, cacheWrite1h: 900 } };
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, model: { promptCache: { short: 300, long: 3600 } }, before: [{ type: "message", id: "b", parentId: null, timestamp: new Date(500).toISOString(), message: bridge }] });
+	h.emit("agent_settled");
+	await h.idle(400_000);
+	assert.equal(h.warms[0]?.at, 276_000, "25 s before the 5-minute expiry, not the 1-hour one");
+});
+
+test("R7/3: Pi's refresh during a long answer, appended before it, counts: the extension refreshes before the cache expires", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE });
+	h.emit("agent_settled");
+	await h.idle(100_000);
+	// A run at 101 s: Pi refreshes the new request at 371 s while the answer streams; the answer, timestamped when it
+	// started (101 s), is appended when it ends, at 420 s, after Pi's cache_warm entry.
+	h.state.idle = false;
+	h.emit("agent_start");
+	const ask = { role: "user", content: [{ type: "text", text: "go" }], timestamp: Date.now() };
+	const payload = { ...h.sent, messages: [...h.sent.messages, { role: "user", content: "go" }] };
+	h.branch.push({ type: "message", id: "u1", parentId: null, timestamp: new Date().toISOString(), message: ask } as never);
+	h.emit("context_with_system", { messages: [ask] });
+	h.emit("before_provider_request", { payload });
+	const answer = { role: "assistant", content: [{ type: "text", text: "long" }], timestamp: Date.now(), stopReason: "stop", provider: h.model.provider, model: h.model.id, usage: { input: 2, output: 5, cacheRead: 600_000, cacheWrite: 0 } };
+	mock.timers.tick(270_000);
+	h.ctx.sessionManager.appendUsage("cache_warm", h.model.provider, h.model.id, h.usage());
+	mock.timers.tick(49_000);
+	h.emit("message_end", { message: answer });
+	h.branch.push({ type: "message", id: "a1", parentId: null, timestamp: new Date().toISOString(), message: answer } as never);
+	h.state.idle = true;
+	h.emit("agent_settled");
+	await h.idle(400_000);
+	assert.equal(h.warms[0]?.at, 646_000, "25 s before 671 s, the expiry Pi's 371-s refresh set");
+	assert.deepEqual(h.warms[0].payload, { ...payload, max_tokens: 1 });
+});
+
+test("R7/5: a refresh cancelled while it was being prepared reserves nothing and is tried again; ten really go out", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ keepWarmMinutes: 1440, compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300 });
+	// An empty run starts while the tenth refresh is being prepared: the adapter calls the payload hook with the
+	// refresh's signal already aborted.
+	h.state.beforePayload = () => {
+		if (h.state.attempts !== 10) return;
+		h.state.idle = false;
+		h.emit("agent_start");
+	};
+	h.emit("agent_settled");
+	for (let i = 0; i < 5000 && h.state.attempts < 10; i++) await h.idle(1000);
+	await flush();
+	assert.equal(h.warms.length, 9);
+	h.state.idle = true;
+	h.emit("agent_settled");
+	await h.idle(HOUR);
+	assert.equal(h.warms.length, 10, "the tenth went out after the run");
+	assert.equal(traces().filter((r) => r.action === "cancelled").length, 0, "nothing went out, nothing was counted");
+	const stop = traces().find((r) => r.stop);
+	assert.deepEqual([stop.stop, stop.budget], ["budget", { unit: "refreshes", spent: 10, limit: 10 }]);
+});
+
+test("R7/5: a message queued while the refresh was being prepared: withheld, then sent once the queue clears", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE });
+	h.state.beforePayload = () => {
+		if (h.state.attempts === 1) h.state.pending = true;
+	};
+	h.emit("agent_settled");
+	await h.idle(278_000);
+	assert.equal(h.state.attempts, 1);
+	assert.equal(h.warms.length, 0, "withheld with the message queued");
+	h.state.pending = false;
+	await h.idle(5_000);
+	assert.deepEqual(h.warms.map((w) => w.at), [280_000], "sent on the first tick the queue was clear");
+	const records = traces().filter((r) => r.event === "warm");
+	assert.match(records[0].reason, /^Pi got busy or a message was queued while the refresh was being prepared/);
+	assert.ok(near(records[1].budget.spent, REPORTED), "only what went out is counted");
+});
+
+// pi 1.5.2's own adapters, driven for each API the extension re-sends: the captured request is what the adapter built
+// for an answer of up to 8,192 tokens; the refresh goes through the extension and the same adapter, which calls the
+// payload hook (stopped there: nothing is sent). The outgoing limit must be the one the adapter built for a 1-token
+// answer, in the key the captured request carried it in.
+const catalogFile = new URL("../node_modules/@earendil-works/pi-ai/dist/models.generated.js", import.meta.url);
+const { MODELS } = existsSync(catalogFile) ? await import(catalogFile.href) : { MODELS: undefined };
+const noCatalog = MODELS ? false : "the installed pi-ai has no model catalog";
+const adapterUser = { role: "user", content: [{ type: "text", text: "Explain the changes in detail." }], timestamp: 1000 };
+const realAdapter = async (model: { api: string }) => (await import(`@earendil-works/pi-ai/api/${model.api}`)) as { streamSimple: (model: unknown, context: unknown, options: unknown) => { result: () => Promise<unknown> } };
+async function adapterPayload(model: { api: string }, options: Record<string, unknown>): Promise<Record<string, unknown>> {
+	const { streamSimple } = await realAdapter(model);
+	let got: Record<string, unknown> | undefined;
+	await streamSimple(model, { messages: [adapterUser] }, {
+		apiKey: "sk-fixture",
+		cacheRetention: "short",
+		sessionId: "s1",
+		maxRetries: 0,
+		...options,
+		onPayload: (payload: Record<string, unknown>) => {
+			got = payload;
+			throw new Error("captured without transport");
+		},
+	}).result();
+	assert.ok(got, "the adapter built a payload");
+	return got;
+}
+function viaRealAdapter(model: { api: string }) {
+	return (options: Record<string, unknown> & { onPayload: (p: unknown) => unknown }) => {
+		let stream: { result: () => Promise<unknown> } | undefined;
+		return {
+			result: async () => {
+				const { streamSimple } = await realAdapter(model);
+				stream = streamSimple(model, { messages: [adapterUser] }, {
+					...options,
+					apiKey: "sk-fixture",
+					cacheRetention: "short",
+					onPayload: async (params: unknown) => {
+						await options.onPayload(params);
+						throw new Error("captured without transport");
+					},
+				});
+				return stream.result();
+			},
+		};
+	};
+}
+
+for (const [provider, id, key, capped] of [
+	["anthropic", "claude-sonnet-4-6", "max_tokens", 1],
+	["moonshotai", "kimi-k3", "max_tokens", 1],
+	["cerebras", "gpt-oss-120b", "max_completion_tokens", 1],
+	["openai", "gpt-6.1-sol", "max_output_tokens", 16],
+] as const) {
+	test(`R7/1 allow-list: pi 1.5.2's ${provider}/${id} adapter builds the refresh's limit in ${key}, and it goes out capped (${capped})`, { skip: noCatalog }, async (t) => {
+		clock();
+		t.after(() => mock.timers.reset());
+		const realFetch = globalThis.fetch;
+		globalThis.fetch = (async () => {
+			throw new Error("no network in tests");
+		}) as typeof fetch;
+		t.after(() => (globalThis.fetch = realFetch));
+		fresh({ compactBeforeExpiry: false });
+		const real = MODELS[provider]?.[id];
+		assert.ok(real, `${provider}/${id} in pi's catalog`);
+		const sent = await adapterPayload(real, { maxTokens: 8192, reasoning: "high" });
+		assert.equal(sent[key], 8192);
+		// The catalog's prices may have no cache discount (a miss then costs nothing to avoid): priced as Claude here.
+		const h = harness({ lifetime: 300, model: { ...real, cost: WITH_WRITE, promptCache: { short: 300, long: 300 } }, sent, stream: viaRealAdapter(real) });
+		h.emit("agent_settled");
+		assert.deepEqual(h.decide(), { action: "stop" }, `${real.api} is owned`);
+		await h.idle(280_000);
+		await flush();
+		assert.equal(h.warms.length, 1);
+		const out = h.warms[0].payload as Record<string, unknown>;
+		assert.equal(out[key], capped);
+		assert.deepEqual(out, { ...sent, [key]: capped }, "otherwise exactly the captured request");
+	});
+}
+
+test("R7/1: a refresh is built with the thinking level its request was sent with, so a level raised since does not lift the limit", { skip: noCatalog }, async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	const realFetch = globalThis.fetch;
+	globalThis.fetch = (async () => {
+		throw new Error("no network in tests");
+	}) as typeof fetch;
+	t.after(() => (globalThis.fetch = realFetch));
+	fresh({ compactBeforeExpiry: false });
+	// Claude with budget-based thinking: with thinking on, the adapter builds 16,385 tokens for a "1-token" answer.
+	const real = MODELS.anthropic["claude-sonnet-4-5"];
+	assert.equal((await adapterPayload(real, { maxTokens: 1, reasoning: "high" })).max_tokens, 16_385);
+	const sent = await adapterPayload(real, { maxTokens: 8192 });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, level: "off", model: { ...real, promptCache: { short: 300, long: 300 } }, sent, stream: viaRealAdapter(real) });
+	h.emit("agent_settled");
+	h.thinkingLevel.value = "high";
+	await h.idle(280_000);
+	await flush();
+	assert.equal(h.warms.length, 1);
+	assert.equal((h.warms[0].payload as Record<string, unknown>).max_tokens, 1);
+});
+
 test("no file imports evaluateCacheWarming (missing before pi-ai 1.5.1)", () => {
 	const root = new URL("..", import.meta.url);
 	const files = [...readdirSync(root).filter((name) => name.endsWith(".ts")).map((name) => new URL(name, root)), ...readdirSync(new URL("tests/", root)).filter((name) => name.endsWith(".ts")).map((name) => new URL(`tests/${name}`, root))];
@@ -837,7 +1123,5 @@ test("no file imports evaluateCacheWarming (missing before pi-ai 1.5.1)", () => 
 	for (const file of files) assert.doesNotMatch(readFileSync(file, "utf8"), /^\s*import\s[^;]*\bevaluateCacheWarming\b/m, file.pathname);
 });
 
-test.after(() => {
-	delete process.env.PI_CODING_AGENT_DIR;
-	rmSync(dir, { recursive: true });
-});
+// At exit rather than in a root after-hook: that hook can run while a test still awaits a real adapter.
+process.on("exit", () => rmSync(dir, { recursive: true, force: true }));

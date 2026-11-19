@@ -17,6 +17,8 @@ export interface CacheState {
 	lifetime?: { ms: number; source: string };
 	cached: boolean;
 	expiresAt?: number;
+	/** When the cache was last read or written: the answer, or a later refresh (Pi's or this extension's). */
+	refreshedAt?: number;
 	replied: boolean;
 	/**
 	 * When the latest answer arrived: the latest assistant message whose usage reports a cache read or write, whatever
@@ -50,34 +52,45 @@ export function cacheTier(entries: SessionEntry[], model?: { provider: string; i
 /**
  * `warmedAt` is when this extension last re-sent the cached request to keep it warm. Pi's own refreshes are
  * `cache_warm` usage entries; the extension's are kept in memory, because an extension cannot add usage entries.
- * `fromRealAnswer` (keep-warm on): the expiry is counted from the latest real answer, so a failed or aborted answer
- * whose usage reports a cache read or write moves it too; otherwise such an answer is skipped, as before.
+ * `keepWarmOn` changes three things, so the countdown follows the cache the period keeps warm; with it off everything
+ * is counted as before:
+ * - the expiry is counted from the latest real answer, so a failed or aborted answer whose usage reports a cache read
+ *   or write moves it too (otherwise such an answer is skipped);
+ * - a `cache_warm` entry later than the answer counts wherever it sits: Pi appends an answer when it has finished
+ *   streaming, with the timestamp of its start, so Pi's refresh during a long answer can come before it on the branch;
+ * - the tier is the one the model's own answers reported (as `cacheTier` with a model): another model's cache is
+ *   another cache.
  */
-export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?: number, fromRealAnswer = false): CacheState {
+export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?: number, keepWarmOn = false): CacheState {
 	let refreshedAt: number | undefined;
+	let latestWarm: number | undefined;
 	let answer: { at: number; prompt: number } | undefined;
 	let reported: "short" | "long" | undefined;
 	let replied = false;
 	for (const entry of entries) {
 		if (entry.type === "compaction") {
-			refreshedAt = reported = answer = undefined;
+			refreshedAt = reported = answer = latestWarm = undefined;
 			replied = false;
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
 			const { input, cacheRead, cacheWrite, cacheWrite1h } = entry.message.usage;
-			if (cacheWrite > 0 && cacheWrite1h !== undefined) reported = cacheWrite1h > 0 ? "long" : "short";
+			const own = !keepWarmOn || (entry.message.provider === model.provider && entry.message.model === model.id);
+			if (own && cacheWrite > 0 && cacheWrite1h !== undefined) reported = cacheWrite1h > 0 ? "long" : "short";
 			const failed = entry.message.stopReason === "error" || entry.message.stopReason === "aborted";
 			if (cacheRead + cacheWrite > 0 || !failed) answer = { at: entry.message.timestamp, prompt: input + cacheRead + cacheWrite };
 			// A failed request may not have reached the cache.
 			if (entry.message.stopReason === "error" || entry.message.stopReason === "aborted") {
-				if (fromRealAnswer && cacheRead + cacheWrite > 0) refreshedAt = entry.message.timestamp;
+				if (keepWarmOn && cacheRead + cacheWrite > 0) refreshedAt = entry.message.timestamp;
 				continue;
 			}
 			replied = true;
 			refreshedAt = cacheRead + cacheWrite > 0 ? entry.message.timestamp : undefined;
-		} else if (entry.type === "usage" && entry.kind === "cache_warm" && refreshedAt !== undefined) {
-			refreshedAt = Math.max(refreshedAt, Date.parse(entry.timestamp));
+		} else if (entry.type === "usage" && entry.kind === "cache_warm") {
+			const at = Date.parse(entry.timestamp);
+			latestWarm = Math.max(latestWarm ?? at, at);
+			if (refreshedAt !== undefined) refreshedAt = Math.max(refreshedAt, at);
 		}
 	}
+	if (keepWarmOn && refreshedAt !== undefined && latestWarm !== undefined) refreshedAt = Math.max(refreshedAt, latestWarm);
 	// A refresh before the latest real request (or before a compaction, which leaves refreshedAt unset) is stale.
 	if (refreshedAt !== undefined && warmedAt !== undefined) refreshedAt = Math.max(refreshedAt, warmedAt);
 	const declared = model.promptCache?.[reported ?? (process.env.PI_CACHE_RETENTION === "long" ? "long" : "short")];
@@ -90,5 +103,5 @@ export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?
 		lifetime = { ms: KIMI_TTL_SECONDS[long ? "long" : "short"] * 1000, source: long ? "Kimi's 1-hour option" : "Kimi's default" };
 	}
 	const expiresAt = lifetime && refreshedAt !== undefined ? refreshedAt + lifetime.ms : undefined;
-	return { lifetime, cached: refreshedAt !== undefined, expiresAt, replied, ...(answer ? { answeredAt: answer.at, answerPrompt: answer.prompt } : {}) };
+	return { lifetime, cached: refreshedAt !== undefined, expiresAt, ...(refreshedAt === undefined ? {} : { refreshedAt }), replied, ...(answer ? { answeredAt: answer.at, answerPrompt: answer.prompt } : {}) };
 }
