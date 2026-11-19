@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.1] - 2026-11-18
+
+### Changed
+- **The footer when providers.dev can't be reached** — Until now the footer showed nothing of the model data before a first fetch worked, `sub` / `api` included, and said nothing about why. When that fetch fails (providers.dev blocked or down) it now reads `· sub · providers.dev: no data, fetch failed · cache in use: short`, and with `PI_OFFLINE` `providers.dev: no data (PI_OFFLINE)`. While the first fetch runs it still shows nothing.
+- **A failed refresh is shown** — The saved data stays in use, as before, and the footer now ends with `⚠ refresh failed: saved data` until a refresh works again.
+
 ## [Unreleased]
 
 ### Documentation

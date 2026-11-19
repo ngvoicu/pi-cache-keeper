@@ -88,6 +88,7 @@ import {
 	type Access,
 	type DataStore,
 	type Fetch,
+	type FetchState,
 	type Found,
 } from "./model-data.ts";
 
@@ -291,11 +292,14 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		return { ...model, promptCache };
 	};
 
-	// The footer: what providers.dev has for the current model.
+	// The footer: what providers.dev has for the current model. Before any data was fetched it shows only when no fetch
+	// is coming (it failed, or PI_OFFLINE), so `sub` / `api` and the tier in use still show and the footer says why.
 	const showData = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
 		const model = ctx.model;
-		if (!config.modelData || !model || data.checkedAt === undefined) return ctx.ui.setStatus(DATA_STATUS_KEY, undefined);
+		const never = data.checkedAt === undefined;
+		const fetch: FetchState | undefined = never ? (dataError !== undefined ? "failed" : process.env.PI_OFFLINE ? "offline" : undefined) : dataError !== undefined ? "stale" : undefined;
+		if (!config.modelData || !model || (never && !fetch)) return ctx.ui.setStatus(DATA_STATUS_KEY, undefined);
 		const { theme } = ctx.ui;
 		const color = (state: string) => (state === "found" ? "success" : state === "missing" ? "dim" : "warning");
 		// Claude Code picks the tier for the bridge model.
@@ -307,7 +311,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const via = model.api === BRIDGE_API ? undefined : accessVia(lastAnswer ? { upstreams: lastAnswer } : access);
 		ctx.ui.setStatus(
 			DATA_STATUS_KEY,
-			formatFieldStates(findFacts(lookupsFor(model, access), data.providers), (text, state) => theme.fg(color(state), text), { served, tier, via }),
+			formatFieldStates(findFacts(lookupsFor(model, access), data.providers), (text, state) => theme.fg(color(state), text), { served, tier, via, fetch }),
 		);
 	};
 

@@ -176,6 +176,18 @@ test("the footer says what was found: a lifetime evaluations found unsafe counts
 		"· window <found:✓> · cache short <assumed:⚠> · long <found:✓> · price <found:✓> · <assumed:⚠ login or API key unknown: shorter values>",
 	);
 	assert.equal(formatFieldStates(exact("openai", "nope")), "· providers.dev: no data for this model");
+	// Nothing ever fetched: the footer says why, and still shows how the model is reached and the tier in use.
+	const none = findFacts([{ provider: "openai-codex", model: "gpt-6.1-sol" }], {});
+	assert.equal(
+		formatFieldStates(none, (text, state) => `<${state}:${text}>`, { via: "sub", tier: "short", fetch: "failed" }),
+		"· sub · providers.dev: no data, <assumed:fetch failed> · cache in use: short",
+	);
+	assert.equal(formatFieldStates(none, undefined, { via: "api", fetch: "offline" }), "· api · providers.dev: no data (PI_OFFLINE)");
+	// The saved data after a failed refresh: shown as it is, with a warning at the end.
+	assert.equal(
+		formatFieldStates(exact("openai-codex", "gpt-6.1-sol"), undefined, { via: "sub", fetch: "stale" }),
+		"· sub · window ✓ · cache short ✓ · long ✗ · price ✓ · ⚠ refresh failed: saved data",
+	);
 	assert.equal(describeFound(exact("openai-codex", "gpt-6.1-sol")), "openai-codex/gpt-6.1-sol: window 922,000, short cache 5 min, price $2/$10 per million");
 	assert.equal(describeFound(exact("devin", "swe-2")), "devin/swe-2: window at least 300,499, no safe short cache lifetime");
 	assert.equal(

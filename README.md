@@ -52,12 +52,15 @@ The lifetime is the model's declared one (which [providers.dev](#model-data-from
 | `?` (warning color) | found for some of the possible credentials but not all, or prices that differ: not used |
 | `(in use)` | the cache tier in use: the one the model's last answer says it wrote (Anthropic tells), else the one Pi asks for (`cacheRetention`) |
 | `providers.dev: no data for this model · cache in use: long` | providers.dev has no entry for the model; the tier in use is still shown |
+| `providers.dev: no data, fetch failed` | nothing was ever fetched: providers.dev could not be reached (blocked, or down). `sub` / `api` and the tier in use still show; `/cache-keeper` has the reason, and the next session start or `/cache-keeper-refresh` tries again |
+| `providers.dev: no data (PI_OFFLINE)` | nothing was ever fetched, and `PI_OFFLINE` stops it |
 
 A warning at the end of the line says when the values may not hold:
 
 - `⚠ login or API key unknown: shorter values`: some values are guesses (`⚠`), because the model may be served by a login or an API key.
 - `⚠ no entry for this login: shorter values`: the same for a login providers.dev has no entry of its own for (Pi's ChatGPT login on `openai`).
 - `⚠ answered by an API key` (or `a login`, or `another account`): through a proxy, the last answer came from another kind of credential than the values are for. The countdown then follows the lifetime of what answered.
+- `⚠ refresh failed: saved data`: the last refresh failed, so the values are those fetched before. `/cache-keeper` has the reason.
 
 ## Commands
 
@@ -239,7 +242,7 @@ A model is then looked up like the same model used directly. When several upstre
 
 ### Fetching, privacy, turning it off
 
-**When it fetches.** At the start of an interactive session, when the saved data is a day old or Pi can use a provider there is no data for. One small request asks whether the dataset changed; only then are the providers you can use downloaded (a few dozen kilobytes). A failed fetch keeps the saved data. Nothing is fetched on its own in print or JSON mode or with `PI_OFFLINE` set. `/cache-keeper-refresh` fetches now.
+**When it fetches.** At the start of an interactive session, when the saved data is a day old or Pi can use a provider there is no data for. One small request asks whether the dataset changed; only then are the providers you can use downloaded (a few dozen kilobytes). A failed fetch keeps the saved data, and [the footer](#the-footer) says so. Until a first fetch works, Pi has no cache lifetime from here, so a model whose lifetime only providers.dev gives (through a proxy, most of them) gets no countdown and is not compacted before expiry; compacting when full still works. Nothing is fetched on its own in print or JSON mode or with `PI_OFFLINE` set. `/cache-keeper-refresh` fetches now.
 
 **What is sent.** The names of the providers Pi has credentials for, as query parameters to a public read-only API. No key, no account, nothing about your sessions or prompts.
 

@@ -259,6 +259,13 @@ test("/cache-keeper-refresh fetches again, keeps a value the user set, and a fai
 	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
 	assert.match(h.notices.at(-1)!, /could not refresh the model data: offline\. The saved data stays in use\./);
 	assert.equal(readFileSync(modelsPath, "utf8"), before);
+	assert.equal(
+		h.statuses.get("cache-keeper-data"),
+		"· sub or api · window ✓ · cache short ⚠ · long ? (in use) · price ✓ · ⚠ login or API key unknown: shorter values · ⚠ refresh failed: saved data",
+	);
+	// A refresh that works again takes the warning away.
+	h.state.online = true;
+	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
 	assert.equal(h.statuses.get("cache-keeper-data"), "· sub or api · window ✓ · cache short ⚠ · long ? (in use) · price ✓ · ⚠ login or API key unknown: shorter values");
 });
 
@@ -387,6 +394,7 @@ test("nothing is fetched on its own in PI_OFFLINE mode or without a UI, and mode
 	offline.handlers.get("session_start")!({ reason: "startup" }, offline.ctx);
 	await offline.settle();
 	assert.deepEqual(offline.requests, []);
+	assert.equal(offline.statuses.get("cache-keeper-data"), "· api · providers.dev: no data (PI_OFFLINE) · cache in use: long");
 	delete process.env.PI_OFFLINE;
 	const print = harness();
 	print.handlers.get("session_start")!({ reason: "startup" }, { ...print.ctx, hasUI: false });
@@ -399,4 +407,19 @@ test("nothing is fetched on its own in PI_OFFLINE mode or without a UI, and mode
 	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
 	assert.match(h.notices.at(-1)!, /models\.json is not plain JSON .* so it is left as it is/);
 	assert.equal(readFileSync(modelsPath, "utf8"), commented);
+});
+
+test("providers.dev blocked from the start: the footer says so, and still shows how the model is reached", async () => {
+	rmSync(storePath, { force: true });
+	writeFileSync(modelsPath, "{}");
+	const h = harness({ online: false });
+	h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
+	assert.equal(h.statuses.get("cache-keeper-data"), undefined, "nothing is shown while the first fetch runs");
+	await h.settle();
+	assert.equal(h.statuses.get("cache-keeper-data"), "· api · providers.dev: no data, fetch failed · cache in use: long");
+	assert.equal(h.notices.length, 0, "a refresh at the start fails without a notice");
+	// Reachable again: the data replaces the message.
+	h.state.online = true;
+	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
+	assert.doesNotMatch(h.statuses.get("cache-keeper-data")!, /fetch failed|refresh failed/);
 });

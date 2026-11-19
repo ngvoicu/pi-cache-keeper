@@ -355,6 +355,15 @@ export const UNKNOWN_ACCESS_WARNING = "⚠ login or API key unknown: shorter val
 /** The same, when the login is known but providers.dev has no entry of its own for it (Pi's ChatGPT login on OpenAI). */
 export const NO_LOGIN_ENTRY_WARNING = "⚠ no entry for this login: shorter values";
 const servedWarning = (via: Via) => `⚠ answered by ${via === "api" ? "an API key" : via === "sub" ? "a login" : "another account"}`;
+/** Painted in the warning color, at the end of the footer, when the saved data is shown because a refresh failed. */
+export const REFRESH_FAILED_WARNING = "⚠ refresh failed: saved data";
+
+/**
+ * How fetching from providers.dev went, when the footer should say it: nothing was ever fetched because the fetch
+ * failed (`failed`, providers.dev blocked or down) or because Pi runs with PI_OFFLINE (`offline`), or the saved data is
+ * shown because the last refresh failed (`stale`).
+ */
+export type FetchState = "failed" | "offline" | "stale";
 
 /**
  * The footer text: "· window ✓ · cache short ✓ · long ✗ · price ✓", led by a dot that sets it apart from what the
@@ -364,15 +373,18 @@ const servedWarning = (via: Via) => `⚠ answered by ${via === "api" ? "an API k
 export function formatFieldStates(
 	found: Found,
 	paint: (text: string, state: FieldState) => string = (text) => text,
-	{ served, tier, via }: { served?: Via; tier?: "short" | "long"; via?: Via } = {},
+	{ served, tier, via, fetch }: { served?: Via; tier?: "short" | "long"; via?: Via; fetch?: FetchState } = {},
 ): string {
 	const warnings = served ? [paint(servedWarning(served), "assumed")] : [];
 	const lead = via ? [via] : [];
-	if (found.refs.length === 0) return `· ${[...lead, "providers.dev: no data for this model", ...(tier ? [`cache in use: ${tier}`] : []), ...warnings].join(" · ")}`;
+	const noData =
+		fetch === "failed" ? `providers.dev: no data, ${paint("fetch failed", "assumed")}` : fetch === "offline" ? "providers.dev: no data (PI_OFFLINE)" : found.refs.length === 0 ? "providers.dev: no data for this model" : undefined;
+	const stale = fetch === "stale" ? [paint(REFRESH_FAILED_WARNING, "assumed")] : [];
+	if (noData) return `· ${[...lead, noData, ...(tier ? [`cache in use: ${tier}`] : []), ...warnings, ...stale].join(" · ")}`;
 	const states = fieldStates(found);
 	if (Object.values(states).includes("assumed")) warnings.push(paint(via === "sub" || via === "api" ? NO_LOGIN_ENTRY_WARNING : UNKNOWN_ACCESS_WARNING, "assumed"));
 	const inUse = (field: Field) => (field === tier ? " (in use)" : "");
-	return `· ${[...lead, ...FIELDS.map((field) => `${FIELD_LABELS[field]} ${paint(MARKS[states[field]], states[field])}${inUse(field)}`), ...warnings].join(" · ")}`;
+	return `· ${[...lead, ...FIELDS.map((field) => `${FIELD_LABELS[field]} ${paint(MARKS[states[field]], states[field])}${inUse(field)}`), ...warnings, ...stale].join(" · ")}`;
 }
 
 /** The fields of a pi model this extension looks at. */
