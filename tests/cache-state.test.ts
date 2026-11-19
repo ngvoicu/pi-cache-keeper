@@ -29,7 +29,9 @@ test("the cache expires a lifetime after the latest cached request or cache-warm
 	assert.deepEqual([aborted.answeredAt, aborted.answerPrompt, aborted.expiresAt], [9_000, 751, 301_000], "an aborted answer that used the cache is a real answer; the expiry is counted as before");
 	const failed = [cached, reply("b", 9_000, { cacheRead: 700 }, "aborted"), reply("c", 12_000, {}, "error")];
 	assert.equal(cacheState(declared, failed, undefined, true).expiresAt, 309_000, "with keep-warm on it is counted from that answer; a failed one that used no cache moves nothing");
-	assert.deepEqual(cacheState(declared, [reply("a", 1_000, {})]), { lifetime: { ms: 300_000, source: "declared by the model" }, cached: false, expiresAt: undefined, replied: true });
+	assert.deepEqual(cacheState(declared, [reply("a", 1_000, {})]), { lifetime: { ms: 300_000, source: "declared by the model" }, cached: false, expiresAt: undefined, replied: true, answeredAt: 1_000, answerPrompt: 1 });
+	const uncached = cacheState(declared, [cached, reply("b", 9_000, {})]);
+	assert.deepEqual([uncached.answeredAt, uncached.cached, uncached.expiresAt], [9_000, false, undefined], "a later successful answer that used no cache is the latest answer, with no expiry");
 	assert.equal(cacheState(declared, [cached, reply("b", 9_000, {}, "error")]).expiresAt, 301_000);
 	assert.deepEqual(cacheState(declared, [cached, compaction]), { lifetime: { ms: 300_000, source: "declared by the model" }, cached: false, expiresAt: undefined, replied: false });
 });

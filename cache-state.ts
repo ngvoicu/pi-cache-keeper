@@ -19,9 +19,10 @@ export interface CacheState {
 	expiresAt?: number;
 	replied: boolean;
 	/**
-	 * When the latest real answer arrived: the latest assistant message whose usage reports a cache read or write, whatever
-	 * its stop reason (an aborted answer that read the cache counts). Refreshes (Pi's or this extension's) do not move it.
-	 * A new value means a real request has gone to the provider since: a new keep-warm period.
+	 * When the latest answer arrived: the latest assistant message whose usage reports a cache read or write, whatever
+	 * its stop reason (an aborted answer that read the cache counts), or a later successful one that reports none (then
+	 * `cached` is false). Refreshes (Pi's or this extension's) do not move it. A new value means a request has gone to
+	 * the provider since: a new keep-warm period.
 	 */
 	answeredAt?: number;
 	/** That answer's prompt: input + cache read + cache write tokens. */
@@ -64,7 +65,8 @@ export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
 			const { input, cacheRead, cacheWrite, cacheWrite1h } = entry.message.usage;
 			if (cacheWrite > 0 && cacheWrite1h !== undefined) reported = cacheWrite1h > 0 ? "long" : "short";
-			if (cacheRead + cacheWrite > 0) answer = { at: entry.message.timestamp, prompt: input + cacheRead + cacheWrite };
+			const failed = entry.message.stopReason === "error" || entry.message.stopReason === "aborted";
+			if (cacheRead + cacheWrite > 0 || !failed) answer = { at: entry.message.timestamp, prompt: input + cacheRead + cacheWrite };
 			// A failed request may not have reached the cache.
 			if (entry.message.stopReason === "error" || entry.message.stopReason === "aborted") {
 				if (fromRealAnswer && cacheRead + cacheWrite > 0) refreshedAt = entry.message.timestamp;

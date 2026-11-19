@@ -155,22 +155,24 @@ function harness(options: Options = {}) {
 	};
 	request([user], sent, reply);
 	// A run after the first: false is cancelled before any request goes out; true sends one whose answer reads the
-	// cache; "aborted" sends one that is aborted after reading the cache; "error" sends one that fails before using it.
+	// cache; "aborted" sends one that is aborted after reading the cache; "error" sends one that fails before using it;
+	// "uncached" sends one answered successfully without using the cache.
 	let runs = 0;
-	const run = (answer: boolean | "aborted" | "error") => {
+	const run = (answer: boolean | "aborted" | "error" | "uncached", beforeSettled?: () => void) => {
 		state.idle = false;
 		emit("agent_start");
 		runs++;
 		const message = { role: "user", content: [{ type: "text", text: `more ${runs}` }], timestamp: Date.now() };
 		branch.push({ type: "message", id: `u${runs}`, parentId: null, timestamp: new Date().toISOString(), message } as never);
 		if (answer) {
-			const used = answer === "error" ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } : { input: 2, output: 5, cacheRead: cached, cacheWrite: 0 };
-			const reply2 = { role: "assistant", content: [{ type: "text", text: "ok" }], timestamp: Date.now(), stopReason: answer === true ? "stop" : answer, usage: used };
+			const used = answer === "error" ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } : answer === "uncached" ? { input: 900, output: 5, cacheRead: 0, cacheWrite: 0 } : { input: 2, output: 5, cacheRead: cached, cacheWrite: 0 };
+			const reply2 = { role: "assistant", content: [{ type: "text", text: "ok" }], timestamp: Date.now(), stopReason: answer === true || answer === "uncached" ? "stop" : answer, usage: used };
 			request([user, message], { ...sent, messages: [...sent.messages, { role: "user", content: `more ${runs}` }] }, reply2);
 			branch.push({ type: "message", id: `a${runs}`, parentId: null, timestamp: new Date().toISOString(), message: reply2 } as never);
 		}
+		beforeSettled?.();
 		state.idle = true;
-		emit("agent_settled", { aborted: answer !== true });
+		emit("agent_settled", { aborted: answer !== true && answer !== "uncached" });
 	};
 	// Runs the idle clock second by second, letting each refresh land, until a compaction starts or `ms` passed.
 	const idle = async (ms: number) => {
@@ -398,6 +400,37 @@ test("R1: a run whose last request failed before using the cache: the period is 
 	await h.idle(300_000);
 	assert.equal(h.warms.length, 1);
 	assert.deepEqual(h.warms[0].payload, { ...first, max_tokens: 1 }, "the request of the real answer, not the failed one");
+});
+
+test("R1: an answer that used the cache, then a successful one that used none: the new period is Pi's, as with keep-warm off", { skip: noWarmer }, async (t) => {
+	const runOnce = async (keepWarmMinutes: number) => {
+		clock();
+		fresh({ keepWarmMinutes, compactBeforeExpiry: false });
+		const h = harness({ lifetime: 300, cost: WITH_WRITE });
+		const pi = withPiWarmer(h);
+		pi.start();
+		h.emit("agent_settled");
+		pi.warmer.onAgentSettled();
+		await pi.advance(100_000);
+		// Pi starts its warmer with the new request; it settles after the answer.
+		h.run("uncached", () => pi.start());
+		pi.warmer.onAgentSettled();
+		await pi.advance(40 * 60_000);
+		const shown = await h.command("cache-keeper");
+		pi.warmer.cancel();
+		mock.timers.reset();
+		return { pi: pi.piRefreshes, decisions: pi.decisions, warms: h.warms.length, shown, traces: traces() };
+	};
+	t.after(() => mock.timers.reset());
+	const off = await runOnce(0);
+	const on = await runOnce(120);
+	assert.ok(on.decisions.length > 0, "Pi decided");
+	assert.ok(on.decisions.every((d) => d.answer === undefined), "the handler returns nothing");
+	assert.deepEqual(on.pi, off.pi, "Pi refreshes exactly as with keep-warm off");
+	assert.deepEqual(on.decisions.map((d) => [d.at, d.pi]), off.decisions.map((d) => [d.at, d.pi]));
+	assert.equal(on.warms, 0, "the extension sends nothing");
+	assert.deepEqual(on.traces.filter((r) => r.event === "warm"), []);
+	assert.match(on.shown, /this session is left to Pi's own warming: the last answer did not use the prompt cache/);
 });
 
 // ---------------------------------------------------------------------------------------------------------------- R2

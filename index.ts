@@ -233,6 +233,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (state?.answeredAt === undefined) return "no answer has read or written the prompt cache yet";
 		if (!state.lifetime) return "the cache lifetime is unknown";
 		if (state.lifetime.ms < MIN_OWNED_LIFETIME_MS) return `the cache lifetime (${formatDuration(state.lifetime.ms)}) is under a minute`;
+		// The same state the countdown reads: without a cached answer there is no expiry to keep warm.
+		if (!state.cached) return "the last answer did not use the prompt cache";
 		const request = answerRequest;
 		if (!request || request.answeredAt !== state.answeredAt) return "the request of the last answer was not captured";
 		if (!request.payload) return `${request.model.api} requests cannot be re-sent`;
