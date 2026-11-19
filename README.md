@@ -9,7 +9,7 @@ What it does:
 - **Compacts from the warm cache.** The summary request repeats your conversation as it is and reads about 99% of it from the cache, and the summary sees all the tool output. [Compacting from the cache](#compacting-from-the-cache), [what it costs](#what-it-costs).
 - **Compacts when the context is full,** at 90% of the model's window by default or at a token cap you set, while a summary still fits. [More](#compacting-when-the-context-is-full).
 - **Compacts just before the cache expires** when you step away, so your next message doesn't pay to write the whole session again. [More](#compacting-before-the-cache-expires).
-- **Keeps the cache warm through a break,** for as long as you choose (off until you set it). [More](#keeping-the-cache-warm).
+- **Keeps the cache warm through a break,** for up to as long as you choose, and stops once refreshing has cost as much as one cache miss (off until you set it). [More](#keeping-the-cache-warm).
 - **Fills in model data from providers.dev:** input window, cache lifetimes and prices, written where Pi reads them. [More](#model-data-from-providersdev).
 - **Shows it in the footer:** the cache countdown, `sub` / `api`, what is known about the model, and a ⚠ when an answer came from another credential or a value is a guess. [The footer](#the-footer).
 
@@ -36,7 +36,7 @@ The extension adds to the last line of Pi's footer: first the cache countdown, t
 
 ![The last line of Pi's footer in seven states. Warm: "cache warm · 59m left · sub · window ✓ · cache short ✓ · long ✓ (in use) · price ✗". The last 30 seconds, in the warning color: "cache warm · 0:25 left · api · window ✓ · cache short ✓ (in use) · long ✗ · price ✓". Expired, dimmed: "cache cold · next message full price". While a request runs, dimmed: "cache in use". No entry at providers.dev: "cache warm · 58m left · api · providers.dev: no data for this model · cache in use: long". Through a proxy that may use a login or an API key: "cache warm · 55m left · sub or api · window ✓ · cache short ⚠ · long ✓ (in use) · price ? · ⚠ login or API key unknown: shorter values". Through a proxy where an API key answered for a login's values: "cache warm · 4m left · api · window ✓ · cache short ✓ (in use) · long ✓ · price ✗ · ⚠ answered by an API key".](media/footer-states.png)
 
-**The countdown** shows how long the cache has left. Sending a message restarts it. It reads `cache warm · 59m left` down to `cache warm · 0:25 left` (minutes, then minutes and seconds for the last two; in the warning color for the last 30 seconds), then `cache cold · next message full price`. A message sent while the cache is warm reads the conversation from the cache at a fraction of the price and restarts the countdown; after it goes cold, the next message pays full price to write the conversation again. While a request runs it reads `cache in use`, so the status keeps its place in the footer, and while [keeping the cache warm](#keeping-the-cache-warm) refreshes it, `cache warm · refreshing`.
+**The countdown** shows how long the cache has left. Sending a message restarts it. It reads `cache warm · 59m left` down to `cache warm · 0:25 left` (minutes, then minutes and seconds for the last two; in the warning color for the last 30 seconds), then `cache cold · next message full price`. A message sent while the cache is warm reads the conversation from the cache at a fraction of the price and restarts the countdown; after it goes cold, the next message pays full price to write the conversation again. While a request runs it reads `cache in use`, so the status keeps its place in the footer, and while [keeping the cache warm](#keeping-the-cache-warm) refreshes it, `cache warm · refreshing`. Once keeping warm has ended until your next answer, the countdown says why, with the amounts: `cache warm · 0:24 left · keep-warm ended (budget reached): $1.98 spent, a miss costs $2.07`.
 
 The lifetime is the model's declared one (which [providers.dev](#model-data-from-providersdev) fills in for many models), else the cache tier the provider reports writing (Anthropic and pi-claude-bridge report it), else OpenAI's 30-minute minimum for GPT-5.6 and later, else Kimi K3's 5-minute or 1-hour option. Models with none of those show no countdown. `/cache-keeper` says which one it is.
 
@@ -73,7 +73,7 @@ A warning at the end of the line says when the values may not hold:
 
 **`/cache-keeper`**:
 
-![The output of /cache-keeper: "pi-cache-keeper · anthropic/claude-opus-5-5. cache: 59m left (lifetime 60 min, declared by the model). next compaction: cached path; last request 4 s ago with 185 messages, 1 since. The request prefix is checked when it runs. when full: at 90%: 900k of 1000k on anthropic/claude-opus-5-5, leaving 96k for the summary. keep warm: for 2 h after Pi goes idle, from 140k tokens of context. before expiry: on, from 140k tokens of context · retention long. model data: claude-subscription/claude-opus-5-5: window 1,000,000, short cache 1 h, long cache 1 h (https://providers.dev, checked 180 min ago; /cache-keeper-refresh fetches it again). settings: /cache-keeper-settings. log: ~/.pi/agent/cache-keeper.jsonl. This session: 15:05:52 compact when full: cached, 99% of 904k from cache, 5k out, 41.6s, summary 9840 chars. vs Pi's compaction: 75% less, $0.59 instead of ~$2.4 (it sends ~451k tokens, none from cache). 15:06:34 saved, 903k tokens summarized. 16:36:52 kept the cache warm, idle 57 min: 99% of 411k from cache, 1 out, $0.21."](media/status-command.png)
+![The output of /cache-keeper: "pi-cache-keeper · anthropic/claude-opus-5-5. cache: 59m left (lifetime 60 min, declared by the model). next compaction: cached path; last request 4 s ago with 185 messages, 1 since. The request prefix is checked when it runs. when full: at 90%: 900k of 1000k on anthropic/claude-opus-5-5, leaving 96k for the summary. keep warm: up to 2 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; so far $0 spent, a miss costs $2.36. before expiry: on, from 140k tokens of context · retention long. model data: claude-subscription/claude-opus-5-5: window 1,000,000, short cache 1 h, long cache 1 h (https://providers.dev, checked 180 min ago; /cache-keeper-refresh fetches it again). settings: /cache-keeper-settings. log: ~/.pi/agent/cache-keeper.jsonl. This session: 15:05:52 compact when full: cached, 99% of 904k from cache, 5k out, 41.6s, summary 9840 chars. vs Pi's compaction: 75% less, $0.59 instead of ~$2.4 (it sends ~451k tokens, none from cache). 15:06:34 saved, 903k tokens summarized. 16:36:52 kept the cache warm, idle 57 min: 99% of 411k from cache, 1 out, $0.21; $0.21 of $2.36 (one cache miss) spent."](media/status-command.png)
 
 The `model data` line names the providers.dev entry that describes the model and what it gave. When a guess is in use it says which values are the smaller of the login's and the API key's, and which were not used; when another kind of credential answered, it gives that one's values too.
 
@@ -94,8 +94,8 @@ Run `/cache-keeper-settings` to change them in a menu; changes are saved to the 
 | `compactAtPercent` | Compact when the context is | `90` | after a turn, compact once the context fills this share of the model's window; `0` turns it off |
 | `compactAtTokens` | Or once it holds | `0` | also compact once the context holds this many tokens, on any model, whichever comes first; `0` turns it off |
 | `compactBeforeExpiry` | Compact before the cache expires | `true` | compact 20 s before the cache expires, when idle |
-| `minContextTokens` | Before expiry, only from | `140000` | the smallest context worth keeping warm or compacting before expiry |
-| `keepWarmMinutes` | Keep the cache warm when idle | `0` | keep the cache warm for this many minutes after Pi goes idle (up to 1440); `0` turns it off |
+| `minContextTokens` | Before expiry, only from | `140000` | the smallest context compacted before the cache expires; keeping the cache warm doesn't use it |
+| `keepWarmMinutes` | Keep the cache warm when idle | `0` | keep the cache warm up to this many minutes after Pi goes idle (up to 1440; the menu offers 30 min, 1, 2, 3, 4, 6, 8, 12 and 24 h); it stops once refreshing has cost as much as one cache miss, and while it is on the extension is the only warmer of an idle cache it can refresh; `0` turns it off |
 | `cacheRetention` | Cache retention | `"long"` | ask for the longer cache in interactive sessions (2× writes on Anthropic and Kimi); `"short"` keeps Pi's default |
 | `modelData` | Model data from providers.dev | `true` | read each model's input window, cache lifetimes and prices from providers.dev and put them into Pi's `models.json`; `false` takes them out again |
 
@@ -183,7 +183,7 @@ If you step away, the cache expires and your next message pays to write the whol
 
 - Pi is idle with nothing queued,
 - Pi's auto-compaction is on,
-- the context holds at least 140k tokens (`minContextTokens`),
+- the context holds at least 140k tokens (`minContextTokens`; it applies only here, not to keeping the cache warm),
 - and the cached path is available.
 
 Otherwise it does nothing and the cache cools. Models without a [countdown](#the-footer) never compact before expiry.
@@ -194,19 +194,51 @@ The threshold is in tokens rather than percent because rewriting an expired cach
 
 ## Keeping the cache warm
 
-Pi can keep an idle cache warm itself (`cacheWarming: "idle"`), but only until 30 minutes after the last request started, and only when it expects the refresh to pay for itself. Its refresh comes at 90% of the lifetime, so a 1-hour cache (54 minutes) is never refreshed while idle. Set `keepWarmMinutes` to choose how long after Pi goes idle the cache should stay warm, for example `120` for two hours.
+Pi can keep an idle cache warm itself (`cacheWarming: "idle"`), but only until 30 minutes after the last request started, and only when it expects the refresh to pay for itself. Its refresh comes at 90% of the lifetime, so a 1-hour cache (54 minutes) is never refreshed while idle. Set `keepWarmMinutes` to keep the cache warm longer after Pi goes idle, for example `120` for two hours.
 
-3 minutes before a 1-hour cache expires (25 seconds before a 5-minute one, after Pi's own refresh would have run), the extension re-sends the last request exactly as it was sent with a one-token answer, the way Pi's warming does. The provider reads the cache entry and its lifetime starts again. It does this while the cache would otherwise expire inside the window, so a 1-hour cache in a 2-hour window is refreshed about twice. When the window ends, the cache is left to expire, and [compacting before expiry](#compacting-before-the-cache-expires) takes over as before. It only refreshes when:
+The rule is: **keep the cache warm for up to `keepWarmMinutes`, and stop once refreshing has cost as much as one cache miss.** A refresh is worth sending only while all the refreshes of a break together cost less than the one cache miss they avoid.
 
-- Pi is idle with nothing queued,
-- the context holds at least `minContextTokens`,
-- the cached path is available (the same check as compacting from the cache),
-- the last request can be re-sent as it was: Claude through pi-claude-bridge can't, since the extension never sees its request,
-- and the request doesn't use Claude's budget-based thinking, which keys the cache on the output limit. Adaptive thinking is fine.
+**One warmer per idle period.** An idle period runs from one real answer (an answer that read or wrote the cache, a cancelled one included) to the next. With keep-warm on, the extension keeps a period's cache warm itself when its last answer has a cache lifetime of at least a minute, and its request was seen with its payload and can be re-sent as it was (not Claude through pi-claude-bridge, whose request the extension never sees, and not Claude's budget-based thinking, which keys the cache on the output limit; adaptive thinking is fine). Then it is the only warmer: each time Pi's own warming is about to refresh while Pi is idle (`cache_warming_decision`), the extension tells it to stop, and Pi's warming stays stopped until the next request. Pi still warms during a run. A session the extension can't refresh itself (no lifetime, one under a minute, a request it can't re-send) is left to Pi's own warming for the whole period, exactly as with keep-warm off, and the extension sends nothing. `/cache-keeper` says which applies and why. Nothing is handed over inside a period.
 
-Each refresh reads the whole context from the cache: about a tenth of the input price on Anthropic. In one measured session, a refresh of a 692k-token Claude context cost $0.14, against about $6.90 to write it again at that model's cache-write price. On a subscription it is free but counts toward your usage. If a refresh fails, or reads less than 90% from the cache (the route behind a proxy may not cache), refreshing stops until your next message, and Pi shows a warning. A new message cancels a refresh in flight. Refreshes are listed in `/cache-keeper` and the log, and the footer shows `cache warm · refreshing` while one runs.
+- **The budget.** The extension adds up what its refreshes in the period cost. A refresh is expected to cost the last answer's prompt at the cache-read price plus one output token; a cache miss costs that prompt at the cache-write price (the input price when the model has none) less the prompt at the cache-read price. These are the figures Pi's own warming weighs (`evaluateCacheWarming` in pi-ai 1.5.1 and later), worked out the same way by the extension, so it runs on older Pi too. A refresh goes out only if what has been spent, plus that refresh, stays within one miss; that refresh is counted at its expected cost, or at what the last refresh really cost when that was more. When it goes out it is counted at that amount, and when it reports what it cost, that replaces it; one that fails or is cancelled without a report stays counted. Once the total reaches one miss, warming ends.
+- **The worst case.** A refresh the provider does not serve from the cache costs a full write, more than planned, and that can't be known before it is sent. It is counted, and warming ends (the budget, or a refresh that read less than 90% from the cache).
+- **Without prices** (a subscription login: Pi prices those models at $0), the budget can't be counted in money, so it is at most 10 refreshes per period. Where the cached read costs a tenth of the input price, a miss costs between 9 refreshes (no cache-write price) and 19 (a 2× write price).
+- **The time limit.** `keepWarmMinutes` stays as a plain upper limit, counted from when Pi went idle after the period's answer. It takes effect, and is said, as soon as the cache lasts to its end: when a refresh carries the cache past it, or at once when the answer's own lifetime already does.
+- **A run that sends nothing** (cancelled before its first request) changes nothing: the spending and the time limit stay those of the period, whose cache is still the one kept warm. Only a new answer that read or wrote the cache starts a new period. The spending is kept in memory, so a reload or restart of Pi starts a new period too (and the extension can't refresh a request it hasn't seen since, so that period is Pi's).
+- **Any size.** A refresh and a miss both grow with the context, so the rule holds for a small session as for a large one. `minContextTokens` applies only to compacting before expiry: when warming ends, a context from that size up is compacted before the cache expires, a smaller one is left to expire. A session whose last answer cached nothing (a prompt under the provider's minimum cacheable size) has no countdown and is not refreshed.
 
-Pi's footer totals don't include these refreshes, since an extension can't add usage to the session; the log has their cost. After a restart, the countdown doesn't know about refreshes sent before it, so it may show the cache as cold early.
+**When warming ends** it stays ended until your next answer, the cache expires, and [compacting before expiry](#compacting-before-the-cache-expires) takes over as before. It ends, once, with the amounts in the footer, `/cache-keeper` and the log:
+
+| Why | The footer, after the countdown |
+| --- | --- |
+| the budget | `keep-warm ended (budget reached): $1.98 spent, a miss costs $2.07`, without prices `keep-warm ended (budget reached): 10 of 10 refreshes` |
+| the time limit | `keep-warm ended (2 h limit): $0.36 spent, a miss costs $2.07` |
+| a refresh read less than 90% from the cache | `keep-warm ended (a refresh missed the cache): …` |
+| a refresh failed | `keep-warm ended (a refresh failed): …` |
+| the request can no longer be re-sent (the model, the branch or the conversation changed) | `keep-warm ended (the request can't be re-sent): …` |
+
+A new message that cancels a refresh in flight ends nothing: its answer starts a new period.
+
+What that means at a cached-read price of 10% of the input price, for a break that starts when the last answer arrives and refreshes that read the whole context from the cache. A refresh then costs 0.1× the context's input price. A miss costs 1.15× with a cache-write price of 1.25× (Anthropic), which pays for 11 refreshes. With no cache-write price (OpenAI, Gemini) a miss costs 0.9×, and the one output token tips a 9th refresh over, so 8.
+
+A miss on a 1-hour cache is priced as Pi prices it, at the model's ordinary cache-write price. Where the provider charges more for a 1-hour write (Anthropic: 2× the input price instead of 1.25×), the budget is smaller than what a miss there really costs, so warming a 1-hour cache stops sooner than a real miss would justify.
+
+| Cache lifetime | A refresh every | With a cache-write price (11 refreshes) | With no cache-write price (8 refreshes) | With `keepWarmMinutes: 120` |
+| --- | --- | --- | --- | --- |
+| 150 s | 2 min 5 s | warm for 25 min | warm for 19 min | the same: the budget ends it first |
+| 5 min | 4 min 35 s | warm for 55 min | warm for 42 min | the same: the budget ends it first |
+| 30 min | 28.5 min | warm for 5.7 h | warm for 4.3 h | the limit ends it: 4 refreshes (0.4×), warm for 2 h 24 min |
+| 1 h | 57 min | warm for 11.5 h | warm for 8.6 h | the limit ends it: 2 refreshes (0.2×), warm for 2 h 54 min |
+
+On a 150-second cache the budget runs out within half an hour; on a 1-hour cache the time limit almost always comes first. With a long limit (6, 12 or 24 h) the budget is usually what ends the warming, and the limit only matters for long cache lifetimes. Without prices, the 10 refreshes keep a 150-second cache warm for 23 minutes and a 5-minute one for 51.
+
+**When it refreshes.** 3 minutes before a 1-hour cache expires (5% of the lifetime, at least 25 seconds before expiry), the extension re-sends the last answer's request exactly as it was sent with a one-token answer, the way Pi's warming does. The provider reads the cache entry and its lifetime starts again. It only refreshes when Pi is idle with nothing queued and the cached path is available (the same check as compacting from the cache). When Pi is busy or a message is queued at that moment, it tries again every second until the last safe moment, half that lead before expiry; when Pi's own refresh from the run that just ended may still be in flight, it waits for it. In a rare timing both may refresh once at the end of a run; that refresh of Pi's is not counted in the period's budget.
+
+**A cache that has expired is never refreshed.** A refresh then would write the whole context at full price. When the timer runs late (the computer slept), the countdown stops at expiry, and a refresh due in the last half of its lead (the last 12.5 seconds of a 5-minute cache) is not sent; the last check is made just before the request leaves, so one that couldn't leave in time is withheld.
+
+Each refresh reads the whole context from the cache: about a tenth of the input price on Anthropic. In one measured session, a refresh of a 692k-token Claude context cost $0.14, against about $6.90 to write it again at that model's cache-write price. On a subscription it is free but counts toward your usage. If a refresh fails, or reads less than 90% from the cache (the route behind a proxy may not cache), Pi shows a warning. Refreshes are listed in `/cache-keeper` and the log, with what they have spent of the budget, and the footer shows `cache warm · refreshing` while one runs.
+
+The extension's refreshes are not in Pi's session cost (the total in its footer): Pi counts what is in the session file, and an extension can't add usage entries to it. Pi's own refreshes are counted there. The log has the cost of each of the extension's refreshes. After a restart, the countdown doesn't know about refreshes sent before it, so it may show the cache as cold early.
 
 ## Model data from providers.dev
 
@@ -222,7 +254,7 @@ Pi's model catalog doesn't say how long most providers keep a prompt cache, and 
 
 **What you should know before it changes how Pi behaves:**
 
-- A model that gets a cache lifetime also gets what comes with one: Pi's own warming (`cacheWarming` in Pi's settings) and this extension's countdown and compacting before expiry. A model with a 5-minute lifetime and a context over `minContextTokens` is compacted after about 5 idle minutes, unless Pi's warming or `keepWarmMinutes` keeps it warm.
+- A model that gets a cache lifetime also gets what comes with one: Pi's own warming (`cacheWarming` in Pi's settings) and this extension's countdown and compacting before expiry. A model with a 5-minute lifetime and a context over `minContextTokens` is compacted after about 5 idle minutes, unless Pi's warming or `keepWarmMinutes` keeps it warm; then it is compacted when that warming ends. A smaller context is left to expire.
 - A larger window means larger, more expensive requests before anything compacts. `compactAtTokens` caps that on every model.
 - Values you set in `models.json` yourself are never touched. The extension keeps a note of what it wrote (in `~/.pi/agent/cache-keeper-models.json`) and only updates or removes those values. If `models.json` has comments, it is left alone.
 
