@@ -85,7 +85,7 @@ export interface FullTrace {
  * 10 refreshes without prices), the time limit (the cache lasts to the end of the window), a refresh that missed the
  * cache, a refresh that failed, or a request that can no longer be re-sent.
  */
-export type WarmStop = "budget" | "limit" | "missed" | "failed" | "unable";
+export type WarmStop = "budget" | "limit" | "missed" | "failed" | "unable" | "unknown";
 
 export interface WarmTrace extends TimerContext {
 	event: "warm";
@@ -193,6 +193,8 @@ export function stopLabel(stop: WarmStop, limit?: string): string {
 			return "a refresh failed";
 		case "unable":
 			return "the request can't be re-sent";
+		case "unknown":
+			return "a refresh reported no usage";
 	}
 }
 

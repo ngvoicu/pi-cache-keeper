@@ -229,8 +229,9 @@ const ENDED_SHORT: Record<WarmStop, (limit: string) => string> = {
 	missed: () => "a refresh missed",
 	failed: () => "a refresh failed",
 	unable: () => "can't re-send",
+	unknown: () => "cost unknown",
 };
-const ENDED_TINY: Partial<Record<WarmStop, string>> = { missed: "keep-warm missed", failed: "keep-warm failed", unable: "keep-warm stopped" };
+const ENDED_TINY: Partial<Record<WarmStop, string>> = { missed: "keep-warm missed", failed: "keep-warm failed", unable: "keep-warm stopped", unknown: "keep-warm stopped" };
 
 function keepWarmPart(view: KeepWarmView): Part {
 	if ("fallback" in view) {

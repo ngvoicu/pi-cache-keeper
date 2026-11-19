@@ -157,11 +157,13 @@ const WARM_MISSES = Symbol.for("pi-cache-keeper.warm-misses");
 const MISSES_IN_A_ROW = 2;
 /**
  * A refresh sent by the extension and not yet settled, per model, from any session of the process: while one is open,
- * no other refresh of that model leaves (it could be the second miss, not yet reported). The extension cancels its own
- * refresh after REFRESH_TIMEOUT_MS; one that stays open even so stops holding the model back REFRESH_HOLD_MAX_MS after
- * it was sent, so a stream that never settles cannot keep a model from being kept warm for ever.
+ * no other refresh of that model leaves (it could be the second miss, not yet reported). A slow refresh settles when it
+ * settles: the extension never cancels it for being slow, nor sends it again. One still open REFRESH_HOLD_MAX_MS after it
+ * was sent stops holding the model back, so a stream that never settles cannot keep a model from being kept warm for
+ * ever in later periods.
  */
-const REFRESH_TIMEOUT_MS = 60_000;
+const NO_USAGE = "the refresh reported no usage, so what it cost is unknown";
+const NO_USAGE_CANCELLED = "the refresh was cancelled before it reported usage, so what it cost is unknown";
 const SETTLING_REASON = "an earlier refresh of this model has not settled yet, and it may have missed the cache; tried again until the last safe moment";
 const REFRESH_HOLD_MAX_MS = 10 * 60_000;
 interface WarmMisses {
@@ -670,9 +672,22 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			if (otherwise) dataView.served = accessVia({ upstreams: otherwise });
 			if (lifetimes.short.mark === "guess" || lifetimes.long.mark === "guess") dataView.guess = via === "sub" || via === "api" ? "login" : "access";
 		}
-		// The countdown on another tier than the model's own: said beside it, so the two are not read as one.
-		const otherTier = tier !== undefined && !owned && countdownTier !== tier ? countdownTier : undefined;
+		// The countdown on another tier than the model's own, or counted from another model's answer (also where this model
+		// has made no request yet, as after a switch and /reload, /resume or /fork): said beside it, so the two are not
+		// read as one.
+		const otherTier = !owned && ((tier !== undefined && countdownTier !== tier) || latestAnswerIsOthers(entries, key)) ? countdownTier : undefined;
 		return { lifetimes, ...(sent ? { sent } : {}), ...(otherTier ? { countdownTier: otherTier } : {}), price, data: dataView };
+	};
+	// Whether the latest answer that read or wrote the cache, the one a countdown counts from, is another model's.
+	const latestAnswerIsOthers = (entries: SessionEntry[], key: string): boolean => {
+		let latest: string | undefined;
+		for (const entry of entries) {
+			if (entry.type === "compaction") latest = undefined;
+			else if (entry.type === "message" && entry.message.role === "assistant" && entry.message.usage.cacheRead + entry.message.usage.cacheWrite > 0) {
+				latest = `${entry.message.provider}/${entry.message.model}`;
+			}
+		}
+		return latest !== undefined && latest !== key;
 	};
 	const showData = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
@@ -1057,7 +1072,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		let late = false;
 		let held = false;
 		let settling = false;
-		let timedOut = false;
 		let refused: string | undefined;
 
 		const controller = new AbortController();
@@ -1065,12 +1079,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		// Its entry among the model's refreshes on their way, once it goes out (see REFRESH_HOLD_MAX_MS).
 		const refreshId = ++refreshIds;
 		const open = misses.inFlight.get(p.fixed.model) ?? new Map<number, number>();
-		// A one-token answer comes in seconds; one that does not is cancelled, so it settles.
-		const timeout = setTimeout(() => {
-			timedOut = true;
-			controller.abort();
-		}, REFRESH_TIMEOUT_MS);
-		timeout.unref?.();
 		const started = Date.now();
 		// The level the cached request was sent with, as its payload shows it.
 		const thinkingLevel = payloadThinking(request.model.api, sent);
@@ -1087,7 +1095,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 						...({ disableContinuation: true } as object),
 						sessionId: ctx.sessionManager.getSessionId(),
 						signal: controller.signal,
-						timeoutMs: REFRESH_TIMEOUT_MS,
 						onPayload: (params: unknown) => {
 							const built = warmPayload(params, sent);
 							const payload = "payload" in built ? built.payload : undefined;
@@ -1123,14 +1130,15 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			} catch (caught) {
 				error = caught instanceof Error ? caught.message : String(caught);
 			}
-			clearTimeout(timeout);
 			// Settled: no longer holds this model's other refreshes back.
 			open.delete(refreshId);
 			if (open.size === 0 && misses.inFlight.get(p.fixed.model) === open) misses.inFlight.delete(p.fixed.model);
 			if (warming === controller) warming = undefined;
-			// What the refresh reported it cost replaces the reserve; without a report (an error or abort before any
-			// usage, a model without prices) the reserve stays.
-			const reported = out && budget.priced ? (response?.usage?.cost?.total ?? 0) : 0;
+			// What the refresh reported it cost replaces the reserve, where its usage shows a prompt; without that (an error or
+			// abort before any usage, usage omitted or output only, a model without prices) what it cost is unknown and the
+			// reserve stays.
+			const reportedPrompt = response?.usage ? response.usage.input + response.usage.cacheRead + response.usage.cacheWrite : 0;
+			const reported = out && budget.priced && reportedPrompt > 0 ? (response?.usage?.cost?.total ?? 0) : 0;
 			if (reported > 0) {
 				spending.spent += reported - reserved;
 				spending.last = reported;
@@ -1153,13 +1161,22 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			// misses (two in a row and it is left to Pi), the period's end, the timer's bookkeeping.
 			const fellBack = verdict ? recordRefresh(p.fixed.model, verdict, started) : false;
 			let ended: ReturnType<typeof endWarm> | undefined;
+			// Inside a period the next refresh goes out only after the one before it reported a hit: one that left and came back
+			// otherwise (a miss, a failure, or no prompt in its usage, so what it cost is unknown) ends warming for the period.
 			if (out) {
 				ended =
 					reached() ??
-					(verdict === "miss" ? endWarm(p, "missed", failed ? `${missReason} before it failed: ${failure}` : missReason) : failed ? endWarm(p, "failed", failure) : undefined);
+					(verdict === "miss"
+						? endWarm(p, "missed", failed ? `${missReason} before it failed: ${failure}` : missReason)
+						: failed
+							? endWarm(p, "failed", failure)
+							: verdict === undefined
+								? endWarm(p, "unknown", aborted ? NO_USAGE_CANCELLED : NO_USAGE)
+								: undefined);
 			} else if (refused) ended = endWarm(p, "unable", refused);
 			else if (failed) ended = endWarm(p, "failed", failure);
-			if ((aborted || held || settling) && p.doneFor === expiresAt) p.doneFor = undefined;
+			// Tried again for the same expiry only when it never left; a refresh that left is never sent again.
+			if (!out && (aborted || held || settling) && p.doneFor === expiresAt) p.doneFor = undefined;
 			// Either way the provider refreshed (or wrote) the entry when it received the request.
 			if (out && !aborted && !failed) warmedAt = started;
 			const fallback = fellBack ? { leftToPi: fallbackLine(p.fixed.model, started) } : {};
@@ -1174,8 +1191,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			if (aborted) {
 				if (!out) return;
 				ifSessionAlive(() => {
-					const reason = timedOut ? `no answer within ${REFRESH_TIMEOUT_MS / 1000} s, so it was cancelled` : "a new request or a change of session cancelled it";
-					trace(ctx, { ...base, action: "cancelled", seconds, ...ended, reason, usage, budget: budgetRecord(p), ...fallback });
+					trace(ctx, { ...base, action: "cancelled", seconds, ...ended, reason: "a new request or a change of session cancelled it", usage, budget: budgetRecord(p), ...fallback });
 				});
 				return;
 			}
@@ -1792,7 +1808,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			let text: string;
 			if (fellBack.length > 0) {
 				const also = counted.length > 0 ? ` The missed-refresh count of ${counted.join(", ")} is cleared too.` : "";
-				text = `pi-cache-keeper keeps ${fellBack.join(", ")} warm again, from your next message: whether it keeps an idle period warm is decided when the period starts.${also}${off}`;
+				text = `pi-cache-keeper keeps ${fellBack.join(", ")} warm again, at the latest from your next message: an idle period already running whose own warming had not ended is kept warm again at once.${also}${off}`;
 			} else if (counted.length > 0) {
 				text = `No model was left to Pi's own warming. The missed-refresh count of ${counted.join(", ")} is cleared.${off}`;
 			} else text = `Nothing to clear: no model was left to Pi's own warming, and no refresh had missed the cache.${off}`;
