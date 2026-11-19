@@ -53,3 +53,41 @@ test("the log describes keeping the cache warm", () => {
 	assert.equal(describeTrace({ ...base, action: "failed", reason: "overloaded" } as TraceRecord), `${time} keeping the cache warm failed: overloaded`);
 	assert.equal(describeTrace({ ...base, action: "skip", reason: "Pi is busy or has queued messages" } as TraceRecord), `${time} cache expires in 180s: not keeping it warm, Pi is busy or has queued messages`);
 });
+
+test("the log says what keeping warm has spent and why it ended; records from before still read", () => {
+	const at = "2026-11-19T10:00:00.000Z";
+	const time = new Date(at).toLocaleTimeString([], { hourCycle: "h23", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+	const timer = { model: "anthropic/claude-opus-5-5", lifetimeSeconds: 300, lifetimeSource: "declared by the model" };
+	const base = { event: "warm" as const, secondsLeft: 25, contextTokens: 600_000, idleMinutes: 50, at, session: "s", ...timer };
+	const usage = { input: 2, cacheRead: 600_000, cacheWrite: 0, output: 1, cost: 0.18 };
+	assert.equal(
+		describeTrace({ ...base, action: "warm", usage, budget: { unit: "usd", spent: 0.54, limit: 2.07, next: 0.18 } } as TraceRecord),
+		`${time} kept the cache warm, idle 50 min: 99% of 600k from cache, 1 out, $0.18; $0.54 of $2.07 (one cache miss) spent`,
+	);
+	assert.equal(
+		describeTrace({ ...base, action: "warm", usage: { ...usage, cost: 0 }, budget: { unit: "refreshes", spent: 10, limit: 10 }, stop: "budget", reason: "10 refreshes since the last answer" } as TraceRecord),
+		`${time} kept the cache warm, idle 50 min: 99% of 600k from cache, 1 out, $0; 10 of at most 10 refreshes (no prices); keep-warm ended (budget reached)`,
+	);
+	const reason = "refreshing has cost $1.98 since the last answer; another refresh ($0.18) would pass the $2.07 one cache miss costs";
+	assert.equal(describeTrace({ ...base, action: "skip", stop: "budget", reason } as TraceRecord), `${time} cache expires in 25s: keep-warm ended (budget reached), ${reason}`);
+	assert.equal(
+		describeTrace({ ...base, action: "skip", stop: "limit", reason: "the cache lasts to the end of the 2 h limit after Pi went idle" } as TraceRecord),
+		`${time} cache expires in 25s: keep-warm ended (time limit), the cache lasts to the end of the 2 h limit after Pi went idle`,
+	);
+	assert.equal(
+		describeTrace({ ...base, action: "missed", usage, stop: "missed", reason: "the refresh read only 49% from the cache" } as TraceRecord),
+		`${time} keeping the cache warm missed the cache, idle 50 min: 99% of 600k from cache, 1 out, $0.18; keep-warm ended (a refresh missed the cache)`,
+	);
+	assert.equal(describeTrace({ ...base, action: "failed", reason: "overloaded", stop: "failed" } as TraceRecord), `${time} keeping the cache warm failed: overloaded; keep-warm ended (a refresh failed)`);
+	assert.equal(describeTrace({ ...base, action: "skip", stop: "unable", reason: "the model changed since the last request" } as TraceRecord), `${time} cache expires in 25s: keep-warm ended (the request can't be re-sent), the model changed since the last request`);
+	assert.equal(
+		describeTrace({ ...base, action: "cancelled", reason: "a new request or a change of session cancelled it", budget: { unit: "usd", spent: 0.18, limit: 2.07 } } as TraceRecord),
+		`${time} a refresh of the cache was cancelled: a new request or a change of session cancelled it; $0.18 of $2.07 (one cache miss) spent`,
+	);
+	assert.equal(describeTrace({ ...base, action: "pi-stopped", reason: "this extension keeps this idle period's cache warm (Pi would have refreshed)" } as TraceRecord), `${time} told Pi's own idle warming to stop: this extension keeps this idle period's cache warm (Pi would have refreshed)`);
+	// 0.4 records: no model, lifetime, budget or end reason.
+	const old = JSON.parse('{"event":"expiry","action":"compact","secondsLeft":20,"contextTokens":600000,"at":"2026-11-19T10:00:00.000Z","session":"s"}');
+	assert.equal(describeTrace(old), `${time} cache expires in 20s: compacting 600k tokens`);
+	const oldMissed = JSON.parse('{"event":"warm","action":"missed","secondsLeft":180,"idleMinutes":57,"usage":{"input":0,"cacheRead":0,"cacheWrite":692000,"output":1,"cost":2.6},"at":"2026-11-19T10:00:00.000Z","session":"s"}');
+	assert.equal(describeTrace(oldMissed), `${time} keeping the cache warm missed the cache, idle 57 min: 0% of 692k from cache, 1 out, $2.6; stopped until your next message`);
+});
