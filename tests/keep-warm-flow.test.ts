@@ -155,16 +155,17 @@ function harness(options: Options = {}) {
 	};
 	request([user], sent, reply);
 	// A run after the first: false is cancelled before any request goes out; true sends one whose answer reads the
-	// cache; "aborted" sends one that is aborted after reading the cache.
+	// cache; "aborted" sends one that is aborted after reading the cache; "error" sends one that fails before using it.
 	let runs = 0;
-	const run = (answer: boolean | "aborted") => {
+	const run = (answer: boolean | "aborted" | "error") => {
 		state.idle = false;
 		emit("agent_start");
 		runs++;
 		const message = { role: "user", content: [{ type: "text", text: `more ${runs}` }], timestamp: Date.now() };
 		branch.push({ type: "message", id: `u${runs}`, parentId: null, timestamp: new Date().toISOString(), message } as never);
 		if (answer) {
-			const reply2 = { role: "assistant", content: [{ type: "text", text: "ok" }], timestamp: Date.now(), stopReason: answer === "aborted" ? "aborted" : "stop", usage: { input: 2, output: 5, cacheRead: cached, cacheWrite: 0 } };
+			const used = answer === "error" ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } : { input: 2, output: 5, cacheRead: cached, cacheWrite: 0 };
+			const reply2 = { role: "assistant", content: [{ type: "text", text: "ok" }], timestamp: Date.now(), stopReason: answer === true ? "stop" : answer, usage: used };
 			request([user, message], { ...sent, messages: [...sent.messages, { role: "user", content: `more ${runs}` }] }, reply2);
 			branch.push({ type: "message", id: `a${runs}`, parentId: null, timestamp: new Date().toISOString(), message: reply2 } as never);
 		}
@@ -365,6 +366,38 @@ test("R1: /cache-keeper says why a period is left to Pi's own warming", async (t
 	h = harness({ lifetime: 300, thinking: { type: "enabled", budget_tokens: 8000 } });
 	h.emit("agent_settled");
 	assert.match(await h.command("cache-keeper"), /at most 10 refreshes \(this model has no prices, so the cost of a miss is unknown\); this session is left to Pi's own warming: Claude's budget-based thinking/);
+});
+
+test("R1: a run whose last request failed before using the cache: the period is its earlier answer's, owned, and that request is re-sent", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE });
+	h.emit("agent_settled");
+	await h.idle(100_000);
+	// One run, two requests: the first is answered from the cache (a tool call), the second fails before using it.
+	h.state.idle = false;
+	h.emit("agent_start");
+	const ask = { role: "user", content: [{ type: "text", text: "go" }], timestamp: Date.now() };
+	const turn = { role: "assistant", content: [{ type: "text", text: "calling" }], timestamp: Date.now(), stopReason: "toolUse", usage: { input: 2, output: 5, cacheRead: 600_000, cacheWrite: 0 } };
+	const tool = { role: "toolResult", toolCallId: "t", toolName: "x", content: [{ type: "text", text: "done" }], isError: false, timestamp: Date.now() };
+	const failed = { role: "assistant", content: [], timestamp: Date.now() + 1, stopReason: "error", errorMessage: "overloaded", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+	const first = { ...h.sent, messages: [...h.sent.messages, { role: "user", content: "go" }] };
+	h.emit("context_with_system", { messages: [ask] });
+	h.emit("before_provider_request", { payload: first });
+	h.emit("message_end", { message: turn });
+	h.emit("context_with_system", { messages: [ask, turn, tool] });
+	h.emit("before_provider_request", { payload: { ...first, messages: [...first.messages, { role: "assistant", content: "calling" }, { role: "user", content: "done" }] } });
+	h.emit("message_end", { message: failed });
+	for (const [id, message] of [["u1", ask], ["a1", turn], ["t1", tool], ["e1", failed]] as const) {
+		h.branch.push({ type: "message", id, parentId: null, timestamp: new Date().toISOString(), message } as never);
+	}
+	h.state.idle = true;
+	h.emit("agent_settled");
+	assert.deepEqual(h.decide(), { action: "stop" }, "owned");
+	await h.idle(300_000);
+	assert.equal(h.warms.length, 1);
+	assert.deepEqual(h.warms[0].payload, { ...first, max_tokens: 1 }, "the request of the real answer, not the failed one");
 });
 
 // ---------------------------------------------------------------------------------------------------------------- R2

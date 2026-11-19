@@ -121,7 +121,7 @@ interface CapturedRequest {
 	payload?: Payload;
 	model: Model<Api>;
 	at: number;
-	/** The timestamp of the answer to this request, once it arrived (message_end). */
+	/** The timestamp of the answer to this request, when that answer read or wrote the cache (message_end). */
 	answeredAt?: number;
 }
 
@@ -219,6 +219,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// agent_settled), when this extension last refreshed the cache, the refresh in flight, and when Pi last decided to
 	// refresh it itself.
 	let period: WarmPeriod | undefined;
+	// The request whose answer was the latest to read or write the cache: a later request that failed before using the
+	// cache does not replace it.
+	let answerRequest: CapturedRequest | undefined;
 	let running = false;
 	let warmedAt: number | undefined;
 	let warming: AbortController | undefined;
@@ -231,7 +234,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (state?.answeredAt === undefined) return "no answer has read or written the prompt cache yet";
 		if (!state.lifetime) return "the cache lifetime is unknown";
 		if (state.lifetime.ms < MIN_OWNED_LIFETIME_MS) return `the cache lifetime (${formatDuration(state.lifetime.ms)}) is under a minute`;
-		const request = captured;
+		const request = answerRequest;
 		if (!request || request.answeredAt !== state.answeredAt) return "the request of the last answer was not captured";
 		if (!request.payload) return `${request.model.api} requests cannot be re-sent`;
 		if (!canReplay(request.payload)) return "Claude's budget-based thinking changes the cache key when the answer is capped";
@@ -245,7 +248,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const answeredAt = state?.answeredAt;
 		if (!fresh && period && (answeredAt === undefined || answeredAt === period.answeredAt)) return;
 		const notOwned = whyNotOwned(state);
-		const request = notOwned === undefined ? captured : undefined;
+		const request = notOwned === undefined ? answerRequest : undefined;
 		period = {
 			answeredAt,
 			idleSince: Date.now(),
@@ -303,7 +306,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	};
 	const forget = (ctx: ExtensionContext) => {
 		pendingTranscript = undefined;
-		captured = undefined;
+		captured = answerRequest = undefined;
 		// Nothing to keep warm until the next real answer.
 		if (period) period.request = undefined;
 		warmedAt = undefined;
@@ -856,9 +859,13 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		pendingTranscript = undefined;
 		if (transcript && event.message.role === "assistant" && ctx.model?.api === BRIDGE_API) captured = { transcript, model: ctx.model, at: Date.now() };
 	});
-	// Which answer the captured request got, so a keep-warm period knows its answer's request.
+	// Which answer the captured request got, so a keep-warm period knows the request of its real answer.
 	pi.on("message_end", (event) => {
-		if (event.message.role === "assistant" && captured && captured.answeredAt === undefined) captured.answeredAt = event.message.timestamp;
+		const message = event.message;
+		if (message.role !== "assistant" || !captured || captured.answeredAt !== undefined) return;
+		if (message.usage.cacheRead + message.usage.cacheWrite <= 0) return;
+		captured.answeredAt = message.timestamp;
+		answerRequest = captured;
 	});
 	pi.on("session_start", (_event, ctx) => {
 		sessionCtx = ctx;
