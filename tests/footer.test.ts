@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { fitParts, footerParts, formatFooter, lifetimesView, priceAt, sentView, tierInUse, type FooterView, type Tone } from "../footer.ts";
+import { clockText, fitParts, footerParts, formatFooter, lifetimesView, priceAt, sentView, tierInUse, type FooterView, type Tone } from "../footer.ts";
 import { requestCache } from "../keep-warm.ts";
 import { factsOf, findFacts, lookupsFor, type DataStore } from "../model-data.ts";
 
@@ -67,6 +67,46 @@ test("keep-warm in the footer: why it ended, why a period is Pi's, and two misse
 	assert.equal(formatFooter({ keepWarm: { fallback: true }, ...claude }), `⚠ keep-warm: Pi's after 2 refreshes without a hit (/cache-keeper-warm)${values}`);
 	assert.equal(formatFooter(warm(5 * MIN, { keepWarm: { leftToPi: "several cache lifetimes" }, ...claude })), `cache warm · 5m left · keep-warm: Pi's (several cache lifetimes)${values}`);
 	assert.equal(formatFooter(warm(5 * MIN, { keepWarm: { pending: true }, ...claude })), `cache warm · 5m left · keep-warm: from your next message${values}`);
+});
+
+test("the keep-warm goal: the setting, and while the period is kept warm, until when and its budget; a clock time, not a duration", (t) => {
+	// A fixed local morning, so the clock texts and their widths do not depend on when the test runs.
+	mock.timers.enable({ apis: ["Date"], now: new Date(2026, 10, 20, 9, 32).getTime() });
+	t.after(() => mock.timers.reset());
+	const until = Date.now() + 72 * MIN;
+	assert.equal(clockText(until), "10:44");
+	const at = clockText(until);
+	const goal = (budget?: { spent: string; of: string; refreshes?: true }, minutes = 120, when: number | undefined = until) => ({ goal: { minutes, until: when, ...(budget ? { budget } : {}) } });
+	const values = " · long 1h (in use) · short 5m · sent 1h · api $5/$25 per M";
+	// Kept warm: the goal, until when, and what the period has spent of one cache miss.
+	assert.equal(formatFooter(warm(59 * MIN, { keepWarm: goal({ spent: "$0.36", of: "$2.07" }), ...claude })), `cache warm · 59m left · keep-warm 2h until ${at}, $0.36 spent of $2.07${values}`);
+	assert.equal(formatFooter(warm(59 * MIN, { keepWarm: goal({ spent: "$0.36", of: "$2.07" }), ...claude }), Infinity, paint), `cache warm · 59m left · <muted>keep-warm 2h until ${at}, $0.36 spent of $2.07</> · long 1h<dim> (in use)</> · <dim>short </><dim>5m</> · <dim>sent 1h</> · api $5/$25<dim> per M</>`);
+	// Without prices: refreshes against the most.
+	assert.equal(formatFooter(warm(4 * MIN, { keepWarm: goal({ spent: "3", of: "10", refreshes: true }, 30) })), `cache warm · 4m left · keep-warm 30m until ${at}, 3 of 10 refreshes`);
+	assert.equal(formatFooter(warm(4 * MIN, { keepWarm: goal({ spent: "3", of: "10", refreshes: true }, 90) })), `cache warm · 4m left · keep-warm 1h30m until ${at}, 3 of 10 refreshes`);
+	// While a refresh is out, the same.
+	assert.equal(formatFooter({ countdown: { state: "refreshing" }, keepWarm: goal({ spent: "$0.18", of: "$2.07" }) }), `cache warm · refreshing · keep-warm 2h until ${at}, $0.18 spent of $2.07`);
+	// Not being kept warm right now (a request runs, the cache is cold, no countdown, the limit passed): the setting only.
+	assert.equal(formatFooter({ countdown: { state: "running" }, keepWarm: goal({ spent: "$0", of: "$2.07" }), ...claude }), `cache in use · keep-warm 2h${values}`);
+	assert.equal(formatFooter({ countdown: { state: "cold" }, keepWarm: goal({ spent: "$0", of: "$2.07" }) }), "cache cold · next message full price · keep-warm 2h");
+	assert.equal(formatFooter({ keepWarm: { goal: { minutes: 120 } }, ...claude }), `keep-warm 2h${values}`);
+	assert.equal(formatFooter(warm(5 * MIN, { keepWarm: goal({ spent: "$0", of: "$2.07" }, 120, Date.now() - 1000) })), "cache warm · 5m left · keep-warm 2h");
+	// A limit that runs out after midnight says so.
+	const tonight = new Date(Date.now());
+	tonight.setHours(23, 59, 0, 0);
+	assert.equal(clockText(tonight.getTime()), "23:59");
+	assert.equal(clockText(tonight.getTime() + 11 * MIN), `tomorrow ${clockText(tonight.getTime() + 11 * MIN).slice(-5)}`);
+	assert.match(clockText(tonight.getTime() + 11 * MIN), /^tomorrow 00:10$/);
+	// Narrower: the goal's wording first, then the budget, then the goal itself before the price; errors outlast it.
+	const line = warm(59 * MIN, { keepWarm: goal({ spent: "$0.36", of: "$2.07" }), ...claude });
+	assert.equal(formatFooter(line, 120), "cache warm · 59m left · keep-warm until 10:44, $0.36/$2.07 · long 1h (in use) · short 5m · sent 1h · api $5/$25 per M");
+	assert.equal(formatFooter(line, 100), "cache warm · 59m left · keep-warm until 10:44 · long 1h (in use) · short 5m · sent 1h · api $5/$25");
+	assert.equal(formatFooter(line, 80), "warm 59m · keep-warm until 10:44 · long 1h · short 5m · sent 1h · api $5/$25");
+	assert.equal(formatFooter(line, 60), "warm 59m · keep-warm until 10:44 · long 1h · api $5/$25", "it outlasts the other lifetime");
+	assert.equal(formatFooter(line, 50), "warm 59m · long 1h · short 5m · api $5/$25", "and goes before the price");
+	// An error outlasts it, as before.
+	const failed = warm(25_000, { keepWarm: { ended: { stop: "failed", limit: "2 h", amounts: "$0.18 spent, a miss costs $2.07" } }, ...claude });
+	assert.equal(formatFooter(failed, 40), "warm 0:25 · ⚠ keep-warm failed · long 1h");
 });
 
 test("the cache lifetimes: the countdown's for the tier in use, the model's own for the other, a guess and a partial answer marked, unknown said", () => {
@@ -290,6 +330,8 @@ test("narrow terminals: wording goes first, then the least important values; the
 test("at every width from 1 to 200 columns, in every state: within the width, and no value outlasts an error", () => {
 	const views: FooterView[] = [
 		warm(59 * MIN),
+		warm(59 * MIN, { keepWarm: { goal: { minutes: 120, until: Date.now() + HOUR, budget: { spent: "$0.36", of: "$2.07" } } }, ...claude }),
+		warm(25_000, { keepWarm: { goal: { minutes: 1440, until: Date.now() + 23 * HOUR, budget: { spent: "9", of: "10", refreshes: true } } }, ...claude, data: { served: "api" } }),
 		warm(59 * MIN, { ...claude, price: { via: "sub", subscription: true, rates: { input: 4, output: 20, above: 200_000 } } }),
 		warm(59 * MIN, { lifetimes: { inUse: "short", short: { seconds: 3600 }, long: { seconds: 3600 } }, sent: { what: { lifetimes: [], tiers: ["short"] }, conflict: false }, price: { via: "sub", subscription: true } }),
 		{ countdown: { state: "running" }, lifetimes: { inUse: "long", short: { seconds: 3600 }, long: { seconds: 3600 } }, sent: { what: { lifetimes: [], tiers: ["short"] }, conflict: false }, price: { via: "sub", subscription: true } },
