@@ -1711,14 +1711,14 @@ test("R8: the tier is the one the request asks for, not the setting", { skip: no
 	assert.equal(await ownedRefresh(plain), 276_000, "no marker: short");
 });
 
-test("R8: an answer that reports cache writes in both tiers, or in a tier the data gives another lifetime, is Pi's", async (t) => {
+test("R8: an answer that reports cache writes in both buckets, or a bucket whose lifetime is not the request's, is Pi's", async (t) => {
 	t.after(() => mock.timers.reset());
 	withRetention(t, "long");
 	const oneHour = { model: "claude", max_tokens: 64_000, system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "1h" } }], messages: [{ role: "user", content: "hi" }], thinking: { type: "adaptive" } };
 	const cases: [string, Record<string, unknown> | undefined, Record<string, number>, RegExp][] = [
 		["both tiers", oneHour, { cacheWrite: 120_000, cacheWrite1h: 8_000 }, /the answer reports cache writes in both tiers/],
-		["the 5-minute tier for a 1-hour request", oneHour, { cacheWrite: 120_000, cacheWrite1h: 0 }, /the answer reports cache writes in the short tier, which lasts 5 min here; the request's cache lasts 60 min/],
-		["the 1-hour tier for a request with no marker", undefined, { cacheWrite: 120_000, cacheWrite1h: 120_000 }, /the answer reports cache writes in the long tier, which lasts 60 min here; the request's cache lasts 5 min/],
+		["the 5-minute bucket for a 1-hour request", oneHour, { cacheWrite: 120_000, cacheWrite1h: 0 }, /an answer of this model reports a 5 min cache write; the request's cache lasts 60 min as it states/],
+		["the 1-hour bucket for a request with no marker", undefined, { cacheWrite: 120_000, cacheWrite1h: 120_000 }, /an answer of this model reports a 60 min cache write; the request's cache lasts 5 min by the route's data/],
 	];
 	for (const [label, sent, answer, reason] of cases) {
 		clock();
@@ -2299,11 +2299,10 @@ test("route lifetimes: a plain marker on a route whose data gives the short tier
 	assert.equal(refresh.stop, undefined, "warming goes on");
 });
 
-test("route lifetimes: the same request whose answer reports the 5-minute tier (the proxy fell back to an API key): owned at 5 minutes by the served route's data, or not owned; never at an hour", async (t) => {
+test("route lifetimes: the same request whose answer reports the 5-minute write (the proxy fell back to an API key): owned at 5 minutes by the served route's data, or Pi's; never at an hour", async (t) => {
 	t.after(() => mock.timers.reset());
 	withRetention(t, undefined);
-	// The proxy said the API key served it: that route's data (5 minutes short) holds, which the plain marker's own
-	// default agrees with.
+	// The proxy said the API key served it: that route's data (5 minutes short) holds, and the 5-minute write agrees.
 	clock();
 	fresh({ compactBeforeExpiry: false });
 	const keyRoute = gateway(t, 300);
@@ -2311,18 +2310,18 @@ test("route lifetimes: the same request whose answer reports the 5-minute tier (
 	keyRoute(served);
 	assert.equal(await ownedRefresh(served, HOUR), 276_000, "25 s before the 5-minute expiry");
 	assert.equal(traces().find((r) => r.event === "warm" && r.action === "warm").lifetimeSeconds, 300);
-	// Nobody said so: the data still gives the short tier an hour, and the answer's 5-minute tier does not confirm it.
+	// Nobody said so: the data gives the short tier an hour, the answer says five minutes. They disagree: Pi's.
 	clock();
 	fresh({ compactBeforeExpiry: false });
 	const unsaid = harness({ lifetime: 3600, sent: plainMarker, answer: FIVE_MINUTE_WRITE });
 	unsaid.emit("agent_settled");
 	assert.equal(unsaid.decide(), undefined, "not owned");
-	assert.match(await unsaid.command("cache-keeper"), /left to Pi's own warming: the answer reports cache writes in the short tier \(5 min\), shorter than the 60 min the route's data gives the request/);
+	assert.match(await unsaid.command("cache-keeper"), /left to Pi's own warming: an answer of this model reports a 5 min cache write; the request's cache lasts 60 min by the route's data/);
 	await unsaid.idle(2 * HOUR);
 	assert.equal(unsaid.state.attempts, 0, "the extension sends nothing");
 });
 
-test("route lifetimes: no tier reported and no earlier proof on the branch: not owned; an earlier answer of the model that reported the 1-hour write is proof", async (t) => {
+test("route lifetimes: no bucket reported and no earlier proof on the branch: Pi's; an earlier answer of the model that reported the 1-hour write is proof", async (t) => {
 	t.after(() => mock.timers.reset());
 	withRetention(t, undefined);
 	clock();
@@ -2336,7 +2335,7 @@ test("route lifetimes: no tier reported and no earlier proof on the branch: not 
 	);
 	await h.idle(2 * HOUR);
 	assert.equal(h.state.attempts, 0);
-	// An earlier answer of the same model wrote the 1-hour tier; the latest only read the cache.
+	// An earlier answer of the same model wrote the 1-hour bucket; the latest only read the cache.
 	clock();
 	fresh({ compactBeforeExpiry: false });
 	const earlier = { role: "assistant", content: [], timestamp: 500, stopReason: "stop", provider: "cliproxyapi", model: "sub/claude", usage: { input: 2, output: 5, cacheRead: 0, cacheWrite: 600_000, cacheWrite1h: 600_000 } };
@@ -2351,29 +2350,109 @@ test("route lifetimes: no tier reported and no earlier proof on the branch: not 
 	assert.equal(unproven.decide(), undefined);
 });
 
-test("route lifetimes: a stated lifetime is compared with the data as before; a tier name that differs with the same lifetime is no refusal", async (t) => {
+// Every row of the probe (route data in seconds for the short and the long tier, the request's marker, the bucket the
+// answer reports), keep-warm on: owned at a lifetime, with the first refresh 5% (at least 25 s) before it expires, or
+// Pi's, with why. The bucket is evidence of a lifetime: owned only where it is the request's lifetime.
+const PROBE_ROUTES: Record<string, { short?: number; long?: number } | undefined> = {
+	"300/3600": { short: 300, long: 3600 },
+	"3600/3600": { short: 3600, long: 3600 },
+	"3600/-": { short: 3600 },
+	"3600/7200": { short: 3600, long: 7200 },
+	"300/1800": { short: 300, long: 1800 },
+	"1800/3600": { short: 1800, long: 3600 },
+	"300/300": { short: 300, long: 300 },
+	"-/-": undefined,
+};
+const PROBE_MARKERS = { plain: { type: "ephemeral" }, "1h": { type: "ephemeral", ttl: "1h" } } as const;
+const PROBE_BUCKETS = { "5m": FIVE_MINUTE_WRITE, "1h": HOUR_WRITE, none: {} } as const;
+const probeRequest = (marker: keyof typeof PROBE_MARKERS) => ({ ...plainMarker, system: [{ type: "text", text: "s", cache_control: PROBE_MARKERS[marker] }] });
+const probeHarness = (route: string, marker: keyof typeof PROBE_MARKERS, bucket: keyof typeof PROBE_BUCKETS, options: Options = {}) =>
+	harness({ cost: WITH_WRITE, model: { provider: "gw", promptCache: PROBE_ROUTES[route] }, sent: probeRequest(marker), answer: PROBE_BUCKETS[bucket], ...options });
+const UNCONFIRMED = /the request states no cache lifetime .* no answer of this model reported a cache write that confirms it/;
+const DISAGREE = /an answer of this model reports a \d+ min cache write; the request's cache lasts \d+ min/;
+const STATED = /the request's cache lifetime does not match the model data/;
+const UNKNOWN = /the cache lifetime is unknown/;
+const KEEP_WARM_ROWS: [string, keyof typeof PROBE_MARKERS, keyof typeof PROBE_BUCKETS, number | RegExp][] = [
+	["300/3600", "plain", "5m", 300],
+	["300/3600", "plain", "1h", DISAGREE],
+	["300/3600", "plain", "none", 300],
+	["300/3600", "1h", "5m", DISAGREE],
+	["300/3600", "1h", "1h", 3600],
+	["300/3600", "1h", "none", 3600],
+	["3600/3600", "plain", "5m", DISAGREE],
+	["3600/3600", "plain", "1h", 3600],
+	["3600/3600", "plain", "none", UNCONFIRMED],
+	["3600/3600", "1h", "5m", DISAGREE],
+	["3600/3600", "1h", "1h", 3600],
+	["3600/3600", "1h", "none", 3600],
+	["3600/-", "plain", "5m", DISAGREE],
+	["3600/-", "plain", "1h", 3600],
+	["3600/-", "plain", "none", UNCONFIRMED],
+	["3600/-", "1h", "5m", DISAGREE],
+	["3600/-", "1h", "1h", 3600],
+	["3600/-", "1h", "none", UNKNOWN],
+	["3600/7200", "plain", "5m", DISAGREE],
+	["3600/7200", "plain", "1h", 3600],
+	["3600/7200", "plain", "none", UNCONFIRMED],
+	["3600/7200", "1h", "5m", STATED],
+	["3600/7200", "1h", "1h", STATED],
+	["3600/7200", "1h", "none", STATED],
+	["300/1800", "plain", "5m", 300],
+	["300/1800", "plain", "1h", DISAGREE],
+	["300/1800", "plain", "none", 300],
+	["300/1800", "1h", "5m", STATED],
+	["300/1800", "1h", "1h", STATED],
+	["300/1800", "1h", "none", STATED],
+	["1800/3600", "plain", "5m", DISAGREE],
+	["1800/3600", "plain", "1h", DISAGREE],
+	["1800/3600", "plain", "none", UNCONFIRMED],
+	["1800/3600", "1h", "5m", DISAGREE],
+	["1800/3600", "1h", "1h", 3600],
+	["1800/3600", "1h", "none", 3600],
+	["300/300", "plain", "5m", 300],
+	["300/300", "plain", "1h", DISAGREE],
+	["-/-", "plain", "5m", 300],
+	["-/-", "plain", "1h", DISAGREE],
+	["-/-", "plain", "none", UNKNOWN],
+	["-/-", "1h", "5m", DISAGREE],
+	["-/-", "1h", "1h", 3600],
+	["-/-", "1h", "none", UNKNOWN],
+];
+
+test("route lifetimes, keep-warm on: every row of the probe is owned at the request's lifetime where the evidence agrees, else Pi's", async (t) => {
 	t.after(() => mock.timers.reset());
-	withRetention(t, undefined);
-	const stated = (ttl: string) => ({ ...plainMarker, system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl } }] });
-	// `ttl: "5m"` on the hour route: the stated lifetime differs from the data.
-	clock();
-	fresh({ compactBeforeExpiry: false });
-	const five = harness({ lifetime: 3600, sent: stated("5m") });
-	five.emit("agent_settled");
-	assert.equal(five.decide(), undefined);
-	assert.match(await five.command("cache-keeper"), /left to Pi's own warming: the request's cache lifetime does not match the model data/);
-	// `ttl: "1h"` with a 1-hour write: owned at the hour, as before.
-	clock();
-	fresh({ compactBeforeExpiry: false });
-	assert.equal(await ownedRefresh(harness({ lifetime: 3600, sent: stated("1h"), answer: HOUR_WRITE }), HOUR), 3_421_000);
-	// A route whose data gives both tiers 5 minutes: the plain marker's 5 minutes, the answer's 1-hour tier lasts 5 minutes
-	// there too. Owned at 5 minutes (it was "the answer wrote the other tier").
-	clock();
-	fresh({ compactBeforeExpiry: false });
-	assert.equal(await ownedRefresh(harness({ lifetime: 300, sent: plainMarker, answer: HOUR_WRITE }), HOUR), 276_000);
+	for (const [route, marker, bucket, expected] of KEEP_WARM_ROWS) {
+		const label = `${route}, ${marker} marker, ${bucket} bucket`;
+		withRetention(t, marker === "1h" ? "long" : undefined);
+		clock();
+		fresh({ compactBeforeExpiry: false });
+		const h = probeHarness(route, marker, bucket);
+		if (typeof expected === "number") {
+			const at = await ownedRefresh(h, (expected + 10) * 1000);
+			assert.equal(at, 1_000 + expected * 1000 - Math.max(25_000, expected * 50), `${label}: the first refresh`);
+			const refresh = traces().find((r) => r.event === "warm" && r.action === "warm");
+			assert.equal(refresh?.lifetimeSeconds, expected, `${label}: the period's lifetime`);
+		} else {
+			h.emit("agent_settled");
+			assert.equal(h.decide(), undefined, `${label}: Pi's`);
+			assert.match(await h.command("cache-keeper"), new RegExp(`left to Pi's own warming: ${expected.source}`), label);
+			await h.idle(HOUR + 10_000);
+			assert.equal(h.state.attempts, 0, `${label}: the extension sends nothing`);
+		}
+	}
 });
 
-test("route lifetimes: Claude on the Anthropic API with Pi's real adapter, short and long, is kept warm as before; a plain marker whose answer reports the 1-hour tier is not", { skip: noCatalog }, async (t) => {
+test("route lifetimes: a period owned by the data for the tier asked names that source, not the bucket's", async (t) => {
+	t.after(() => mock.timers.reset());
+	withRetention(t, undefined);
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const h = probeHarness("3600/-", "plain", "1h");
+	assert.equal(await ownedRefresh(h, HOUR), 3_421_000);
+	assert.equal(traces().find((r) => r.event === "warm" && r.action === "warm").lifetimeSource, "declared by the model");
+});
+
+test("route lifetimes: Claude on the Anthropic API with Pi's real adapter, short and long, is kept warm as before; a plain marker whose answer reports the 1-hour write is not", { skip: noCatalog }, async (t) => {
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
 	for (const [retention, answer, at] of [
@@ -2396,7 +2475,21 @@ test("route lifetimes: Claude on the Anthropic API with Pi's real adapter, short
 	const h = harness({ model: { ...claude(), cost: WITH_WRITE }, sent, answer: HOUR_WRITE, stream: viaRealAdapter(claude()) });
 	h.emit("agent_settled");
 	assert.equal(h.decide(), undefined);
-	assert.match(await h.command("cache-keeper"), /the answer reports cache writes in the long tier, which lasts 60 min here; the request's cache lasts 5 min/);
+	assert.match(await h.command("cache-keeper"), /an answer of this model reports a 60 min cache write; the request's cache lasts 5 min by the route's data/);
+});
+
+test("route lifetimes: a format whose answers report no bucket goes by the data, as before (GPT-6.1 Sol on OpenAI's API, 30 minutes)", { skip: noCatalog }, async (t) => {
+	t.after(() => mock.timers.reset());
+	noNetwork(t);
+	withRetention(t, undefined);
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const real = MODELS.openai["gpt-6.1-sol"];
+	const model = { ...real, promptCache: undefined, cost: WITH_WRITE };
+	const sent = await adapterPayload(model, { maxTokens: 8192, cacheRetention: "short" }, systemAndUser);
+	const h = harness({ model, sent, stream: viaRealAdapter(model) });
+	assert.equal(await ownedRefresh(h), 1_711_000, "OpenAI's 30-minute minimum, no bucket");
+	assert.equal(traces().find((r) => r.event === "warm" && r.action !== "pi-stopped").lifetimeSource, "OpenAI's minimum");
 });
 
 const withCompaction = (lookupMs: number, options: Options) => {

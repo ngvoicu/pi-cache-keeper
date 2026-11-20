@@ -3,12 +3,18 @@ import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 const REPORTED_TIER_SECONDS = { short: 300, long: 3600 } as const;
 
+/** The lifetimes of the two write buckets an answer can report (Anthropic, Bedrock): the 5-minute and the 1-hour cache. */
+export const FIVE_MINUTE_WRITE_MS = 300_000;
+export const ONE_HOUR_WRITE_MS = 3_600_000;
+
 /**
- * The lifetime a provider that reports its writes per tier (Anthropic's `ephemeral_5m_input_tokens` and
- * `ephemeral_1h_input_tokens`) documents for the tier it reported: the 5-minute and the 1-hour cache.
+ * The write bucket an answer's usage reports, as the lifetime it is evidence of, never as a tier's name: an hour where
+ * any of the write went to the 1-hour cache, five minutes where the write went to none of it. Undefined where the answer
+ * wrote nothing or its format reports no bucket (`cacheWrite1h` undefined).
  */
-export function reportedTierMs(tier: "short" | "long"): number {
-	return REPORTED_TIER_SECONDS[tier] * 1000;
+export function writeBucketMs(usage: { cacheWrite: number; cacheWrite1h?: number }): number | undefined {
+	if (usage.cacheWrite <= 0 || usage.cacheWrite1h === undefined) return undefined;
+	return usage.cacheWrite1h > 0 ? ONE_HOUR_WRITE_MS : FIVE_MINUTE_WRITE_MS;
 }
 const OPENAI_MIN_LIFETIME_SECONDS = 1800;
 const KIMI_TTL_SECONDS = { short: 300, long: 3600 } as const;
@@ -37,29 +43,49 @@ export interface CacheState {
 	answeredAt?: number;
 	/** That answer's prompt: input + cache read + cache write tokens. */
 	answerPrompt?: number;
-	/** With keep-warm on: the tiers that answer reports writing the cache in, where it reports them (Anthropic). */
-	answerTiers?: ("short" | "long")[];
-	/** With keep-warm on: the tier the lifetime is for, the one the latest write reported, else the requested one. */
-	tier?: "short" | "long";
-	/** With keep-warm on: the tier the latest cache write of the model's own answers reported, where one reported it. */
-	writeTier?: "short" | "long";
+	/** With keep-warm on: the write buckets that answer reports, as lifetimes (5 minutes, 1 hour), where it reports them. */
+	answerBuckets?: number[];
+	/**
+	 * With keep-warm on: the bucket the latest cache write of the model's own answers reported, as the lifetime it is
+	 * evidence of, where one reported it.
+	 */
+	writeBucketMs?: number;
 }
 
 /**
- * The lifetime the model's data gives a tier: declared for it (Pi's catalog, models.json, providers.dev's values written
- * there); else, where an answer reported writing that tier, the provider's documented lifetime for it; else a lifetime
- * assumed for the model family (OpenAI's 30-minute minimum, Kimi's 5 minutes or 1 hour for the tier `asked`).
+ * The lifetime the route's data gives the tier a request asks for (`asked`): declared for it (Pi's catalog, models.json,
+ * providers.dev's values written there); else a lifetime assumed for the model family (OpenAI's 30-minute minimum,
+ * Kimi's 5 minutes or 1 hour). Nothing an answer reported.
  */
-export function lifetimeFor(model: Model<Api>, tier: "short" | "long", reported: boolean, asked: "short" | "long"): CacheState["lifetime"] {
-	const declared = model.promptCache?.[tier];
+export function lifetimeFor(model: Model<Api>, asked: "short" | "long"): CacheState["lifetime"] {
+	const declared = model.promptCache?.[asked];
 	if (declared !== undefined) return { ms: declared * 1000, source: "declared by the model" };
-	if (reported) return { ms: REPORTED_TIER_SECONDS[tier] * 1000, source: "reported by the provider" };
 	if (hasExplicitPromptCache(model)) return { ms: OPENAI_MIN_LIFETIME_SECONDS * 1000, source: "OpenAI's minimum" };
 	if (isKimiOnMoonshot(model)) {
 		const long = asked === "long" && (model.compat as OpenAICompletionsCompat | undefined)?.supportsLongCacheRetention !== false;
 		return { ms: KIMI_TTL_SECONDS[long ? "long" : "short"] * 1000, source: long ? "Kimi's 1-hour option" : "Kimi's default" };
 	}
 	return undefined;
+}
+
+/**
+ * The lifetime a request's cache lasts, by the evidence: the answer's write bucket where one reported it (the 1-hour
+ * write an hour, a write with nothing in the 1-hour cache five minutes, whatever the data says for either tier; with the
+ * data's source where the data gives the tier asked that same lifetime), else the route's data for the tier the request
+ * asked for (`lifetimeFor`).
+ */
+export function evidencedLifetime(model: Model<Api>, asked: "short" | "long", bucketMs: number | undefined): CacheState["lifetime"] {
+	const data = lifetimeFor(model, asked);
+	if (bucketMs === undefined) return data;
+	return data?.ms === bucketMs ? data : { ms: bucketMs, source: "reported by the provider" };
+}
+
+/** The lifetime counted with keep-warm off, as before: the data for the tier the answer's bucket is named after. */
+function namedLifetime(model: Model<Api>, tier: "short" | "long", reported: boolean, asked: "short" | "long"): CacheState["lifetime"] {
+	const declared = model.promptCache?.[tier];
+	if (declared !== undefined) return { ms: declared * 1000, source: "declared by the model" };
+	if (reported) return { ms: REPORTED_TIER_SECONDS[tier] * 1000, source: "reported by the provider" };
+	return lifetimeFor(model, asked);
 }
 
 /**
@@ -91,32 +117,31 @@ export function cacheTier(entries: SessionEntry[], model?: { provider: string; i
  *   or write moves it too (otherwise such an answer is skipped);
  * - a `cache_warm` entry later than the answer counts wherever it sits: Pi appends an answer when it has finished
  *   streaming, with the timestamp of its start, so Pi's refresh during a long answer can come before it on the branch;
- * - the tier is the one the model's own answers reported (as `cacheTier` with a model): another model's cache is
- *   another cache.
- * `requested`, the tier the cached request was sent with, stands in for the retention Pi asks for now where no answer
- * reported one.
+ * - the lifetime is the request's, by the evidence (`evidencedLifetime`): the write bucket the model's own latest
+ *   cache write reported, else the data for the tier asked (`requested`, the tier the cached request was sent with, else
+ *   the retention Pi asks for now); another model's cache is another cache.
  */
 export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?: number, keepWarmOn = false, requested?: "short" | "long"): CacheState {
 	let refreshedAt: number | undefined;
 	let latestWarm: number | undefined;
-	let answer: { at: number; prompt: number; tiers?: ("short" | "long")[] } | undefined;
+	let answer: { at: number; prompt: number; buckets?: number[] } | undefined;
 	let reported: "short" | "long" | undefined;
+	let bucket: number | undefined;
 	let replied = false;
 	for (const entry of entries) {
 		if (entry.type === "compaction") {
-			refreshedAt = reported = answer = latestWarm = undefined;
+			refreshedAt = reported = answer = latestWarm = bucket = undefined;
 			replied = false;
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
 			const { input, cacheRead, cacheWrite, cacheWrite1h } = entry.message.usage;
 			const own = !keepWarmOn || (entry.message.provider === model.provider && entry.message.model === model.id);
 			if (own && cacheWrite > 0 && cacheWrite1h !== undefined) reported = cacheWrite1h > 0 ? "long" : "short";
+			if (own) bucket = writeBucketMs(entry.message.usage) ?? bucket;
 			const failed = entry.message.stopReason === "error" || entry.message.stopReason === "aborted";
 			if (cacheRead + cacheWrite > 0 || !failed) {
-				const tiers: ("short" | "long")[] | undefined =
-					cacheWrite > 0 && cacheWrite1h !== undefined
-						? [...(cacheWrite > cacheWrite1h ? (["short"] as const) : []), ...(cacheWrite1h > 0 ? (["long"] as const) : [])]
-						: undefined;
-				answer = { at: entry.message.timestamp, prompt: input + cacheRead + cacheWrite, ...(tiers ? { tiers } : {}) };
+				const buckets: number[] | undefined =
+					cacheWrite > 0 && cacheWrite1h !== undefined ? [...(cacheWrite > cacheWrite1h ? [FIVE_MINUTE_WRITE_MS] : []), ...(cacheWrite1h > 0 ? [ONE_HOUR_WRITE_MS] : [])] : undefined;
+				answer = { at: entry.message.timestamp, prompt: input + cacheRead + cacheWrite, ...(buckets ? { buckets } : {}) };
 			}
 			// A failed request may not have reached the cache.
 			if (entry.message.stopReason === "error" || entry.message.stopReason === "aborted") {
@@ -135,8 +160,15 @@ export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?
 	// A refresh before the latest real request (or before a compaction, which leaves refreshedAt unset) is stale.
 	if (refreshedAt !== undefined && warmedAt !== undefined) refreshedAt = Math.max(refreshedAt, warmedAt);
 	const asked = requested ?? (process.env.PI_CACHE_RETENTION === "long" ? "long" : "short");
-	const tier = reported ?? asked;
-	const lifetime = lifetimeFor(model, tier, reported !== undefined, asked);
+	const lifetime = keepWarmOn ? evidencedLifetime(model, asked, bucket) : namedLifetime(model, reported ?? asked, reported !== undefined, asked);
 	const expiresAt = lifetime && refreshedAt !== undefined ? refreshedAt + lifetime.ms : undefined;
-	return { lifetime, cached: refreshedAt !== undefined, expiresAt, ...(refreshedAt === undefined ? {} : { refreshedAt }), replied, ...(keepWarmOn ? { tier, ...(reported ? { writeTier: reported } : {}) } : {}), ...(answer ? { answeredAt: answer.at, answerPrompt: answer.prompt, ...(keepWarmOn && answer.tiers ? { answerTiers: answer.tiers } : {}) } : {}) };
+	return {
+		lifetime,
+		cached: refreshedAt !== undefined,
+		expiresAt,
+		...(refreshedAt === undefined ? {} : { refreshedAt }),
+		replied,
+		...(keepWarmOn && bucket !== undefined ? { writeBucketMs: bucket } : {}),
+		...(answer ? { answeredAt: answer.at, answerPrompt: answer.prompt, ...(keepWarmOn && answer.buckets ? { answerBuckets: answer.buckets } : {}) } : {}),
+	};
 }

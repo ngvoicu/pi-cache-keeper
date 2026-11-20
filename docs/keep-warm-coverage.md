@@ -94,3 +94,20 @@ Counted in model setups: each model once with thinking off, and once more with t
 | xiaomi | openai-completions | 3 | Pi 6 (no lifetime) | warm 3 (5 min) · Pi 3 (thinking enabled) | Pi 6 (no lifetime) | warm 3 (1 h) · Pi 3 (thinking enabled) |
 | zai-coding-cn | openai-completions | 4 | Pi 8 (no lifetime) | warm 4 (5 min) · Pi 4 (thinking enabled) | Pi 8 (no lifetime) | warm 4 (1 h) · Pi 4 (thinking enabled) |
 | zai | openai-completions | 7 | Pi 14 (no lifetime) | warm 7 (5 min) · Pi 7 (thinking enabled) | Pi 14 (no lifetime) | warm 7 (1 h) · Pi 7 (thinking enabled) |
+
+## Routes whose tiers last otherwise
+
+The 4,766 combinations of the three APIs the extension re-sends (`anthropic-messages`, `openai-completions`, `openai-responses`; on every other API a period is Pi's whatever the data) on two more routes, with the lifetimes written as providers.dev would write them (only for a tier the catalog has none for, so Pi's catalog wins where it has one): *short tier 1 h* (3600 s and 3,600 s, as a subscription login serves Claude; its answers report the 1-hour write for any marker) and *long tier 30 min* (300 s and 1,800 s; its answers report the bucket the markers name). A request's lifetime is the one a marker states, else the route's for the tier asked; a write bucket an answer reports is evidence of a lifetime, and a period is kept warm only where it agrees.
+
+| Retention, route | Combinations | Kept warm (lifetimes) | Left to Pi |
+| --- | --- | --- | --- |
+| short, short tier 1 h | 2,383 | 1,872 (1 h) | 511 |
+| long, short tier 1 h | 2,383 | 1,912 (1 h) | 471 |
+| short, long tier 30 min | 2,383 | 1,934 (5 min) | 449 |
+| long, long tier 30 min | 2,383 | 1,422 (5 min, 30 min, 1 h) | 961 |
+
+| API | short, short tier 1 h | long, short tier 1 h | short, long tier 30 min | long, long tier 30 min |
+| --- | --- | --- | --- | --- |
+| anthropic-messages | warm 478 (1 h) · Pi 311 (thinking enabled 266, write ≠ request's lifetime 30, refresh costs a miss 15) | warm 508 (1 h) · Pi 281 (thinking enabled 266, refresh costs a miss 15) | warm 508 (5 min) · Pi 281 (thinking enabled 266, refresh costs a miss 15) | warm 62 (5 min, 1 h) · Pi 727 (stated lifetime ≠ data 461, thinking enabled 266) |
+| openai-completions | warm 1164 (1 h) · Pi 184 (refresh costs a miss 113, thinking enabled 39, route's lifetime unconfirmed 32) | warm 1196 (1 h) · Pi 152 (refresh costs a miss 113, thinking enabled 39) | warm 1196 (5 min) · Pi 152 (refresh costs a miss 113, thinking enabled 39) | warm 1152 (5 min, 30 min) · Pi 196 (refresh costs a miss 113, stated lifetime ≠ data 44, thinking enabled 39) |
+| openai-responses | warm 230 (1 h) · Pi 16 (refresh costs a miss) | warm 208 (1 h) · Pi 38 (refresh costs a miss 16, stated lifetime ≠ data 16, two lifetimes 6) | warm 230 (5 min) · Pi 16 (refresh costs a miss) | warm 208 (5 min, 30 min) · Pi 38 (refresh costs a miss 16, stated lifetime ≠ data 16, two lifetimes 6) |
