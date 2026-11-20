@@ -58,8 +58,12 @@ const API_CAPS: Record<string, { keys: string[]; max: number }> = {
 };
 const LIMIT_KEYS = ["max_tokens", "max_output_tokens", "max_completion_tokens", "maxTokens", "maxOutputTokens"];
 
-/** Every cache lifetime a request states, wherever it sits, read here independently of the extension (milliseconds). */
-function statedLifetimes(payload: unknown): number[] {
+/**
+ * Every cache lifetime a request states, wherever it sits, read here independently of the extension (milliseconds).
+ * Anthropic's marker without a ttl states none: it counts as its documented 5 minutes, or as the hour where the answer
+ * reported writing the 1-hour tier (`answeredLong`), the only proof of a longer lifetime for it.
+ */
+function statedLifetimes(payload: unknown, answeredLong: boolean): number[] {
 	const out: number[] = [];
 	const duration = (value: unknown) => {
 		const match = typeof value === "string" ? /^(\d+)(s|m|h)$/.exec(value) : null;
@@ -69,8 +73,7 @@ function statedLifetimes(payload: unknown): number[] {
 		if (Array.isArray(value)) value.forEach(visit);
 		else if (value && typeof value === "object") {
 			for (const [key, field] of Object.entries(value)) {
-				// Anthropic's marker without a ttl is the 5-minute cache.
-				if (key === "cache_control" && field && typeof field === "object" && (field as Record<string, unknown>).ttl === undefined) out.push(300_000);
+				if (key === "cache_control" && field && typeof field === "object" && (field as Record<string, unknown>).ttl === undefined) out.push(answeredLong ? 3_600_000 : 300_000);
 				if (key === "ttl" || key === "prompt_cache_retention") {
 					const ms = duration(field);
 					if (ms !== undefined) out.push(ms);
@@ -113,9 +116,20 @@ const context = { messages: transcript };
 
 // providers.dev's lifetimes as the extension would write them into models.json: only for a tier Pi has none for.
 const DATA = { short: 300, long: 3600 };
+// Two routes whose tiers do not last what the tier names suggest, written the same way (only for a tier the catalog has
+// none for): one whose short tier lasts an hour, as a subscription login serves it, whose answers report the 1-hour
+// write for any marker; one whose long tier lasts 30 minutes, whose answers report the bucket the markers name.
+const ROUTES = {
+	"short tier 1 h": { short: 3600, long: 3600, bucket: "1h" as const },
+	"long tier 30 min": { short: 300, long: 1800, bucket: undefined },
+};
 
 type Retention = "short" | "long";
-type Data = "catalog" | "providers.dev";
+// The APIs whose requests the extension re-sends: on every other one a period is Pi's whatever the data, so the two
+// routes above are swept on these only.
+const RESENT = new Set(["anthropic-messages", "openai-completions", "openai-responses"]);
+const dataOf = (data: Exclude<Data, "catalog">) => (data === "providers.dev" ? DATA : ROUTES[data]);
+type Data = "catalog" | "providers.dev" | keyof typeof ROUTES;
 type Thinking = "off" | "high";
 interface Combo {
 	model: CatalogModel;
@@ -145,7 +159,7 @@ interface Outcome {
 type Rule = "never uncapped" | "never late" | "owned or left alone" | "nothing throws";
 
 const comboKey = (c: { model: { provider: string; id: string; api: string }; retention: string; data: string; thinking: string }) =>
-	`${c.model.provider}/${c.model.id} (${c.model.api}), ${c.retention} retention, ${c.data === "catalog" ? "Pi's catalog only" : "with providers.dev lifetimes"}, thinking ${c.thinking}`;
+	`${c.model.provider}/${c.model.id} (${c.model.api}), ${c.retention} retention, ${c.data === "catalog" ? "Pi's catalog only" : c.data === "providers.dev" ? "with providers.dev lifetimes" : `on a route whose ${c.data}`}, thinking ${c.thinking}`;
 
 function setRetention(retention: Retention) {
 	if (retention === "long") process.env.PI_CACHE_RETENTION = "long";
@@ -172,7 +186,7 @@ async function runCombo(combo: Combo): Promise<Outcome> {
 	writeFileSync(tracePath, "");
 	setRetention(combo.retention);
 	const model: CatalogModel =
-		combo.data === "catalog" ? combo.model : { ...combo.model, promptCache: { short: combo.model.promptCache?.short ?? DATA.short, long: combo.model.promptCache?.long ?? DATA.long } };
+		combo.data === "catalog" ? combo.model : { ...combo.model, promptCache: { short: combo.model.promptCache?.short ?? dataOf(combo.data).short, long: combo.model.promptCache?.long ?? dataOf(combo.data).long } };
 	const adapter = adapters.get(model.api) as Adapter;
 
 	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
@@ -267,7 +281,8 @@ async function runCombo(combo: Combo): Promise<Outcome> {
 		mock.timers.setTime(ANSWER_AT);
 		const tiers = markerTiers(sent);
 		const write = 2_000;
-		const write1h = REPORTS_TIER.has(model.api) ? { cacheWrite1h: tiers.has("long") ? (tiers.has("short") ? write / 2 : write) : 0 } : {};
+		const routeBucket = combo.data in ROUTES ? ROUTES[combo.data as keyof typeof ROUTES].bucket : undefined;
+		const write1h = REPORTS_TIER.has(model.api) ? { cacheWrite1h: routeBucket === "1h" || tiers.has("long") ? (tiers.has("short") && routeBucket !== "1h" ? write / 2 : write) : 0 } : {};
 		const usage = { input: 2, output: 5, cacheRead: PROMPT - write - 2, cacheWrite: write, ...write1h, totalTokens: PROMPT + 5, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 		const answer = { role: "assistant", content: [{ type: "text", text: "ok" }], api: model.api, provider: model.provider, model: model.id, usage, stopReason: "stop", timestamp: ANSWER_AT };
 		emit("message_end", { type: "message_end", message: answer });
@@ -284,7 +299,7 @@ async function runCombo(combo: Combo): Promise<Outcome> {
 		const stopped = traces().find((r) => r.action === "pi-stopped");
 		const owned = JSON.stringify(onWarm) === JSON.stringify({ action: "stop" });
 		outcome.owned = owned;
-		const stated = statedLifetimes(captured);
+		const stated = statedLifetimes(captured, ((usage as { cacheWrite1h?: number }).cacheWrite1h ?? 0) > 0);
 		const earliest = stated.length ? Math.min(...stated) : Infinity;
 
 		if (owned) {
@@ -374,7 +389,7 @@ async function runCombo(combo: Combo): Promise<Outcome> {
 function combos(models: CatalogModel[]): Combo[] {
 	return models.flatMap((model) =>
 		(["short", "long"] as const).flatMap((retention) =>
-			(["catalog", "providers.dev"] as const).flatMap((data) => (model.reasoning ? (["off", "high"] as const) : (["off"] as const)).map((thinking) => ({ model, retention, data, thinking }))),
+			(["catalog", "providers.dev", ...(RESENT.has(model.api) ? (Object.keys(ROUTES) as (keyof typeof ROUTES)[]) : [])] as const).flatMap((data) => (model.reasoning ? (["off", "high"] as const) : (["off"] as const)).map((thinking) => ({ model, retention, data, thinking }))),
 		),
 	);
 }
@@ -443,6 +458,9 @@ const SHORT: [RegExp, string][] = [
 	[/^at this model's prices a refresh costs as much as a miss$/, "refresh costs a miss"],
 	[/^the request carries a cache marker the extension does not read/, "unread marker"],
 	[/^the request's cache lifetime does not match the model data$/, "stated lifetime ≠ data"],
+	[/^the request states no cache lifetime .* the answer did not report a cache write, all of it in that cache, that confirms it$/, "route's lifetime unconfirmed"],
+	[/^an answer of this model reports a .* cache write; the request's cache lasts /, "write ≠ request's lifetime"],
+	[/^the answer reports cache writes in both tiers/, "both buckets written"],
 	[/^the request carries more than one cache lifetime$/, "two lifetimes"],
 	[/^the request carries no output limit/, "no output limit"],
 	[/is only assumed on the provider's own API/, "assumed lifetime elsewhere"],
@@ -450,6 +468,7 @@ const SHORT: [RegExp, string][] = [
 ];
 const shortOf = (reason: string) => SHORT.find(([re]) => re.test(reason))?.[1] ?? reason;
 const duration = (s: number) => (s % 3600 === 0 ? `${s / 3600} h` : s % 60 === 0 ? `${s / 60} min` : `${s} s`);
+const main = outcomes.filter((o) => o.data === "catalog" || o.data === "providers.dev");
 const SETUPS: [Retention, Data][] = [
 	["short", "catalog"],
 	["short", "providers.dev"],
@@ -467,6 +486,7 @@ const sum = (list: Outcome[]) => {
 };
 
 function coverageDocument(): string {
+	const outcomes = main;
 	const lines: string[] = [];
 	const push = (...l: string[]) => lines.push(...l);
 	const providers = new Set(outcomes.map((o) => o.provider));
@@ -475,7 +495,7 @@ function coverageDocument(): string {
 		"",
 		`<!-- Generated by tests/keep-warm-matrix.test.ts; do not edit. \`${REGENERATE}\` writes it again; \`npm test\` fails while it is out of date. -->`,
 		"",
-		`Who keeps an idle cache warm, for every model in the catalog of pi-ai ${PI_VERSION} (${n(models.length)} models of ${providers.size} providers), as the sweep in \`tests/keep-warm-matrix.test.ts\` finds it: ${n(all.length)} combinations of`,
+		`Who keeps an idle cache warm, for every model in the catalog of pi-ai ${PI_VERSION} (${n(models.length)} models of ${providers.size} providers), as the sweep in \`tests/keep-warm-matrix.test.ts\` finds it: ${n(outcomes.length)} combinations of`,
 		"",
 		"- cache retention `short` and `long` (`PI_CACHE_RETENTION`, as the extension sets it);",
 		`- model data: Pi's catalog only, or a cache lifetime for both tiers as providers.dev would supply it (the extension writes one only for a tier the catalog has none for; the sweep uses ${DATA.short} s and ${n(DATA.long)} s, so this shows the extension's behaviour with data, not the data);`,
@@ -531,7 +551,39 @@ function coverageDocument(): string {
 		push(`| ${provider} | ${api} | ${new Set(list.map((o) => o.id)).size} | ${cells.join(" | ")} |`);
 	}
 	push("");
+	routesSection(push);
 	return lines.join("\n");
+}
+
+// The two routes whose tiers last otherwise than their names suggest, in a section of their own.
+function routesSection(push: (...l: string[]) => number) {
+	const setups: [Retention, Data][] = Object.keys(ROUTES).flatMap((route) => (["short", "long"] as const).map((r): [Retention, Data] => [r, route as Data]));
+	const label = ([r, d]: [Retention, Data]) => `${r}, ${d}`;
+	const extra = outcomes.filter((o) => o.data in ROUTES);
+	push(
+		"## Routes whose tiers last otherwise",
+		"",
+		`The ${n(extra.length / 2)} combinations of the three APIs the extension re-sends (\`anthropic-messages\`, \`openai-completions\`, \`openai-responses\`; on every other API a period is Pi's whatever the data) on two more routes, with the lifetimes written as providers.dev would write them (only for a tier the catalog has none for, so Pi's catalog wins where it has one): *short tier 1 h* (${ROUTES["short tier 1 h"].short} s and ${n(ROUTES["short tier 1 h"].long)} s, as a subscription login serves Claude; its answers report the 1-hour write for any marker) and *long tier 30 min* (${ROUTES["long tier 30 min"].short} s and ${n(ROUTES["long tier 30 min"].long)} s; its answers report the bucket the markers name). A request's lifetime is the one a marker states, else the route's for the tier asked; a write bucket an answer reports is evidence of a lifetime, and a period is kept warm only where it agrees.`,
+		"",
+		"| Retention, route | Combinations | Kept warm (lifetimes) | Left to Pi |",
+		"| --- | --- | --- | --- |",
+	);
+	for (const setup of setups) {
+		const list = extra.filter((o) => o.retention === setup[0] && o.data === setup[1]);
+		const t = sum(list);
+		push(`| ${label(setup)} | ${n(list.length)} | ${n(t.warm)} (${t.lifetimes.join(", ") || "none"}) | ${n(list.length - t.warm)} |`);
+	}
+	push("", `| API | ${setups.map(label).join(" | ")} |`, `| --- | ${setups.map(() => "---").join(" | ")} |`);
+	for (const api of [...new Set(extra.map((o) => o.api))].sort()) {
+		const cells = setups.map(([r, d]) => {
+			const t = sum(extra.filter((o) => o.api === api && o.retention === r && o.data === d));
+			const warm = t.warm ? `warm ${t.warm} (${t.lifetimes.join(", ")})` : "";
+			const pi = t.pi.length ? `Pi ${t.pi.reduce((a, [, c]) => a + c, 0)} (${t.pi.map(([l, c]) => (t.pi.length > 1 ? `${l} ${c}` : l)).join(", ")})` : "";
+			return [warm, pi].filter(Boolean).join(" · ");
+		});
+		push(`| ${api} | ${cells.join(" | ")} |`);
+	}
+	push("");
 }
 
 test(`the coverage document (docs/keep-warm-coverage.md) is the one this sweep writes (\`${REGENERATE}\` writes it again)`, { skip: noCatalog }, () => {
@@ -546,7 +598,7 @@ test("the README's table of who keeps a session warm holds for the models it nam
 	const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 	assert.match(readme, /\[docs\/keep-warm-coverage\.md\]\(docs\/keep-warm-coverage\.md\)/);
 	const where = (f: (o: Outcome) => boolean) => {
-		const list = outcomes.filter(f);
+		const list = main.filter(f);
 		assert.ok(list.length > 0);
 		return list;
 	};

@@ -1,6 +1,6 @@
 {
   "name": "pi-cache-keeper",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "private": true,
   "description": "Keeps pi's prompt cache paying off: compaction from the warm cache, compacting when the context is full, keeping the cache warm while idle, model windows and cache lifetimes from providers.dev. Based on pi-cached-compaction by Nico Bailon",
   "type": "module",

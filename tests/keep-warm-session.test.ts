@@ -41,8 +41,15 @@ const encoder = new TextEncoder();
 const packet = (event: { type: string }) => encoder.encode(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
 
 const MODEL_KEY = "anthropic/claude-sonnet-4-6";
-const usage = (read: number, write: number) => ({ input_tokens: 5, cache_read_input_tokens: read, cache_creation_input_tokens: write, output_tokens: 1, cache_creation: { ephemeral_5m_input_tokens: write, ephemeral_1h_input_tokens: 0 } });
-const messageStart = (read: number, write: number) => ({ type: "message_start", message: { id: "m", type: "message", role: "assistant", model: "claude-sonnet-4-6", content: [], stop_reason: null, usage: usage(read, write) } });
+// What Anthropic reports: a write goes into the cache of the tier asked for (the 1-hour one for the long tier).
+const usage = (read: number, write: number, tier: "short" | "long" = "short") => ({
+	input_tokens: 5,
+	cache_read_input_tokens: read,
+	cache_creation_input_tokens: write,
+	output_tokens: 1,
+	cache_creation: { ephemeral_5m_input_tokens: tier === "short" ? write : 0, ephemeral_1h_input_tokens: tier === "long" ? write : 0 },
+});
+const messageStart = (read: number, write: number, tier: "short" | "long" = "short") => ({ type: "message_start", message: { id: "m", type: "message", role: "assistant", model: "claude-sonnet-4-6", content: [], stop_reason: null, usage: usage(read, write, tier) } });
 const end = [{ type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } }, { type: "message_stop" }];
 const sse = (body: ReadableStream) => new Response(body, { headers: { "content-type": "text/event-stream" } });
 const closed = (events: { type: string }[]) =>
@@ -67,12 +74,18 @@ interface Session {
 	request: () => { model: Any; context: Any; options: Any };
 }
 
-// Pi's real session runtime with this extension, Claude Sonnet 4.6 at the 5-minute cache, keep-warm on for 2 h. Each of
-// the extension's refreshes goes through the real Anthropic adapter to `refresh` (n: the how-manieth, from 1).
-async function inRuntime(refresh: (n: number, signal: AbortSignal) => Response, scenario: (session: Session) => Promise<void>) {
+// Pi's real session runtime with this extension, Claude Sonnet 4.6 on Anthropic's API, keep-warm on: by default the
+// 5-minute cache (the short tier), a 2-hour goal, 120,000 cached prompt tokens. Each of the extension's refreshes goes
+// through the real Anthropic adapter to `refresh` (n: the how-manieth, from 1), which sees the request's body.
+async function inRuntime(
+	refresh: (n: number, signal: AbortSignal, body: Any) => Response,
+	scenario: (session: Session) => Promise<void>,
+	o: { tier?: "short" | "long"; keepWarmMinutes?: number; prompt?: number } = {},
+) {
+	const tier = o.tier ?? "short";
 	writeFileSync(
 		join(dir, "settings.json"),
-		JSON.stringify({ cacheKeeper: { modelData: false, keepWarmMinutes: 120, cacheRetention: "short", compactBeforeExpiry: false, compactAtPercent: 0 }, cacheWarming: "idle", packages: [] }),
+		JSON.stringify({ cacheKeeper: { modelData: false, keepWarmMinutes: o.keepWarmMinutes ?? 120, cacheRetention: tier, compactBeforeExpiry: false, compactAtPercent: 0 }, cacheWarming: "idle", packages: [] }),
 	);
 	delete (globalThis as Record<symbol, unknown>)[STORE];
 	const model = catalog.MODELS.anthropic["claude-sonnet-4-6"];
@@ -101,7 +114,7 @@ async function inRuntime(refresh: (n: number, signal: AbortSignal) => Response, 
 	const sessions = runtime.session.sessionManager;
 	let refreshes = 0;
 	ctx.modelRegistry.streamSimple = (m: Any, context: Any, options: Any) =>
-		anthropic.streamSimple(m, context, { ...options, apiKey: "sk-fixture", maxRetries: 0, cacheRetention: "short", fetch: async () => refresh(++refreshes, options.signal) });
+		anthropic.streamSimple(m, context, { ...options, apiKey: "sk-fixture", maxRetries: 0, cacheRetention: tier, fetch: async (_input: unknown, init?: { body?: unknown }) => refresh(++refreshes, options.signal, JSON.parse(String(init?.body))) });
 	mock.timers.reset();
 	mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"], now: 100_000_000 });
 	const prior: unknown[] = [];
@@ -115,14 +128,14 @@ async function inRuntime(refresh: (n: number, signal: AbortSignal) => Response, 
 			prior.push(ask);
 			sessions.appendMessage(ask);
 			const messages = await runner.emitContext(transcript.normalizeContext({ systemPrompt: "Review code.", messages: prior, tools }).messages);
-			lastRequest = { model, context: { messages }, options: { apiKey: "sk-fixture", maxTokens: 8192, cacheRetention: "short" } };
+			lastRequest = { model, context: { messages }, options: { apiKey: "sk-fixture", maxTokens: 8192, cacheRetention: tier } };
 			const answer = await anthropic
 				.streamSimple(model, { messages }, {
 					apiKey: "sk-fixture",
 					maxTokens: 8192,
-					cacheRetention: "short",
+					cacheRetention: tier,
 					onPayload: (payload: unknown) => runner.emitBeforeProviderRequest(payload),
-					fetch: async () => closed([messageStart(120_000, 0), ...end]),
+					fetch: async () => closed([messageStart(o.prompt ?? 120_000, 0, tier), ...end]),
 				})
 				.result();
 			assert.equal(answer.stopReason, "stop");
@@ -293,3 +306,77 @@ test("a refresh that reported a hit, then cancelled by a run that sent nothing: 
 	);
 	assert.deepEqual(result.counts, {}, "a hit: nothing counted");
 });
+
+// ------------------------------------------------------------------- both direct Anthropic tiers, through Pi's runtime
+
+// Claude on Anthropic's own API with Pi's real adapter, short (the 5-minute cache) and long (the stated hour), 600,000
+// cached prompt tokens: the first refresh, the budget, two misses, the time limit. Every refresh leaves capped at one
+// output token. As on 0.5.3, measured on both tiers by the third review.
+for (const tier of ["short", "long"] as const) {
+	const lifetime = tier === "short" ? 300 : 3600;
+	const step = tier === "short" ? 275 : 3420;
+	const N = 600_000;
+	// The refreshes' send times in seconds after the first answer, and their output limits.
+	const run = async (respond: (n: number) => Response, scenario: (s: Session, answered: () => number) => Promise<void>, keepWarmMinutes: number) => {
+		const sent: { at: number; cap: number }[] = [];
+		let first = 0;
+		const result = await inRuntime(
+			(n, _signal, body) => {
+				sent.push({ at: Math.round((Date.now() - first) / 1000), cap: body.max_tokens });
+				return respond(n);
+			},
+			async (s) => {
+				await s.answer();
+				first = Date.now();
+				await scenario(s, () => first);
+			},
+			{ tier, keepWarmMinutes, prompt: N },
+		);
+		assert.deepEqual(result.thrown, []);
+		return { sent, result };
+	};
+	const hit = () => closed([messageStart(N, 0, tier), ...end]);
+	const miss = () => closed([messageStart(0, N, tier), ...end]);
+
+	test(`direct Anthropic, ${tier} tier: the first refresh ${step} s after the answer, capped at one token`, { skip }, async () => {
+		const { sent } = await run(hit, async (s) => {
+			assert.equal(await s.decide(), "stop", "owned: Pi's warming is told to stop");
+			await s.ticks(step + 2);
+		}, 120);
+		assert.deepEqual(sent, [{ at: step, cap: 1 }]);
+	});
+
+	test(`direct Anthropic, ${tier} tier: the budget is spent after eleven capped reads`, { skip }, async () => {
+		let decided: unknown;
+		const { sent } = await run(hit, async (s) => {
+			await s.ticks(13 * step + 2);
+			decided = await s.decide();
+		}, 1440);
+		assert.deepEqual(sent, Array.from({ length: 11 }, (_, i) => ({ at: (i + 1) * step, cap: 1 })));
+		assert.equal(decided, "stop", "ended on its budget: Pi's warming stays stopped");
+	});
+
+	test(`direct Anthropic, ${tier} tier: after two misses in a row the third period is Pi's`, { skip }, async () => {
+		const decisions: unknown[] = [];
+		const { sent, result } = await run(miss, async (s) => {
+			await s.ticks(step + 2);
+			await s.answer();
+			await s.ticks(step + 2);
+			await s.answer();
+			decisions.push(await s.decide());
+			await s.ticks(step + 2);
+		}, 1440);
+		assert.deepEqual(sent, [{ at: step, cap: 1 }, { at: 2 * step + 2, cap: 1 }], "two misses, no third refresh");
+		assert.deepEqual(result.fallback, [MODEL_KEY]);
+		assert.deepEqual(decisions, ["warm"], "the third period is Pi's: its proposal stands");
+	});
+
+	const goal = tier === "short" ? 15 : 120;
+	test(`direct Anthropic, ${tier} tier: a ${goal}-minute goal sends ${tier === "short" ? "three refreshes" : "two refreshes"}, then the time limit`, { skip }, async () => {
+		const { sent } = await run(hit, async (s) => {
+			await s.ticks(goal * 60 + lifetime + 60);
+		}, goal);
+		const times = tier === "short" ? [275, 550, 825] : [3420, 6840];
+		assert.deepEqual(sent, times.map((at) => ({ at, cap: 1 })));
+	});
+}

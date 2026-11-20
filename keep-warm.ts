@@ -86,7 +86,9 @@ export interface CacheMarker {
 	ms?: number;
 	/**
 	 * True when the request states no lifetime and `ms` is the provider's documented one for the tier (Anthropic's
-	 * `cache_control` without `ttl`: 5 minutes). The footer shows the tier for it, not `ms`; the rules read `ms` as before.
+	 * `cache_control` without `ttl`: 5 minutes). The footer shows the tier for it, not `ms`. The ownership rules take the
+	 * lifetime the route's data gives the tier instead, and read `ms` only as the format's default: where the route's
+	 * lifetime differs from it, an answer's reported write tier has to confirm the route's (see whyNotOwned).
 	 */
 	implied?: true;
 }
