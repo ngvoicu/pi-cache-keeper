@@ -48,3 +48,32 @@ test("only the clock asks the evidence: no other source file calls agrees or sho
 		assert.doesNotMatch(text, /\b(agrees|shortestMs)\(/, `${name} calls the evidence`);
 	}
 });
+
+// The ways around the clock a check of the build found the tests above let through.
+test("index.ts takes from cache-state.ts only what is not the cache's reading", () => {
+	const names = imports(source("index.ts"))
+		.filter((i) => i.from === "./cache-state.ts")
+		.flatMap((i) => i.names.replace(/[{}]/g, "").split(",").map((n) => n.replace(/^\s*type\s+/, "").trim()).filter(Boolean));
+	assert.deepEqual(names.sort(), ["cacheTier", "hasExplicitPromptCache", "isKimiOnMoonshot", "lifetimeFor"]);
+});
+
+test("no source file takes the cache state, the evidence or the clock as a whole: no namespace or dynamic import of them", () => {
+	for (const name of sources) {
+		const text = source(name);
+		assert.doesNotMatch(text, /import\s*\*\s*as\s+\w+\s+from\s+"\.\/(cache-state|lifetime-evidence|cache-clock)\.ts"/, `${name}: namespace import`);
+		assert.doesNotMatch(text, /import\(\s*["'`]\.\/(cache-state|lifetime-evidence|cache-clock)\.ts/, `${name}: dynamic import`);
+	}
+});
+
+test("only the clock reads the cache state: no other source file calls cacheState", () => {
+	for (const name of sources.filter((n) => n !== "cache-clock.ts")) {
+		// Its definition in cache-state.ts is not a call.
+		assert.doesNotMatch(source(name).replace(/function cacheState\(/g, ""), /\bcacheState\(/, `${name} calls cacheState`);
+	}
+});
+
+test("the period's starting lifetime, kept for the log, is read in one place only: the record of a hand-over", () => {
+	const index = source("index.ts");
+	assert.equal(count(index, ".logged"), 1);
+	assert.equal(count(body(index, "handTo"), ".logged"), 1);
+});
