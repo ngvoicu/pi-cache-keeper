@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **The tests and the coverage document are for Pi 1.6.0** — The development dependencies `@earendil-works/pi-ai` and `@earendil-works/pi-coding-agent` are pinned to 1.6.0, so a fresh clone runs the tests on the Pi the generated documents were made for. `docs/keep-warm-coverage.md` is generated again from Pi 1.6.0's catalog (1,698 models, 12,632 combinations), and the README names the newly catalogued `gpt-6-cyber` among the models whose request with the longer cache carries two lifetimes and is Pi's. The tests that run Pi's own warmer after a hand-over, and after keep-warm is switched off once the route changed, state the model's prices they were written for instead of reading them from Pi's catalog, whose prices for that model changed in 1.6.0. Nothing in the extension changed.
+
 ## [0.6.0] - 2026-11-20
 
 ### Changed
