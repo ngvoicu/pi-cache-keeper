@@ -411,7 +411,7 @@ console.log(`keep-warm matrix: ${models.length} models, ${all.length} combinatio
  * Combinations that break a rule today, kept here (with why) so the sweep stays green while the fix is decided
  * separately. Each entry names the combination as comboKey writes it, the rule, and what broke. Each is also a todo test
  * named "KNOWN FAILURE …", and an entry that no longer fails fails "known failures still fail", so the list stays honest.
- * Empty: with pi 1.5.2's catalog no combination breaks a rule.
+ * Empty: with pi 1.6.0's catalog no combination breaks a rule.
  */
 const KNOWN_FAILURES: { key: string; rule: Rule; what: RegExp; note: string }[] = [];
 
@@ -615,7 +615,7 @@ test("the README's table of who keeps a session warm holds for the models it nam
 	}
 	// GPT-5.6 and later on OpenAI's own API: 30 minutes; Pi with two lifetimes (the models that get the shared prefix),
 	// or a declared lifetime other than the 30 minutes the request states.
-	const twoLifetimes = /^(gpt-5\.6-cyber|gpt-daybreak-)/;
+	const twoLifetimes = /^(gpt-5\.6-cyber|gpt-6-cyber|gpt-daybreak-)/;
 	for (const o of where((x) => x.provider === "openai" && x.api === "openai-responses" && /^gpt-(5\.([6-9])|[6-9]|daybreak)/.test(x.id))) {
 		if (o.retention === "long" && twoLifetimes.test(o.id)) assert.match(o.reason ?? "", /more than one cache lifetime/, o.key);
 		else if (o.data === "catalog") assert.equal(o.lifetime, 1800, o.key);

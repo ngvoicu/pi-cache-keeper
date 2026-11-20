@@ -313,7 +313,10 @@ async function session(s: Setup) {
 const claudeGateway = (promptCache = { short: 3600, long: 3600 }) => ({ ...MODELS.anthropic["claude-sonnet-4-6"], provider: "gateway-fixture", baseUrl: "https://fixture.invalid", promptCache });
 // The values models.json holds for a proxy configured with an API key: the key's.
 const keyValues = { short: 300, long: 3600 };
-const deepseek = (provider: string, promptCache: { short: number; long: number }) => ({ ...MODELS.openrouter["deepseek/deepseek-v4-pro"], provider, baseUrl: "https://gateway.invalid/v1", promptCache });
+const deepseek = (provider: string, promptCache: { short: number; long: number }, cost?: Record<string, number>) => ({ ...MODELS.openrouter["deepseek/deepseek-v4-pro"], provider, baseUrl: "https://gateway.invalid/v1", promptCache, ...(cost ? { cost } : {}) });
+// The prices (dollars per million tokens) Pi 1.5.2's catalog gave this model, which the sequences with Pi's own warmer
+// were written for: Pi's warmer weighs a refresh by them, so they are stated here and no later catalog change moves them.
+const DEEPSEEK_PRICES = { input: 0.95526, output: 1.91052, cacheRead: 0.079605, cacheWrite: 0 };
 const CLAUDE_ID = "claude-sonnet-4-6";
 const DEEPSEEK_ID = "deepseek/deepseek-v4-pro";
 
@@ -530,7 +533,7 @@ for (const [label, ttl] of [["150-second", 150], ["600-second", 600]] as const) 
 		const N = 1_000_000;
 		let expires = 300;
 		const s = await session({
-			model: deepseek("test-gateway", { short: 300, long: 300 }),
+			model: deepseek("test-gateway", { short: 300, long: 300 }, DEEPSEEK_PRICES),
 			store: {
 				upstreams: { "test-gateway": { [DEEPSEEK_ID]: { upstreams: [{ provider: "ordinary-account", model: DEEPSEEK_ID, subscription: false }] } } },
 				providers: { "ordinary-account": { [DEEPSEEK_ID]: { short: 300 } }, openrouter: { [DEEPSEEK_ID]: { short: ttl } } },
@@ -826,7 +829,7 @@ for (const how of ["in this window's settings menu", "saved from another window"
 		const original = { provider: "private-account", model: DEEPSEEK_ID, subscription: false };
 		const other = { provider: "openrouter", model: DEEPSEEK_ID, subscription: false };
 		const s = await session({
-			model: deepseek("switchable-gateway", { short: 300, long: 300 }),
+			model: deepseek("switchable-gateway", { short: 300, long: 300 }, DEEPSEEK_PRICES),
 			store: { upstreams: { "switchable-gateway": { [DEEPSEEK_ID]: { upstreams: [original] } } }, providers: { "private-account": { [DEEPSEEK_ID]: { short: 300, long: 300 } }, openrouter: { [DEEPSEEK_ID]: { short: 300, long: 300 } } } },
 			settings: { keepWarmMinutes: 120, compactBeforeExpiry: true },
 			prompt: N,
