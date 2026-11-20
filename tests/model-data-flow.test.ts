@@ -237,9 +237,9 @@ test("the next session start asks nothing while the data is fresh; changing the 
 	assert.deepEqual(h.requests, []);
 	assert.equal(h.statuses.get("cache-keeper"), "short 5m ⚠ · long ? · sub or api $2/$10 per M · ⚠ login or API key unknown: shorter values", "the saved data is shown at once");
 	h.select("openai-codex", "gpt-6.1-sol");
-	assert.equal(h.statuses.get("cache-keeper"), "short 5m · long unknown · sub, no per-token price");
+	assert.equal(h.statuses.get("cache-keeper"), "short 5m · long unknown · sub, counted at $2/$10 per M");
 	h.select("openai-codex", "unknown-model");
-	assert.equal(h.statuses.get("cache-keeper"), "cache lifetime unknown · sub, no per-token price · providers.dev: no data for this model");
+	assert.equal(h.statuses.get("cache-keeper"), "cache lifetime unknown · sub, counted at $2/$10 per M · providers.dev: no data for this model");
 });
 
 test("/cache-keeper-refresh fetches again, keeps a value the user set, and a failed refresh keeps models.json", async () => {
@@ -305,7 +305,7 @@ test("a proxy extension that knows what serves its models: their values, fetched
 	// The Claude login keeps the cache for an hour, both tiers; the Codex login has a 5-minute short lifetime.
 	assert.deepEqual(proxy["claude-opus-5-5"], { promptCache: { short: 3600, long: 3600 } });
 	assert.deepEqual(proxy["gpt-6.1-sol"], { contextWindow: 922_000, promptCache: { short: 300 } });
-	assert.equal(h.statuses.get("cache-keeper"), "short 5m · long unknown · sub, no per-token price", "no guess, so no warning");
+	assert.equal(h.statuses.get("cache-keeper"), "short 5m · long unknown · sub, counted at $2/$10 per M", "no guess, so no warning");
 	assert.ok(h.requests.some((request) => request.url.includes("/entries?provider=openai")), "what the proxy falls back to is fetched too");
 	// The same again changes nothing and asks nothing.
 	h.requests.length = 0;
@@ -315,7 +315,7 @@ test("a proxy extension that knows what serves its models: their values, fetched
 
 	// Opus on the proxy: the login's hour.
 	h.select("cliproxyapi", "claude-opus-5-5");
-	const LOGIN = "short 1h · long 1h · sub, no per-token price";
+	const LOGIN = "short 1h · long 1h · sub, counted at $2/$10 per M";
 	assert.equal(h.statuses.get("cache-keeper"), LOGIN);
 	// An answer from the login changes nothing; one from an API key (the login failed or is cooling down) is warned
 	// about, and the countdown follows the key's 5 minutes.
@@ -339,7 +339,7 @@ test("a proxy extension that knows what serves its models: their values, fetched
 	}
 	answered([login("anthropic")]);
 	assert.equal(h.statuses.get("cache-keeper"), LOGIN);
-	// Pi asks for the long tier (the default setting); Anthropic says it wrote the short one: the footer follows.
+	// Pi asks for the long tier (the default setting); the answer reports a 5-minute write.
 	h.branch.push({
 		type: "message",
 		id: "r1",
@@ -356,8 +356,9 @@ test("a proxy extension that knows what serves its models: their values, fetched
 		},
 	});
 	h.handlers.get("agent_settled")!({}, h.ctx);
-	// The model's own answer says which tier is in use; it is long expired in this test, so the countdown says cold.
-	assert.equal(h.statuses.get("cache-keeper"), "cache cold · next message full price · short 1h (in use) · long 1h · sub, no per-token price");
+	// No request was seen, and on this route both tiers last an hour, so the write bucket cannot tell which tier was asked
+	// for: the retention in force (long) is marked. The answer is long expired in this test, so the countdown says cold.
+	assert.equal(h.statuses.get("cache-keeper"), "cache cold · next message full price · long 1h (in use) · short 1h · sub, counted at $2/$10 per M");
 	h.branch.length = 0;
 	h.handlers.get("agent_settled")!({}, h.ctx);
 	// What answered for another model does not touch this one; a new model starts without one.

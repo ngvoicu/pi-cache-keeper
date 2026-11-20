@@ -125,9 +125,11 @@ export interface SentView {
 }
 
 /**
- * The price in use: how the model is reached, whether it is billed by subscription (no per-token price), and the input
- * and output price per million tokens at the current context size (`above`: the size a tier of the price starts at),
- * or, without a price, whether providers.dev had one for only some of the possible credentials (`partial`).
+ * The price in use: how the model is reached, whether it is billed by subscription, and the input and output price per
+ * million tokens at the current context size (`above`: the size a tier of the price starts at), or, without a price,
+ * whether providers.dev had one for only some of the possible credentials (`partial`). On a subscription the prices are
+ * the ones the extension counts with (the keep-warm budget, the compaction card), not what is billed per token; without
+ * any, there is no per-token price.
  */
 export interface PriceView {
 	via?: Via;
@@ -177,6 +179,32 @@ export function lifetimesView(declared: { short?: number; long?: number } | unde
 		return states?.[tier] === "unsure" ? { mark: "partial" } : {};
 	};
 	return { ...(inUse.tier ? { inUse: inUse.tier } : {}), short: value("short"), long: value("long") };
+}
+
+/**
+ * The tier the footer marks "(in use)". A request asks for a tier; how long a tier lasts is the route's (its model data);
+ * an answer reports the write bucket the provider used (5 minutes or 1 hour), which is the tier's name only on
+ * Anthropic's own API: a route can write its short tier as a one-hour cache. So:
+ * - the tier the request asked for (`asked`), where this route's lifetime for it is the one the countdown runs on;
+ * - without a request the extension read (after /reload, /resume, /fork, a compaction or /tree, or a form whose markers
+ *   it does not read): the tier whose lifetime on this route is the countdown's, and where both tiers have it, the
+ *   retention in force (what the next request asks for);
+ * - otherwise `fallback`, the tier the countdown runs on as the answer's bucket names it (a stated hour the provider
+ *   wrote as 5 minutes reads as the 5-minute tier, and "sent" warns).
+ * `route` is in seconds, `countdownMs` in milliseconds.
+ */
+export function tierInUse(o: { asked?: Tier; countdownMs?: number; route?: { short?: number; long?: number }; retention: Tier; fallback?: Tier }): Tier | undefined {
+	const routeMs = (tier: Tier) => (o.route?.[tier] === undefined ? undefined : (o.route[tier] as number) * 1000);
+	if (o.countdownMs !== undefined) {
+		if (o.asked) {
+			if (routeMs(o.asked) === o.countdownMs) return o.asked;
+		} else {
+			const matching = (["short", "long"] as const).filter((tier) => routeMs(tier) === o.countdownMs);
+			if (matching.length === 1) return matching[0];
+			if (matching.length === 2) return o.retention;
+		}
+	}
+	return o.fallback;
 }
 
 /**
@@ -291,6 +319,16 @@ function sentPart(view: SentView): Part {
 
 function pricePart(view: PriceView): Part {
 	if (view.subscription) {
+		if (view.rates) {
+			// Counted at these prices, billed by the subscription.
+			const { input, output, above } = view.rates;
+			const amounts = `${usd(input)}/${usd(output)}`;
+			const lead = view.via ? `${view.via}, ` : "";
+			const per = ` per M${above === undefined ? "" : ` above ${tokenCount(above)}`}`;
+			const forms: Form[] = [[segment(`${lead}counted at ${amounts}`, "muted"), segment(per, "dim")], [segment(`${lead}counted ${amounts}`, "muted")]];
+			if (view.via) forms.push([segment(view.via, "muted")]);
+			return { forms, priority: PRIORITY.price };
+		}
 		return view.via ? plainPart(PRIORITY.price, [`${view.via}, no per-token price`, view.via], "muted") : plainPart(PRIORITY.price, ["no per-token price"], "muted");
 	}
 	const lead = view.via ? `${view.via} ` : "";
