@@ -95,16 +95,31 @@ test("the cache lifetimes: the countdown's for the tier in use, the model's own 
 	assert.equal(formatFooter({ lifetimes: lifetimesView(undefined, { tier: "short" }, terra) }), "cache lifetime unknown");
 });
 
-test("what was sent: the request's cache markers, against the lifetime the countdown runs on and the retention in force", () => {
+test("what was sent: what the request's cache markers state, against the lifetime in use and the retention in force", () => {
 	const anthropic = (ttl?: string) => ({ system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ...(ttl ? { ttl } : {}) } }], messages: [], max_tokens: 1 });
 	const both = { short: 300, long: 3600 };
 	const sent = (payload: Record<string, unknown>, inUse: { tier?: "short" | "long"; ms?: number }, retention: "short" | "long" = "long", declared: { short?: number; long?: number } = both) =>
 		formatFooter({ sent: sentView(requestCache(payload), inUse, declared, retention) }, Infinity, paint);
 	// What the countdown counts: dim.
 	assert.equal(sent(anthropic("1h"), { tier: "long", ms: HOUR }), "<dim>sent 1h</>");
-	assert.equal(sent(anthropic(), { tier: "short", ms: 5 * MIN }, "short"), "<dim>sent 5m</>");
-	// The request asked for the 5-minute cache while the retention says long, and the provider wrote that: said, muted.
-	assert.equal(sent(anthropic(), { tier: "short", ms: 5 * MIN }), "<muted>sent 5m (retention long)</>");
+	// A cache_control without ttl states no lifetime: it asks for the short tier, whatever that lasts on the route.
+	assert.equal(sent(anthropic(), { tier: "short", ms: 5 * MIN }, "short"), "<dim>sent short</>");
+	// A stated "5m" is shown as stated.
+	assert.equal(sent(anthropic("5m"), { tier: "short", ms: 5 * MIN }, "short"), "<dim>sent 5m</>");
+	// The request asked for the short tier while the retention says long, and the provider wrote that: said, muted.
+	assert.equal(sent(anthropic(), { tier: "short", ms: 5 * MIN }), "<muted>sent short (retention long)</>");
+	// A proxy on a subscription login, retention short: the short tier lasts an hour on this route and the answer
+	// reported the one-hour write. The same lifetime under another tier's name is no difference (it said "⚠ sent 5m").
+	const hourBoth = { short: 3600, long: 3600 };
+	assert.equal(sent(anthropic(), { tier: "long", ms: HOUR }, "short", hourBoth), "<dim>sent short</>");
+	assert.equal(sent(anthropic("1h"), { tier: "short", ms: HOUR }, "long", hourBoth), "<dim>sent 1h</>", "a stated hour, the hour in use under the short tier's name");
+	// A stated lifetime that is not the one in use is a difference, whatever the route gives the tier.
+	assert.equal(sent(anthropic("5m"), { tier: "long", ms: HOUR }, "short", hourBoth), "<warning>⚠ sent 5m</>");
+	// No lifetime stated and none on the route for the tier asked: nothing to compare, no warning.
+	assert.equal(sent(anthropic(), { tier: "long", ms: HOUR }, "short", { long: 3600 }), "<dim>sent short</>");
+	// Mixed markers warn as before; the unstated one is named by its tier.
+	const mixed = { system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "1h" } }], messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }] }] };
+	assert.equal(sent(mixed, { tier: "long", ms: HOUR }), "<warning>⚠ sent 1h + short</>");
 	// Asked for 1 hour, the provider wrote 5 minutes: the countdown runs on another lifetime than the request asked for.
 	assert.equal(sent(anthropic("1h"), { tier: "short", ms: 5 * MIN }), "<warning>⚠ sent 1h</>");
 	// GPT on OpenAI with the longer cache: a 12-hour shared prefix and the 30-minute conversation.
@@ -119,6 +134,43 @@ test("what was sent: the request's cache markers, against the lifetime the count
 	assert.equal(sent({ input: [], prompt_cache_retention: "24h" }, { tier: "long", ms: HOUR }), "<dim>sent long</>");
 	// A marker the extension does not read.
 	assert.equal(sent({ messages: [], cache_control: { type: "persistent" } }, { tier: "long", ms: HOUR }), "<warning>⚠ sent a cache marker it can't read</>");
+	// The rules still read the documented 5 minutes for an unstated marker; only the footer tells the two apart.
+	assert.deepEqual(requestCache(anthropic()).markers, [{ at: "system[0].cache_control", tier: "short", ms: 300_000, implied: true }]);
+	assert.deepEqual(requestCache(anthropic("5m")).markers, [{ at: "system[0].cache_control", tier: "short", ms: 300_000 }]);
+});
+
+test("what was sent, wide and narrow: a proxy on a subscription login, Anthropic's API at either retention, a stated lifetime that differs", () => {
+	const control = (ttl?: string) => requestCache({ system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ...(ttl ? { ttl } : {}) } }], messages: [] });
+	const line = (view: FooterView, width = Infinity) => formatFooter(view, width);
+	// A proxy on a subscription login, retention short, short and long an hour each, the one-hour write reported.
+	const proxy: FooterView = {
+		countdown: { state: "running" },
+		lifetimes: { inUse: "long", short: { seconds: 3600 }, long: { seconds: 3600 } },
+		sent: sentView(control(), { tier: "long", ms: HOUR }, { short: 3600, long: 3600 }, "short"),
+		price: { via: "sub", subscription: true },
+	};
+	assert.equal(line(proxy), "cache in use · long 1h (in use) · short 1h · sent short · sub, no per-token price");
+	assert.equal(line(proxy, 60), "cache in use · long 1h · short 1h · sent short · sub");
+	assert.equal(line(proxy, 40), "cache in use · long 1h · short 1h · sub", "what was sent goes first when it agrees");
+	// Anthropic's API, retention short: the 5-minute write reported.
+	const shortApi: FooterView = {
+		countdown: { state: "warm", ms: 4 * MIN },
+		lifetimes: { inUse: "short", short: { seconds: 300 }, long: { seconds: 3600 } },
+		sent: sentView(control(), { tier: "short", ms: 5 * MIN }, { short: 300, long: 3600 }, "short"),
+		price: { via: "api", rates: { input: 3, output: 15 } },
+	};
+	assert.equal(line(shortApi), "cache warm · 4m left · short 5m (in use) · long 1h · sent short · api $3/$15 per M");
+	assert.equal(line(shortApi, 60), "warm 4m · short 5m · long 1h · sent short · api $3/$15");
+	// Retention long: the request states the hour.
+	const longApi: FooterView = { ...shortApi, countdown: { state: "warm", ms: 59 * MIN }, lifetimes: { ...shortApi.lifetimes!, inUse: "long" }, sent: sentView(control("1h"), { tier: "long", ms: HOUR }, { short: 300, long: 3600 }, "long") };
+	assert.equal(line(longApi), "cache warm · 59m left · long 1h (in use) · short 5m · sent 1h · api $3/$15 per M");
+	assert.equal(line(longApi, 60), "warm 59m · long 1h · short 5m · sent 1h · api $3/$15");
+	// The request states an hour and the provider wrote 5 minutes: a real difference, kept past the values.
+	const differs: FooterView = { ...shortApi, sent: sentView(control("1h"), { tier: "short", ms: 5 * MIN }, { short: 300, long: 3600 }, "long") };
+	assert.equal(line(differs), "cache warm · 4m left · short 5m (in use) · long 1h · ⚠ sent 1h · api $3/$15 per M");
+	assert.equal(line(differs, 40), "warm 4m · short 5m · long 1h · ⚠ sent 1h");
+	assert.equal(line(differs, 30), "warm 4m · short 5m · ⚠ sent 1h");
+	assert.equal(line(differs, 20), "warm 4m · ⚠ sent 1h");
 });
 
 test("the price in use: per million tokens at the context size, no per-token price on a subscription, unknown said", () => {
@@ -203,6 +255,7 @@ test("narrow terminals: wording goes first, then the least important values; the
 test("at every width from 1 to 200 columns, in every state: within the width, and no value outlasts an error", () => {
 	const views: FooterView[] = [
 		warm(59 * MIN),
+		{ countdown: { state: "running" }, lifetimes: { inUse: "long", short: { seconds: 3600 }, long: { seconds: 3600 } }, sent: { what: { lifetimes: [], tiers: ["short"] }, conflict: false }, price: { via: "sub", subscription: true } },
 		warm(59 * MIN, { ...claude, lifetimes: { inUse: "short", short: { seconds: 300 }, long: { seconds: 3600 } }, countdownTier: "long", data: { served: "api" } }),
 		{ countdown: { state: "cold" }, keepWarm: { fallback: true }, ...claude },
 		warm(24_000, { keepWarm: { ended: { stop: "budget", limit: "24 h", amounts: "$1.98 spent, a miss costs $2.07" } }, ...claude }),

@@ -2907,3 +2907,65 @@ test("footer: with keep-warm off, a countdown on another model's tier is said to
 	alone.emit("agent_settled");
 	assert.equal(lastFooter(alone), "cache warm · 5m left · short 5m (in use) · long 1h · sent default cache · api $3/$15 per M");
 });
+
+// ---------------------------------------------------- the footer: "sent" says what the request stated, and warns only on a difference
+
+const retentionFor = (t: { after: (fn: () => void) => void }, value: "short" | "long") => {
+	const before = process.env.PI_CACHE_RETENTION;
+	if (value === "long") process.env.PI_CACHE_RETENTION = "long";
+	else delete process.env.PI_CACHE_RETENTION;
+	t.after(() => {
+		if (before === undefined) delete process.env.PI_CACHE_RETENTION;
+		else process.env.PI_CACHE_RETENTION = before;
+	});
+};
+// A Claude request with one cache_control, with or without a stated ttl.
+const claudeSent = (ttl?: string) => ({ model: "claude", max_tokens: 64_000, system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ...(ttl ? { ttl } : {}) } }], messages: [{ role: "user", content: "hi" }], thinking: { type: "adaptive" } });
+const anthropicApi = { provider: "anthropic", id: "claude-sonnet-5-5", promptCache: { short: 300, long: 3600 } };
+
+test("footer, sent: a proxy on a subscription login, retention short, short and long an hour each: the short tier, no warning", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	online(t);
+	retentionFor(t, "short");
+	fresh({ keepWarmMinutes: 0 });
+	// The request states no lifetime; the answer reports the one-hour write, which is this route's short tier.
+	const h = harness({ ui: true, sent: claudeSent(), answer: { cacheWrite: 1, cacheWrite1h: 1 } });
+	Object.assign(h.ctx.modelRegistry, { isUsingOAuth: () => true, getProvider: () => ({ auth: { oauth: { isSubscription: true } } }) });
+	h.emit("agent_settled");
+	assert.equal(lastFooter(h), "cache warm · 60m left · long 1h (in use) · short 1h · sent short · sub, no per-token price");
+	h.state.idle = false;
+	h.emit("agent_start");
+	// 0.5.0 said "cache in use · long 1h (in use) · short 1h · ⚠ sent 5m · sub, no per-token price".
+	assert.equal(lastFooter(h), "cache in use · long 1h (in use) · short 1h · sent short · sub, no per-token price");
+});
+
+test("footer, sent: Anthropic's API, retention short (the short tier, 5 minutes on the route) and long (the stated hour)", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	online(t);
+	retentionFor(t, "short");
+	fresh({ keepWarmMinutes: 0 });
+	const short = harness({ ui: true, cost: WITH_WRITE, model: anthropicApi, sent: claudeSent(), answer: { cacheWrite: 1, cacheWrite1h: 0 } });
+	short.emit("agent_settled");
+	// 0.5.0 said "sent 5m": a lifetime the request does not state.
+	assert.equal(lastFooter(short), "cache warm · 5m left · short 5m (in use) · long 1h · sent short · api $3/$15 per M");
+	// Restored after the test by the retentionFor above.
+	process.env.PI_CACHE_RETENTION = "long";
+	fresh({ keepWarmMinutes: 0 });
+	const long = harness({ ui: true, cost: WITH_WRITE, model: anthropicApi, sent: claudeSent("1h"), answer: { cacheWrite: 1, cacheWrite1h: 1 } });
+	long.emit("agent_settled");
+	assert.equal(lastFooter(long), "cache warm · 60m left · long 1h (in use) · short 5m · sent 1h · api $3/$15 per M");
+});
+
+test("footer, sent: a stated lifetime the provider did not write is a difference, said with a warning", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	online(t);
+	retentionFor(t, "long");
+	fresh({ keepWarmMinutes: 0 });
+	// The request states an hour; the answer reports a 5-minute write, so the countdown runs on 5 minutes.
+	const h = harness({ ui: true, cost: WITH_WRITE, model: anthropicApi, sent: claudeSent("1h"), answer: { cacheWrite: 1, cacheWrite1h: 0 } });
+	h.emit("agent_settled");
+	assert.equal(lastFooter(h), "cache warm · 5m left · short 5m (in use) · long 1h · ⚠ sent 1h · api $3/$15 per M");
+});

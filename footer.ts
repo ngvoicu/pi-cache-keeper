@@ -113,8 +113,10 @@ export interface LifetimesView {
 /**
  * What the last request asked the provider's cache for, read from its cache markers (see requestCache): no marker (the
  * provider's default cache), one it cannot read, or the lifetimes the markers state and the tiers they ask for without
- * stating one. `conflict`: that is not the lifetime the countdown runs on, so the countdown may not follow the cache the
- * request asked for. `retention`: the retention in force, when the request asked for another tier.
+ * stating one (a lifetime the request does not state, such as Anthropic's 5-minute default, is not shown as sent).
+ * `conflict`: the lifetime it asked for is not the one in use, so the countdown may not follow the cache the request
+ * asked for; or the markers are mixed or unreadable. `retention`: the retention in force, when the request asked for
+ * another tier.
  */
 export interface SentView {
 	what: "none" | "unreadable" | { lifetimes: number[]; tiers: Tier[] };
@@ -178,8 +180,9 @@ export function lifetimesView(declared: { short?: number; long?: number } | unde
 }
 
 /**
- * What the request asked for, against the lifetime the countdown runs on (`inUse`), the model's declared lifetimes in
- * seconds, and the retention in force.
+ * What the request asked for, against the lifetime in use (`inUse`), this route's lifetimes in seconds (`declared`), and
+ * the retention in force. The lifetime asked for is the one the request states, else the route's lifetime for the tier
+ * it asks; where neither is known there is nothing to compare, and different tier names alone are not a difference.
  */
 export function sentView(
 	cache: { tier: Tier; markers: CacheMarker[]; unreadable?: string; mixed: boolean },
@@ -189,14 +192,17 @@ export function sentView(
 ): SentView {
 	const counted = inUse.ms !== undefined;
 	if (cache.unreadable) return { what: "unreadable", conflict: counted };
-	const lifetimes = [...new Set(cache.markers.flatMap((m) => (m.ms === undefined ? [] : [m.ms])))].sort((a, b) => a - b);
+	// Only a lifetime the request states; a provider's default for a marker that states none is not one.
+	const statedMs = (m: CacheMarker) => (m.implied ? undefined : m.ms);
+	const lifetimes = [...new Set(cache.markers.flatMap((m) => (statedMs(m) === undefined ? [] : [statedMs(m) as number])))].sort((a, b) => a - b);
 	// A tier is named only where no marker for it states a lifetime.
-	const stated = new Set(cache.markers.flatMap((m) => (m.ms !== undefined && m.tier ? [m.tier] : [])));
-	const tiers = [...new Set(cache.markers.flatMap((m) => (m.ms === undefined && m.tier && !stated.has(m.tier) ? [m.tier] : [])))].sort().reverse() as Tier[];
+	const stated = new Set(cache.markers.flatMap((m) => (statedMs(m) !== undefined && m.tier ? [m.tier] : [])));
+	const tiers = [...new Set(cache.markers.flatMap((m) => (statedMs(m) === undefined && m.tier && !stated.has(m.tier) ? [m.tier] : [])))].sort().reverse() as Tier[];
 	const what: SentView["what"] = cache.markers.length === 0 ? "none" : { lifetimes, tiers };
+	// The lifetime asked for: the one stated, else this route's for the tier asked.
 	const seconds = declared?.[cache.tier];
 	const ms = cache.mixed ? undefined : (lifetimes[0] ?? (seconds === undefined ? undefined : seconds * 1000));
-	const conflict = counted && (cache.mixed || (ms !== undefined ? ms !== inUse.ms : inUse.tier !== undefined && cache.tier !== inUse.tier));
+	const conflict = counted && (cache.mixed || (ms !== undefined && ms !== inUse.ms));
 	return { what, conflict, ...(!conflict && cache.tier !== retention ? { retention } : {}) };
 }
 

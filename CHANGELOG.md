@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.5.1] - 2026-11-20
+
+### Changed
+- **"sent" in the footer says what the request stated, and warns only on a real difference** — A cache marker that states no lifetime (Anthropic's `cache_control` without `ttl`) now reads as the tier it asks for, `sent short`, instead of `sent 5m`, Anthropic's documented default for it; a stated `ttl` reads as stated (`sent 5m`, `sent 1h`, OpenAI's and Kimi's values). `⚠ sent …` now shows only when the lifetime in use differs from the one the request stated, or, for a request that stated none, from this route's lifetime for the tier it asked; the same lifetime under another tier's name is no warning. Through a proxy on a subscription login with `cacheRetention: "short"`, where the short tier lasts an hour, the line read `long 1h (in use) · short 1h · ⚠ sent 5m`; it reads `long 1h (in use) · short 1h · sent short`. Mixed and unreadable markers warn as before. Display only: what the extension sends, when it refreshes or compacts, and which periods it keeps warm are unchanged.
+
 ## [0.5.0] - 2026-11-20
 
 ### Changed
