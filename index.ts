@@ -722,7 +722,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const priceState = found && found.refs.length > 0 ? fieldStates(found).price : undefined;
 		const price: PriceView = {
 			...(via ? { via } : {}),
-			// A subscription login has no per-token price; nor has Claude Code through the bridge, which Pi prices at $0.
+			// Billed by a subscription: a subscription login (its prices, where it has some, are what the extension counts
+			// with), and Claude Code through the bridge, which Pi prices at $0.
 			...(via === "sub" || (bridge && !rates) ? { subscription: true } : {}),
 			...(rates ? { rates } : priceState === "unsure" ? { partial: true } : {}),
 		};

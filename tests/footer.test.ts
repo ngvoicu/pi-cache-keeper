@@ -200,7 +200,7 @@ test("the tier in use: the one the request asked for where the route's lifetime 
 	assert.equal(tierInUse({ asked: "short", countdownMs: 12 * HOUR, route: { short: 1800, long: 43_200 }, retention: "long", fallback: "long" }), "long", "GPT's 30-minute conversation marker, the countdown on the 12 hours");
 });
 
-test("the price in use: per million tokens at the context size, no per-token price on a subscription, unknown said", () => {
+test("the price in use: per million tokens at the context size; on a subscription the prices counted with, none per token only without any; unknown said", () => {
 	const tiered = { input: 1.25, output: 10, tiers: [{ inputTokensAbove: 200_000, input: 2.5, output: 15 }] };
 	assert.deepEqual(priceAt(tiered, 150_000), { input: 1.25, output: 10 });
 	assert.deepEqual(priceAt(tiered, 250_000), { input: 2.5, output: 15, above: 200_000 });
@@ -208,7 +208,15 @@ test("the price in use: per million tokens at the context size, no per-token pri
 	const price = (view: FooterView["price"]) => formatFooter({ price: view });
 	assert.equal(price({ via: "api", rates: priceAt(tiered, 250_000) }), "api $2.5/$15 per M above 200k");
 	assert.equal(price({ via: "api", rates: { input: 0.075, output: 0.3 } }), "api $0.075/$0.3 per M");
-	assert.equal(price({ via: "sub", subscription: true, rates: { input: 5, output: 25 } }), "sub, no per-token price");
+	// A subscription login with prices: the ones the extension counts with, not what is billed per token.
+	assert.equal(price({ via: "sub", subscription: true, rates: { input: 5, output: 25 } }), "sub, counted at $5/$25 per M");
+	assert.equal(formatFooter({ price: { via: "sub", subscription: true, rates: { input: 5, output: 25 } } }, Infinity, paint), "<muted>sub, counted at $5/$25</><dim> per M</>");
+	assert.equal(price({ via: "sub", subscription: true, rates: priceAt(tiered, 250_000) }), "sub, counted at $2.5/$15 per M above 200k");
+	assert.equal(formatFooter({ price: { via: "sub", subscription: true, rates: { input: 5, output: 25 } } }, 20), "sub, counted $5/$25");
+	assert.equal(formatFooter({ price: { via: "sub", subscription: true, rates: { input: 5, output: 25 } } }, 10), "sub");
+	// Without any price (every rate zero): none per token.
+	assert.equal(price({ via: "sub", subscription: true }), "sub, no per-token price");
+	assert.equal(formatFooter({ price: { via: "sub", subscription: true } }, 10), "sub");
 	assert.equal(price({ subscription: true }), "no per-token price", "Claude Code through the bridge");
 	assert.equal(price({ via: "sub or api", rates: { input: 2, output: 10 } }), "sub or api $2/$10 per M");
 	assert.equal(price({ via: "api" }), "api, price unknown");
@@ -282,6 +290,7 @@ test("narrow terminals: wording goes first, then the least important values; the
 test("at every width from 1 to 200 columns, in every state: within the width, and no value outlasts an error", () => {
 	const views: FooterView[] = [
 		warm(59 * MIN),
+		warm(59 * MIN, { ...claude, price: { via: "sub", subscription: true, rates: { input: 4, output: 20, above: 200_000 } } }),
 		warm(59 * MIN, { lifetimes: { inUse: "short", short: { seconds: 3600 }, long: { seconds: 3600 } }, sent: { what: { lifetimes: [], tiers: ["short"] }, conflict: false }, price: { via: "sub", subscription: true } }),
 		{ countdown: { state: "running" }, lifetimes: { inUse: "long", short: { seconds: 3600 }, long: { seconds: 3600 } }, sent: { what: { lifetimes: [], tiers: ["short"] }, conflict: false }, price: { via: "sub", subscription: true } },
 		warm(59 * MIN, { ...claude, lifetimes: { inUse: "short", short: { seconds: 300 }, long: { seconds: 3600 } }, countdownTier: "long", data: { served: "api" } }),

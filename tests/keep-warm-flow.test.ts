@@ -3005,3 +3005,24 @@ test("footer, sent: a stated lifetime the provider did not write is a difference
 	reload(h, t);
 	assert.equal(lastFooter(h), "cache warm · 5m left · short 5m (in use) · long 1h · api $3/$15 per M");
 });
+
+test("footer: a subscription login shows the prices the extension counts with; without any, no per-token price", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	online(t);
+	retentionFor(t, "long");
+	fresh({ keepWarmMinutes: 0, modelData: false });
+	const login = { isUsingOAuth: () => true, getProvider: () => ({ auth: { oauth: { isSubscription: true } } }) };
+	// Claude on a subscription login, with the model's prices (Pi's catalog, providers.dev or your own).
+	const priced = harness({ ui: true, cost: WITH_WRITE, model: anthropicApi, sent: claudeSent("1h"), answer: { cacheWrite: 1, cacheWrite1h: 1 } });
+	Object.assign(priced.ctx.modelRegistry, login);
+	priced.emit("agent_settled");
+	// 0.5.1 said "… · sent 1h · sub, no per-token price".
+	assert.equal(lastFooter(priced), "cache warm · 60m left · long 1h (in use) · short 5m · sent 1h · sub, counted at $3/$15 per M");
+	// A model priced at $0 has none.
+	fresh({ keepWarmMinutes: 0, modelData: false });
+	const free = harness({ ui: true, cost: NO_PRICES, model: anthropicApi, sent: claudeSent("1h"), answer: { cacheWrite: 1, cacheWrite1h: 1 } });
+	Object.assign(free.ctx.modelRegistry, login);
+	free.emit("agent_settled");
+	assert.equal(lastFooter(free), "cache warm · 60m left · long 1h (in use) · short 5m · sent 1h · sub, no per-token price");
+});

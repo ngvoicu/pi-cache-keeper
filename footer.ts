@@ -125,9 +125,11 @@ export interface SentView {
 }
 
 /**
- * The price in use: how the model is reached, whether it is billed by subscription (no per-token price), and the input
- * and output price per million tokens at the current context size (`above`: the size a tier of the price starts at),
- * or, without a price, whether providers.dev had one for only some of the possible credentials (`partial`).
+ * The price in use: how the model is reached, whether it is billed by subscription, and the input and output price per
+ * million tokens at the current context size (`above`: the size a tier of the price starts at), or, without a price,
+ * whether providers.dev had one for only some of the possible credentials (`partial`). On a subscription the prices are
+ * the ones the extension counts with (the keep-warm budget, the compaction card), not what is billed per token; without
+ * any, there is no per-token price.
  */
 export interface PriceView {
 	via?: Via;
@@ -317,6 +319,16 @@ function sentPart(view: SentView): Part {
 
 function pricePart(view: PriceView): Part {
 	if (view.subscription) {
+		if (view.rates) {
+			// Counted at these prices, billed by the subscription.
+			const { input, output, above } = view.rates;
+			const amounts = `${usd(input)}/${usd(output)}`;
+			const lead = view.via ? `${view.via}, ` : "";
+			const per = ` per M${above === undefined ? "" : ` above ${tokenCount(above)}`}`;
+			const forms: Form[] = [[segment(`${lead}counted at ${amounts}`, "muted"), segment(per, "dim")], [segment(`${lead}counted ${amounts}`, "muted")]];
+			if (view.via) forms.push([segment(view.via, "muted")]);
+			return { forms, priority: PRIORITY.price };
+		}
 		return view.via ? plainPart(PRIORITY.price, [`${view.via}, no per-token price`, view.via], "muted") : plainPart(PRIORITY.price, ["no per-token price"], "muted");
 	}
 	const lead = view.via ? `${view.via} ` : "";
