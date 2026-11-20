@@ -84,6 +84,11 @@ export interface CacheMarker {
 	tier?: "short" | "long";
 	/** The lifetime it states, in milliseconds. */
 	ms?: number;
+	/**
+	 * True when the request states no lifetime and `ms` is the provider's documented one for the tier (Anthropic's
+	 * `cache_control` without `ttl`: 5 minutes). The footer shows the tier for it, not `ms`; the rules read `ms` as before.
+	 */
+	implied?: true;
 }
 
 /**
@@ -115,7 +120,8 @@ export function requestCache(payload: Payload): { tier: "short" | "long"; marker
 				const at = path ? `${path}.${key}` : key;
 				if (key === "cache_control") {
 					if (!isPlainObject(field) || field.type !== "ephemeral") bad(at, field);
-					else if (field.ttl === undefined || field.ttl === "5m") markers.push({ at, tier: "short", ms: 300_000 });
+					else if (field.ttl === undefined) markers.push({ at, tier: "short", ms: 300_000, implied: true });
+					else if (field.ttl === "5m") markers.push({ at, tier: "short", ms: 300_000 });
 					else if (field.ttl === "1h") markers.push({ at, tier: "long", ms: 3_600_000 });
 					else bad(at, field);
 				} else if (key === "prompt_cache_breakpoint") {
