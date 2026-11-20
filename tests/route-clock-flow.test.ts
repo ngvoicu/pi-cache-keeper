@@ -342,3 +342,75 @@ for (const route of ["the 150-second route is announced just before the summary'
 		}
 	});
 }
+
+// ------------------------------------------------------------------------------- the third review's finding 2: routes
+
+// A gateway with two accounts, each with its own cache: account A (the period's, an hour) and account B (five minutes for
+// the short tier). From 3,400 s the gateway serves B; the refresh at 3,420 s hits B's own copy, and B is announced. At
+// 3,450 s a helper request with another prefix is served by A, and A is announced again.
+const A = { provider: "account-a", model: CLAUDE_ID, subscription: true };
+const B = { provider: "account-b", model: CLAUDE_ID, subscription: false };
+const accounts = (bShort: number) => ({
+	upstreams: { "gateway-fixture": { [CLAUDE_ID]: { upstreams: [A] } } },
+	providers: { "account-a": { [CLAUDE_ID]: { short: 3600, long: 3600 } }, "account-b": { [CLAUDE_ID]: { short: bShort, long: 3600 } } },
+});
+for (const variant of ["reads everything", "reads 570,000 and writes 30,000 into the five-minute cache"] as const) {
+	test(`a route that returns: the refresh at 3,420 s on route B ${variant}, route A is reported again at 3,450 s: no summary, no refresh, cold`, { skip }, async (t) => {
+		const N = 600_000;
+		const expires = { a: 3600, b: 3500 };
+		let active: "a" | "b" = "a";
+		let s: Awaited<ReturnType<typeof session>>;
+		s = await session({
+			model: claudeGateway(),
+			store: accounts(300),
+			settings: { keepWarmMinutes: 120, compactBeforeExpiry: true },
+			prompt: N,
+			answered: { read: 0, write: N, oneHour: N },
+			serve: ({ at }) => {
+				const life = active === "a" ? 3600 : 300;
+				let read = at < expires[active] ? N : 0;
+				if (active === "b" && variant.startsWith("reads 570") && read) read -= 30_000;
+				expires[active] = at + life;
+				if (active === "b") s.announce([B]);
+				return { read, write: N - read, oneHour: life === 3600 ? N - read : 0 };
+			},
+		});
+		t.after(() => s.done());
+		await s.until(3400);
+		active = "b";
+		await s.until(3450);
+		active = "a";
+		s.announce([A]);
+		await s.until(7100);
+		assert.deepEqual(s.wires.map((w) => [w.kind, w.at]), [["refresh", 3420]], "no summary at 3,700 s or 7,000 s, no refresh at 6,840 s");
+		assert.deepEqual(s.compactions, []);
+		assert.match(s.statuses.at(-1) ?? "", /^cache cold · next message full price · keep-warm: Pi's \(/, "cold, and the period is Pi's");
+		assert.match(await s.command(), /\ncache: expired \(lifetime 5 min, the shortest lifetime read since\), counted as expired: the route changed\n/);
+	});
+}
+
+// Another route with the same hour, then the first one again: the evidence's judge still agrees, the route changed.
+test("another route with the same hour announced at 100 s, the first again at 130 s: no summary at 3,580 s, the route changed", { skip }, async (t) => {
+	const N = 600_000;
+	const s = await session({
+		model: claudeGateway(),
+		store: accounts(3600),
+		settings: { keepWarmMinutes: 120, compactBeforeExpiry: true },
+		prompt: N,
+		answered: { read: 0, write: N, oneHour: N },
+		serve: ({ at }) => ({ read: at < 3600 ? N : 0, write: 0, oneHour: 0 }),
+	});
+	t.after(() => s.done());
+	await s.until(100);
+	s.announce([B]);
+	await s.until(130);
+	s.announce([A]);
+	await s.until(3700);
+	assert.deepEqual(s.wires, [], "no refresh, no summary");
+	assert.deepEqual(s.compactions, []);
+	const stops = s.traces().filter((r: Any) => r.stop);
+	assert.deepEqual(stops.map((r: Any) => r.stop), ["unable"]);
+	assert.match(stops[0].reason, /^the period's answer was served by account-a\/.*, and a request of the model was served by account-b\/.* since: a cache on one route says nothing about the other's$/);
+	assert.match(s.statuses.at(-1) ?? "", /^cache cold · next message full price · keep-warm: Pi's \(the route changed\)/);
+	assert.match(await s.command(), /\ncache: expired \(lifetime 60 min, declared by the model\), counted as expired: the route changed\n/);
+});
