@@ -22,6 +22,14 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 const WITH_WRITE = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
 const WITHOUT_WRITE = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 };
 const NO_PRICES = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+// The harness's request carries no cache marker, on Anthropic Messages, whose default for it is five minutes: on a route
+// whose data gives the request another lifetime, only the period's own answer writing all of it into the cache of that
+// lifetime confirms it (lifetime-evidence.ts), and a 150-second or 30-minute cache can't be confirmed at all. Where a
+// test is about a period kept warm on such a lifetime, its route is one whose answers report no write breakdown (OpenAI
+// Chat Completions), which goes by the data; or, on the hour, its answer confirms it.
+const NO_BREAKDOWN = { api: "openai-completions" } as const;
+// The answer that confirms the hour: 120,000 of its 600,000-token prompt written, all of it to the 1-hour cache.
+const CONFIRMING_HOUR = { cacheRead: 480_000, cacheWrite: 120_000, cacheWrite1h: 120_000 };
 // 600,002 prompt tokens at WITH_WRITE: a refresh is expected at $0.1800156 and reports $0.180021 (2 input tokens, the
 // cached read and one output token); a miss costs $2.0700069. Without a cache-write price a miss costs $1.6200054.
 const EXPECTED = 0.1800156;
@@ -508,7 +516,7 @@ test("R2: a 1-hour cache is refreshed twice inside a 2-hour idle window; the tim
 	clock();
 	t.after(() => mock.timers.reset());
 	fresh();
-	const { emit, warms, state, sent } = harness();
+	const { emit, warms, state, sent } = harness({ model: NO_BREAKDOWN });
 	emit("agent_settled");
 
 	// Pi's own warming would refresh at 54 min; the extension waits until 3 min before expiry (57 min).
@@ -610,7 +618,7 @@ for (const [label, cost, allowed] of [
 			clock();
 			t.after(() => mock.timers.reset());
 			fresh({ keepWarmMinutes: 1440 });
-			const { emit, idle, warms, state } = harness({ lifetime, cost });
+			const { emit, idle, warms, state } = harness({ lifetime, cost, ...(lifetime === 300 ? {} : { model: NO_BREAKDOWN }) });
 			emit("agent_settled");
 			await idle(24 * HOUR);
 			assert.equal(warms.length, allowed);
@@ -802,10 +810,10 @@ test("R4: each end reason is recorded once, with the amounts, in the log, the fo
 	assert.equal(r.footer, `cache warm · 5m left · keep-warm ended (budget reached): 10 of 10 refreshes${values("5m", "api, price unknown")}`, "ended when the 10th refresh settled");
 
 	// limit: the last refresh carries the cache past the window; or the answer's own lifetime already covers it.
-	r = await ended({ lifetime: 3600, cost: WITH_WRITE });
+	r = await ended({ lifetime: 3600, cost: WITH_WRITE, model: NO_BREAKDOWN });
 	assert.deepEqual([r.stop.action, r.stop.stop, r.h.warms.length], ["warm", "limit", 2]);
 	assert.equal(r.footer, `cache warm · 60m left · keep-warm ended (2 h limit): $0.36 spent, a miss costs $2.07${values("1h")}`);
-	r = await ended({ lifetime: 3600, cost: WITH_WRITE }, undefined, 30);
+	r = await ended({ lifetime: 3600, cost: WITH_WRITE, model: NO_BREAKDOWN }, undefined, 30);
 	assert.deepEqual([r.stop.action, r.stop.stop, r.h.warms.length], ["skip", "limit", 0]);
 	assert.equal(r.stop.idleMinutes, 0, "recorded when the period starts");
 	assert.equal(r.footer, `cache warm · 60m left · keep-warm ended (30 min limit): $0 spent, a miss costs $2.07${values("1h")}`);
@@ -947,19 +955,21 @@ test("R7/2: a lifetime that reads differently during a period ends warming (unab
 	const saved = process.env.PI_CACHE_RETENTION;
 	t.after(() => (saved === undefined ? delete process.env.PI_CACHE_RETENTION : (process.env.PI_CACHE_RETENTION = saved)));
 	delete process.env.PI_CACHE_RETENTION;
-	const cases: [string, (h: ReturnType<typeof harness>) => void, RegExp][] = [
+	const cases: [string, (h: ReturnType<typeof harness>) => void, RegExp, Record<string, unknown>?][] = [
 		// The model's declared lifetime for the request's tier changed (new model data).
-		["model data changed", (h) => (h.model.promptCache = { short: 3600, long: 3600 }), /^the cache lifetime now reads 60 min, the cached request was written with 5 min$/],
-		// A proxy said another upstream answered, whose lifetime is unknown.
-		["lifetime unknown", (h) => delete h.model.promptCache, /^the cache lifetime is now unknown, the cached request was written with 5 min$/],
+		["model data changed", (h) => (h.model.promptCache = { short: 3600, long: 3600 }), /^the request's cache now lasts 60 min by the route's data, the cached request was written with 5 min$/],
+		// A proxy said another upstream answered, whose lifetime is unknown. On a route whose answers report no write
+		// breakdown, nothing else gives the request a lifetime (on Anthropic Messages, a request without a marker has
+		// five minutes as its default, which still holds).
+		["lifetime unknown", (h) => delete h.model.promptCache, /^the request's cache now lasts an unknown time, the cached request was written with 5 min$/, NO_BREAKDOWN],
 		// The declared lifetime fell from 300 s to 30 s.
-		["lifetime lowered", (h) => (h.model.promptCache = { short: 30, long: 30 }), /^the cache lifetime now reads 30 s, the cached request was written with 5 min$/],
+		["lifetime lowered", (h) => (h.model.promptCache = { short: 30, long: 30 }), /^the request's cache now lasts 30 s by the route's data, the cached request was written with 5 min$/],
 	];
-	for (const [label, change, reason] of cases) {
+	for (const [label, change, reason, route] of cases) {
 		clock();
 		fresh({ compactBeforeExpiry: false });
 		delete process.env.PI_CACHE_RETENTION;
-		const h = harness({ lifetime: 300, cost: WITH_WRITE, model: { promptCache: { short: 300, long: 3600 } } });
+		const h = harness({ lifetime: 300, cost: WITH_WRITE, model: { promptCache: { short: 300, long: 3600 }, ...route } });
 		h.emit("agent_settled");
 		await h.idle(60_000);
 		change(h);
@@ -1308,13 +1318,14 @@ test("R7b/2: an Anthropic payload shows its tier: a 1-hour cache_control is refr
 test("R7b/3: upstream or keepWarmMinutes changed while the refresh was being prepared: nothing leaves, nothing is reserved, warming ends", async (t) => {
 	t.after(() => mock.timers.reset());
 	const cases: [string, (h: ReturnType<typeof harness>) => void, RegExp][] = [
-		["the proxy's upstream now has no lifetime", (h) => delete h.model.promptCache, /^the cache lifetime is now unknown, the cached request was written with 5 min$/],
+		// On a route whose answers report no write breakdown: nothing else gives the request a lifetime.
+		["the proxy's upstream now has no lifetime", (h) => delete h.model.promptCache, /^the request's cache now lasts an unknown time, the cached request was written with 5 min$/],
 		["keepWarmMinutes set to 0", () => settings({ keepWarmMinutes: 0, minContextTokens: 100_000, compactBeforeExpiry: false }), /^keep-warm was turned off$/],
 	];
 	for (const [label, change, reason] of cases) {
 		clock();
 		fresh({ compactBeforeExpiry: false });
-		const h = harness({ lifetime: 300, cost: WITH_WRITE });
+		const h = harness({ lifetime: 300, cost: WITH_WRITE, model: NO_BREAKDOWN });
 		h.state.beforePayload = () => {
 			if (h.state.attempts === 1) change(h);
 		};
@@ -1971,7 +1982,7 @@ test("/cache-keeper-warm takes effect at the latest from the next message: a per
 	t.after(() => mock.timers.reset());
 	fresh({ compactBeforeExpiry: false });
 	// Another session's period, on the same model at the 1-hour cache, owned and not ended.
-	const running = harness({ lifetime: 3600, cost: WITH_WRITE });
+	const running = harness({ lifetime: 3600, cost: WITH_WRITE, model: NO_BREAKDOWN });
 	running.emit("agent_settled");
 	assert.deepEqual(running.decide(), { action: "stop" });
 	// This session's two misses in a row leave the model to Pi: the running period too.
@@ -2035,7 +2046,7 @@ test("the period's rule: while its refresh is out nothing else leaves, also afte
 	clock();
 	fresh({ compactBeforeExpiry: false });
 	// GPT-like 30-minute cache; the refresh's transport does not pass a cancellation on, so it never settles.
-	const h = harness({ lifetime: 1800, cost: WITH_WRITE, hold: () => true });
+	const h = harness({ lifetime: 1800, cost: WITH_WRITE, hold: () => true, model: NO_BREAKDOWN });
 	h.state.ignoresAbort = true;
 	h.emit("agent_settled");
 	for (let s = 0; s < 1800 && h.warms.length === 0; s += 10) await h.idle(10_000);
@@ -2129,7 +2140,7 @@ test("the owned period's expiry: Pi's refresh entries, or when they were recorde
 	t.after(() => mock.timers.reset());
 	clock();
 	fresh({ compactBeforeExpiry: false });
-	const h = harness({ lifetime: 1800, cost: WITH_WRITE });
+	const h = harness({ lifetime: 1800, cost: WITH_WRITE, model: NO_BREAKDOWN });
 	h.emit("agent_settled");
 	await h.idle(1_800_000);
 	assert.deepEqual(h.warms.map((w) => w.at / 1000), [1711]);
@@ -2201,7 +2212,7 @@ test("the owned period never counts a longer lifetime than the one read now: a r
 	clock();
 	fresh();
 	const keyRoute = gateway(t, 300);
-	const h = harness({ lifetime: 3600, cost: WITH_WRITE, ui: true });
+	const h = harness({ lifetime: 3600, cost: WITH_WRITE, ui: true, sent: plainMarker, answer: CONFIRMING_HOUR });
 	h.emit("agent_settled");
 	await h.idle(399_000);
 	assert.match(lastFooter(h) ?? "", /^cache warm · 53m left/);
@@ -2212,7 +2223,7 @@ test("the owned period never counts a longer lifetime than the one read now: a r
 	await h.idle(HOUR);
 	assert.equal(h.state.compacts, 0, "no summary after the shorter lifetime passed");
 	assert.deepEqual(h.warms, []);
-	assert.match(traces().find((r) => r.stop)?.reason ?? "", /^the cache lifetime now reads 5 min, the cached request was written with 60 min/);
+	assert.match(traces().find((r) => r.stop)?.reason ?? "", /^the request's cache now lasts 5 min by the route's data, the cached request was written with 60 min$/);
 });
 
 // The reviewer's second sequence: Pi's own refresh during a long run comes back after the period started, through the
@@ -2223,7 +2234,7 @@ test("the owned period never counts a longer lifetime than the one read now: a r
 	clock();
 	fresh();
 	const keyRoute = gateway(t, 150);
-	const h = harness({ lifetime: 600, cost: WITH_WRITE, ui: true });
+	const h = harness({ lifetime: 600, cost: WITH_WRITE, ui: true, model: NO_BREAKDOWN });
 	// The answer's request at 1 s; the answer streams until 545 s, and Pi's warmer refreshes the request at 541 s.
 	h.state.idle = false;
 	h.emit("agent_start");
@@ -2269,7 +2280,7 @@ test("the owned period never counts a longer lifetime than the one read now: whe
 	t.after(() => mock.timers.reset());
 	clock();
 	fresh();
-	const h = harness({ lifetime: 3600, cost: WITH_WRITE, ui: true });
+	const h = harness({ lifetime: 3600, cost: WITH_WRITE, ui: true, model: NO_BREAKDOWN });
 	h.emit("agent_settled");
 	await h.idle(100_000);
 	// The model's lifetime is gone (its data changed): nothing to count with.
@@ -2277,7 +2288,7 @@ test("the owned period never counts a longer lifetime than the one read now: whe
 	await h.idle(HOUR);
 	assert.equal(h.state.compacts, 0);
 	assert.deepEqual(h.warms, []);
-	assert.match(traces().find((r) => r.stop)?.reason ?? "", /^the cache lifetime is now unknown/);
+	assert.match(traces().find((r) => r.stop)?.reason ?? "", /^the request's cache now lasts an unknown time, the cached request was written with 60 min$/);
 	assert.match(await h.command("cache-keeper"), /cache: lifetime unknown, so no countdown/);
 	assert.match(lastFooter(h) ?? "", /^cache cold/, "counted as expired");
 });
@@ -2526,6 +2537,183 @@ test("a model round trip: a model switch away and back without a message: the pe
 	}
 });
 
+// ---------------------------------- the reviewer's second look: one judge of the evidence (lifetime-evidence.ts)
+
+// The reviewer's 1a: a route whose short tier lasts an hour, confirmed by the period's own answer. At 3,421 s the
+// extension's refresh reads 570,000 and writes 30,000, all of it to the five-minute cache: the gateway switched route.
+// The 95% read is a hit for the budget, and the write is evidence against the hour: warming ends, the period is Pi's, and
+// nothing goes out at 6,841 s (it rewrote all 600,000 there). The countdown counts five minutes from that refresh's send.
+test("the extension's own refresh is a report: a hit that wrote the rest into the five-minute cache hands the period to Pi, no second refresh", async (t) => {
+	t.after(() => mock.timers.reset());
+	withRetention(t, undefined);
+	clock();
+	fresh({ compactBeforeExpiry: false, keepWarmMinutes: 240 });
+	const h = harness({ lifetime: 3600, cost: WITH_WRITE, ui: true, sent: plainMarker, answer: CONFIRMING_HOUR, respond: () => ({ usage: { cacheRead: 570_000, cacheWrite: 30_000, cacheWrite1h: 0 } }) });
+	assert.equal(await ownedRefresh(h, HOUR), 3_421_000);
+	const refresh = traces().find((r) => r.event === "warm" && r.action === "warm");
+	assert.equal(refresh.stop, "unable");
+	assert.equal(refresh.reason, "the extension's refresh reports a 5 min cache write; the request's cache lasts 60 min by the route's data");
+	assert.ok(refresh.budget.spent > 0, "a hit, counted in the budget");
+	assert.equal(h.decide(), undefined, "Pi's warming decides");
+	assert.match(await h.command("cache-keeper"), /\(lifetime 5 min, /);
+	await h.idle(4 * HOUR);
+	await flush();
+	assert.equal(refreshesOf(h).length, 1, "nothing at 6,841 s");
+	assert.match(lastFooter(h) ?? "", /^cache cold · next message full price · keep-warm: Pi's \(the refresh wrote otherwise\)/);
+});
+
+// The reviewer's 1b: a gateway that caches requests without markers. The request carries none (Pi's adapter with
+// `cacheRetention: "none"`), the route's data gives it an hour, an earlier answer wrote the hour and the period's own
+// answer only read: no confirmation, Pi's; nothing sent (it re-sent at 3,421 s, after the five-minute cache was gone).
+test("a request without any cache marker on Anthropic Messages: five minutes by default, any other route lifetime confirmed by the period's own answer only", async (t) => {
+	t.after(() => mock.timers.reset());
+	withRetention(t, undefined);
+	const unmarked = { model: "claude", max_tokens: 64_000, system: "s", messages: [{ role: "user", content: "hi" }], thinking: { type: "adaptive" } };
+	const earlierHour = [
+		{ type: "message", id: "e", parentId: null, timestamp: new Date(500).toISOString(), message: { role: "assistant", content: [], timestamp: 500, stopReason: "stop", provider: "cliproxyapi", model: "sub/claude", usage: { input: 2, output: 5, cacheRead: 0, cacheWrite: 600_000, cacheWrite1h: 600_000 } } },
+	];
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 3600, cost: WITH_WRITE, sent: unmarked, before: earlierHour });
+	h.emit("agent_settled");
+	assert.equal(h.decide(), undefined);
+	assert.match(await h.command("cache-keeper"), /left to Pi's own warming: the request states no cache lifetime \(it carries no cache marker\), and the route's lifetime for its tier \(60 min\) is not the 5 min a request without one defaults to; the answer did not report a cache write, all of it in that cache, that confirms it/);
+	await h.idle(2 * HOUR);
+	await flush();
+	assert.deepEqual(refreshesOf(h), []);
+	// The period's own answer wrote the hour: kept warm at the hour.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	assert.equal(await ownedRefresh(harness({ lifetime: 3600, cost: WITH_WRITE, sent: unmarked, answer: CONFIRMING_HOUR }), HOUR), 3_421_000);
+	// On a five-minute route the default holds, with or without a write.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	assert.equal(await ownedRefresh(harness({ lifetime: 300, cost: WITH_WRITE, sent: unmarked })), 276_000);
+});
+
+// The reviewer's 3: a 30-minute goal and an hour cache: no refresh needed, so warming ends on the time limit at the
+// start. Then Pi's refresh from the run reports a five-minute write and the gateway its API key's route: the period's
+// lifetime no longer holds, so Pi's first idle proposal at 543 s goes out (it was told "stop", and the next message at
+// 600 s rewrote all 600,000). And after the time limit ended warming, letting the request go releases Pi too.
+test("a period whose warming ended on its time limit is still asked: evidence against its lifetime, or its request let go, and Pi's warming decides", async (t) => {
+	t.after(() => mock.timers.reset());
+	online(t);
+	withRetention(t, undefined);
+	const receipt = { input: 5, output: 1, cacheRead: 570_000, cacheWrite: 30_000, cacheWrite1h: 0 };
+	const covered = () => {
+		clock();
+		fresh({ compactBeforeExpiry: false, keepWarmMinutes: 30 });
+		const keyRoute = gateway(t, 300);
+		const h = harness({ lifetime: 3600, cost: WITH_WRITE, ui: true, sent: plainMarker, answer: CONFIRMING_HOUR });
+		h.emit("agent_settled");
+		return { h, keyRoute };
+	};
+	for (const evidence of ["the receipt and the route", "the receipt only", "the route only"] as const) {
+		const { h, keyRoute } = covered();
+		await h.idle(5_000);
+		assert.deepEqual(traces().filter((r) => r.stop).map((r) => r.stop), ["limit"], `${evidence}: the hour covers the 30 minutes`);
+		assert.deepEqual(h.decide(), { action: "stop" }, `${evidence}: Pi stays stopped while the period holds`);
+		await h.idle(267_000);
+		if (evidence !== "the route only") h.ctx.sessionManager.appendUsage("cache_warm", h.model.provider, h.model.id, receipt);
+		if (evidence !== "the receipt only") keyRoute(h);
+		await h.idle(270_000);
+		assert.equal(h.decide(), undefined, `${evidence}: Pi's proposal at 543 s goes out`);
+		assert.match(await h.command("cache-keeper"), /this session is left to Pi's own warming: /, evidence);
+		assert.deepEqual(refreshesOf(h), []);
+	}
+	// Ended on the time limit, then the request let go (a model switch away and back, a move on the tree).
+	for (const letGo of ["a model switch", "/tree"] as const) {
+		const { h } = covered();
+		await h.idle(60_000);
+		assert.deepEqual(h.decide(), { action: "stop" });
+		if (letGo === "/tree") h.emit("session_tree");
+		else {
+			const own = h.ctx.model;
+			h.ctx.model = { ...h.model, provider: "google", id: "gemini-3.8-pro", api: "google-generative-ai" } as never;
+			h.emit("model_select");
+			h.ctx.model = own;
+			h.emit("model_select");
+		}
+		assert.equal(h.decide(), undefined, `${letGo}: Pi's warming decides`);
+	}
+	// Ended for good (the budget): Pi stays stopped, as before, also after the request is let go.
+	clock();
+	fresh({ compactBeforeExpiry: false, keepWarmMinutes: 1440 });
+	const spent = harness({ lifetime: 300 });
+	spent.emit("agent_settled");
+	await spent.idle(2 * HOUR);
+	assert.equal(traces().find((r) => r.stop)?.stop, "budget");
+	spent.emit("session_tree");
+	assert.deepEqual(spent.decide(), { action: "stop" });
+});
+
+// The reviewer's 4: after a hand-over on evidence against, the period's countdown counts the shortest lifetime read from
+// the period's own last fact (its answer here), never from when a receipt of Pi's was recorded; a write in both caches
+// counts as the shorter, and a marker without ttl has its five minutes where the route gives its tier none. Read cold
+// early, compacting before expiry sends nothing (each sent a summary that read nothing from the cache).
+test("after a hand-over on evidence against, the countdown counts the shortest lifetime from the period's own last fact: no cold summary", async (t) => {
+	t.after(() => mock.timers.reset());
+	const cases: [string, Options, string | undefined, (h: ReturnType<typeof harness>) => void][] = [
+		[
+			"an explicit hour, the route now giving its tier five minutes, Pi's receipt recorded at 350 s",
+			{ model: { promptCache: { short: 300, long: 3600 } }, sent: STATED_HOUR },
+			"long",
+			(h) => {
+				h.model.promptCache = { short: 300, long: 300 };
+				h.ctx.sessionManager.appendUsage("cache_warm", h.model.provider, h.model.id, { input: 5, output: 1, cacheRead: 600_000, cacheWrite: 0, cacheWrite1h: 0 });
+			},
+		],
+		[
+			"the short-hour route, Pi's receipt writing into both caches",
+			{ lifetime: 3600, sent: plainMarker, answer: CONFIRMING_HOUR },
+			undefined,
+			(h) => h.ctx.sessionManager.appendUsage("cache_warm", h.model.provider, h.model.id, { input: 5, output: 1, cacheRead: 0, cacheWrite: 180_000, cacheWrite1h: 4_096 }),
+		],
+		[
+			"the short-hour route, the route now giving the short tier nothing",
+			{ lifetime: 3600, sent: plainMarker, answer: CONFIRMING_HOUR },
+			undefined,
+			(h) => {
+				h.model.promptCache = { long: 3600 };
+				h.ctx.sessionManager.appendUsage("cache_warm", h.model.provider, h.model.id, { input: 5, output: 1, cacheRead: 600_000, cacheWrite: 0, cacheWrite1h: 0 });
+			},
+		],
+	];
+	for (const [label, options, retention, evidence] of cases) {
+		withRetention(t, retention);
+		clock();
+		fresh({ minContextTokens: 0 });
+		const h = harness({ cost: WITH_WRITE, ui: true, ...options });
+		h.emit("agent_settled");
+		assert.deepEqual(h.decide(), { action: "stop" }, `${label}: owned`);
+		await h.idle(349_000);
+		evidence(h);
+		await h.idle(15_000);
+		assert.equal(h.decide(), undefined, `${label}: Pi's`);
+		assert.match(lastFooter(h) ?? "", /^cache cold/, `${label}: counted from the answer at 1 s, five minutes: cold`);
+		assert.match(await h.command("cache-keeper"), /\ncache: expired \(lifetime 5 min, /, `${label}: /cache-keeper too`);
+		await h.idle(2 * HOUR);
+		assert.equal(h.state.compacts, 0, `${label}: no summary`);
+		assert.deepEqual(refreshesOf(h), [], label);
+	}
+});
+
+// The route whose short tier lasts an hour, confirmed by the period's own answer, through two refreshes: one reports an
+// hour write, one only reads. Both agree with the hour: warming goes on.
+test("the confirmed short-hour route stays the extension's through refreshes that report an hour write or no write", async (t) => {
+	t.after(() => mock.timers.reset());
+	withRetention(t, undefined);
+	clock();
+	fresh({ compactBeforeExpiry: false, keepWarmMinutes: 120 });
+	const h = harness({ lifetime: 3600, cost: WITH_WRITE, sent: plainMarker, answer: CONFIRMING_HOUR, respond: (n) => ({ usage: n === 1 ? { cacheRead: 590_000, cacheWrite: 10_000, cacheWrite1h: 10_000 } : { cacheRead: 600_000, cacheWrite: 0, cacheWrite1h: 0 } }) });
+	h.emit("agent_settled");
+	await h.idle(3 * HOUR);
+	await flush();
+	assert.deepEqual(refreshesOf(h).map((w) => w.at), [3_421_000, 6_841_000]);
+	assert.deepEqual(traces().filter((r) => r.stop).map((r) => r.stop), ["limit"], "ended only by the time limit");
+	assert.deepEqual(h.decide(), { action: "stop" });
+});
+
 // Every row of the probe (route data in seconds for the short and the long tier, the request's marker, the bucket the
 // answer reports), keep-warm on: owned at a lifetime, with the first refresh 5% (at least 25 s) before it expires, or
 // Pi's, with why. The bucket is evidence of a lifetime: owned only where it is the request's lifetime.
@@ -2739,7 +2927,7 @@ test("compaction before expiry, keep-warm on: the gateway shows the 5-minute rou
 		clock();
 		fresh({ minContextTokens: 100_000 });
 		const keyRoute = gateway(t, 300);
-		const run = withCompaction(lookupMs, { lifetime: 3600, cost: WITH_WRITE });
+		const run = withCompaction(lookupMs, { lifetime: 3600, cost: WITH_WRITE, sent: plainMarker, answer: CONFIRMING_HOUR });
 		run.h.emit("agent_settled");
 		await run.h.idle(293_000);
 		keyRoute(run.h);
@@ -3037,7 +3225,7 @@ test("never a third paid miss: while a refresh of the model is on its way, from 
 	// A slow refresh settles when it settles: not cancelled, not sent again; once it reports a hit, the next one follows.
 	clock();
 	fresh({ compactBeforeExpiry: false });
-	const slow = harness({ lifetime: 3600, cost: WITH_WRITE, hold: (n) => n === 1 });
+	const slow = harness({ lifetime: 3600, cost: WITH_WRITE, hold: (n) => n === 1, model: NO_BREAKDOWN });
 	slow.emit("agent_settled");
 	await slow.idle(3_421_000);
 	assert.equal(slow.warms.length, 1);
