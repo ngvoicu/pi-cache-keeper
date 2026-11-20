@@ -353,9 +353,18 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// refreshes.
 	const stateOf = (model: Model<Api>, entries: SessionEntry[]): CacheState => {
 		const p = period;
-		if (!owns(p)) return cacheState(servedModel(model), entries, p?.warm.refreshedAt);
+		// The branch in front of the user, read as with keep-warm off: its own answer, its own tier.
+		const plain = cacheState(servedModel(model), entries);
+		// Whether the period's facts are about this branch and model: the branch still holds the period's answer.
+		const periodsBranch = p !== undefined && p.model === `${model.provider}/${model.id}` && plain.answeredAt !== undefined && plain.answeredAt === p.answeredAt;
+		if (!owns(p)) {
+			// A period kept warm before it was left to Pi (or keep-warm switched off) adds its confirmed hits, on its branch only.
+			const hit = periodsBranch ? p.warm.refreshedAt : undefined;
+			return hit === undefined ? plain : cacheState(servedModel(model), entries, hit);
+		}
+		if (!periodsBranch || `${model.provider}/${model.id}` !== p.fixed.model) return plain;
 		const state = keptState(model, entries, p.fixed.requested);
-		if (`${model.provider}/${model.id}` !== p.fixed.model || state.answeredAt !== p.answeredAt) return state;
+		if (state.answeredAt !== p.answeredAt) return plain;
 		if (state.refreshedAt === undefined || p.answeredAt === undefined) return { ...state, expiresAt: undefined };
 		const now = state.lifetime;
 		const ms = now === undefined ? 0 : Math.min(p.fixed.ms, now.ms);
@@ -1589,6 +1598,22 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		};
 
 		let mismatch: PrefixMismatch | undefined;
+		// Compacting before expiry has a last gate, as a refresh does: the summary is only worth sending while the cache is
+		// warm, so the expiry every reader uses is read again just before the request leaves (after its preparation, a
+		// credential lookup say), and once the cache has expired the request does not leave and the compaction is cancelled.
+		let expiredAtGate: string | undefined;
+		const gate = () => {
+			if (!fromExpiry) return;
+			let expiresAt: number | undefined;
+			try {
+				expiresAt = stateOf(request.model, event.branchEntries).expiresAt;
+			} catch {
+				expiresAt = undefined;
+			}
+			if (expiresAt !== undefined && Date.now() < expiresAt) return;
+			expiredAtGate = "the prompt cache expired before the summary request left";
+			throw new Error(expiredAtGate);
+		};
 		const thinkingLevel = pi.getThinkingLevel();
 		const controller = new AbortController();
 		const disableTools = prefix !== undefined && isOpenAiResponses(request.model);
@@ -1596,6 +1621,14 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const sharedKey = prefix ? sharedPrefixKey(request.model, ctx.cwd) : undefined;
 		const requestInfo = { thinking: thinkingLevel, bridgeFork: prefix === undefined, toolChoiceNone: disableTools, sharedPrefix: false };
 		record.request = requestInfo;
+		// Through pi-claude-bridge there is no payload hook: the last check is just before the request is handed to it.
+		if (!prefix) {
+			try {
+				gate();
+			} catch {
+				return fallBack(expiredAtGate ?? "the prompt cache expired before the summary request left");
+			}
+		}
 		const started = Date.now();
 		const sent = [...request.transcript, ...trailing, instruction];
 		let response: AssistantMessage;
@@ -1610,6 +1643,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				...(prefix
 					? {
 						onPayload: (params: unknown) => {
+							gate();
 							const built = summaryPayload(params, prefix, sharedKey, cacheNeutral);
 							requestInfo.sharedPrefix = built.sharedPrefix;
 							if ("reason" in built) {
@@ -1623,6 +1657,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				})
 				.result();
 		} catch (error) {
+			if (expiredAtGate) return fallBack(expiredAtGate);
 			return fallBack(`the summary request failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 		// A bridge query that called a tool waits for the result until aborted.
@@ -1636,6 +1671,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			error: mismatch ? undefined : response.errorMessage,
 		};
 
+		if (expiredAtGate) return fallBack(expiredAtGate);
 		if (response.stopReason === "aborted") {
 			decision = trace(ctx, { ...record, outcome: "cancelled", reason: "the compaction was aborted" });
 			return { cancel: true };

@@ -2273,6 +2273,93 @@ test("the owned period never counts a longer lifetime than the one read now: whe
 	assert.match(lastFooter(h) ?? "", /^cache cold/, "counted as expired");
 });
 
+// Compacting before expiry has a last gate. Pi's compaction is stood in for: the extension's session_before_compact
+// handler is called as Pi calls it, and the summary's transport looks the credentials up (taking `lookupMs`) before it
+// builds the payload.
+const withCompaction = (lookupMs: number, options: Options) => {
+	const summaries: { at: number; payload: unknown }[] = [];
+	let compaction: Promise<unknown> | undefined;
+	const h = harness({
+		...options,
+		stream: (o) => ({
+			result: async () => {
+				const summary = (o as { maxTokens?: number }).maxTokens !== 1;
+				if (summary && lookupMs) mock.timers.tick(lookupMs);
+				let payload: unknown;
+				try {
+					payload = await (o as { onPayload: (p: unknown) => unknown }).onPayload({ ...h.sent, messages: [...h.sent.messages, { role: "user", content: "Summarize." }] });
+				} catch (error) {
+					return { stopReason: "error", errorMessage: (error as Error).message, content: [], usage: h.usage({ input: 0, output: 0, cacheRead: 0 }) };
+				}
+				if (summary) summaries.push({ at: Date.now(), payload });
+				return { stopReason: "stop", content: [{ type: "text", text: summary ? "The summary." : "" }], usage: h.usage() };
+			},
+		}),
+	});
+	h.ctx.compact = () => {
+		h.state.compacts++;
+		compaction = h.emit("session_before_compact", {
+			reason: "manual",
+			branchEntries: [...h.branch],
+			signal: new AbortController().signal,
+			preparation: { tokensBefore: 600_000, firstKeptEntryId: "u", messagesToSummarize: [], turnPrefixMessages: [], isSplitTurn: false, fileOps: { read: new Set(), written: new Set(), edited: new Set() }, settings: { reserveTokens: 16_384, keepRecentTokens: 20_000 } },
+		}) as Promise<unknown>;
+	};
+	return { h, summaries, compaction: () => compaction };
+};
+const checkGate = async (label: string, lookupMs: number, run: ReturnType<typeof withCompaction>, expect: { startedAt: number }) => {
+	assert.equal(run.h.state.compacts, 1, `${label}: compaction before expiry started`);
+	const result = await run.compaction();
+	const record = allTraces().find((r) => r.event === "compact");
+	const started = allTraces().find((r) => r.event === "expiry" && r.action === "compact");
+	assert.equal(Date.parse(started.at), expect.startedAt, `${label}: when it started`);
+	if (lookupMs) {
+		assert.deepEqual(run.summaries, [], `${label}: nothing left`);
+		assert.deepEqual(result, { cancel: true }, `${label}: the compaction is cancelled`);
+		assert.deepEqual([record.outcome, record.reason], ["cancelled", "the prompt cache expired before the summary request left"], label);
+	} else {
+		assert.deepEqual(run.summaries.map((x) => x.at), [expect.startedAt], `${label}: it left at once, while the cache was warm`);
+		assert.equal(record.outcome, "cached", label);
+		assert.equal(record.response.usage.cacheRead, 600_000, `${label}: and read the cache`);
+	}
+};
+
+test("compaction before expiry, keep-warm off: a credential lookup that outlasts the cache leaves nothing and cancels the compaction; a fast one leaves and reads the cache", async (t) => {
+	t.after(() => mock.timers.reset());
+	for (const lookupMs of [21_000, 0]) {
+		clock();
+		fresh({ keepWarmMinutes: 0, minContextTokens: 100_000 });
+		const run = withCompaction(lookupMs, { lifetime: 300, cost: WITH_WRITE });
+		run.h.emit("agent_settled");
+		await run.h.idle(HOUR);
+		await checkGate(`lookup ${lookupMs / 1000} s`, lookupMs, run, { startedAt: 281_000 });
+		mock.timers.reset();
+	}
+});
+
+// The reviewer's sequence: an owned period on the login's hour; at 294 s the gateway shows the API key's 5-minute route,
+// so the cache expires at 301 s and compaction before expiry starts at once; a 2.1-s credential lookup carries the
+// summary past the expiry.
+test("compaction before expiry, keep-warm on: the gateway shows the 5-minute route at 294 s; a 2.1-s credential lookup leaves nothing and cancels the compaction; a fast one leaves and reads the cache", async (t) => {
+	t.after(() => mock.timers.reset());
+	online(t);
+	for (const lookupMs of [2_100, 0]) {
+		clock();
+		fresh({ minContextTokens: 100_000 });
+		const keyRoute = gateway(t, 300);
+		const run = withCompaction(lookupMs, { lifetime: 3600, cost: WITH_WRITE });
+		run.h.emit("agent_settled");
+		await run.h.idle(293_000);
+		keyRoute(run.h);
+		await run.h.idle(HOUR);
+		assert.deepEqual(run.h.warms.filter((w) => (w.options as { maxTokens?: number }).maxTokens === 1), [], "no refresh");
+		const started = Date.parse(allTraces().find((r) => r.event === "expiry" && r.action === "compact").at);
+		assert.ok(started > 294_000 && started < 301_000, `started at ${started}`);
+		await checkGate(`lookup ${lookupMs / 1000} s`, lookupMs, run, { startedAt: started });
+		mock.timers.reset();
+	}
+});
+
 // /tree to another branch: the countdown belongs to the branch in front of the user. A period's facts apply only while
 // the branch still holds the period's answer.
 test("/tree to an independent branch whose cache is an hour old: the footer and /cache-keeper read that branch, cold", async (t) => {
@@ -2297,6 +2384,68 @@ test("/tree to an independent branch whose cache is an hour old: the footer and 
 		assert.match(await h.command("cache-keeper"), /cache: expired/, `${keepWarmMinutes}: /cache-keeper`);
 		mock.timers.reset();
 	}
+});
+
+// The reviewer's first /tree capture: branch A asked for the 5-minute cache and its answer reported no write tier; branch
+// B, with the retention switched to long, asked for the hour. With short restored, /tree back to A at 601 s: A's own
+// answer and tier count (cold, as main shows it with keep-warm off), not B's period's hour.
+test("/tree back to a branch whose answer reported no tier: its own tier counts, not the tier of the period on the branch left", async (t) => {
+	t.after(() => mock.timers.reset());
+	const saved = process.env.PI_CACHE_RETENTION;
+	t.after(() => (saved === undefined ? delete process.env.PI_CACHE_RETENTION : (process.env.PI_CACHE_RETENTION = saved)));
+	for (const keepWarmMinutes of [0, 120]) {
+		clock();
+		fresh({ keepWarmMinutes, compactBeforeExpiry: false });
+		process.env.PI_CACHE_RETENTION = "short";
+		const h = harness({ ui: true, cost: WITH_WRITE, model: { promptCache: { short: 300, long: 3600 } } });
+		const a = h.branch.slice();
+		// No refresh on A (a message stays queued), so A's own answer is all its cache has.
+		h.state.pending = true;
+		h.emit("agent_settled");
+		await h.idle(599_000);
+		h.state.pending = false;
+		// Branch B, at 600 s, with the long retention: its request asks for the hour.
+		process.env.PI_CACHE_RETENTION = "long";
+		(h.sent as Record<string, unknown>).system = [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "1h" } }];
+		h.branch.length = 0;
+		h.run(true);
+		mock.timers.tick(1000);
+		assert.match(lastFooter(h) ?? "", /^cache warm · 59m left/, `${keepWarmMinutes}: B`);
+		process.env.PI_CACHE_RETENTION = "short";
+		h.branch.splice(0, h.branch.length, ...a);
+		h.emit("session_tree");
+		mock.timers.tick(1000);
+		assert.match(lastFooter(h) ?? "", /^cache cold/, `${keepWarmMinutes}: A, 601 s old`);
+		assert.match(await h.command("cache-keeper"), /cache: expired \(lifetime 5 min/, `${keepWarmMinutes}: /cache-keeper`);
+		mock.timers.reset();
+	}
+});
+
+// The reviewer's second /tree capture: a confirmed hit on branch X, keep-warm switched off, then /tree to an hour-old
+// independent branch Y. Nothing of X's period carries over.
+test("/tree after keep-warm was switched off: the confirmed hit of the period on the branch left does not carry over", async (t) => {
+	t.after(() => mock.timers.reset());
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	const y = h.branch.slice();
+	h.state.pending = true;
+	h.emit("agent_settled");
+	await h.idle(HOUR);
+	h.state.pending = false;
+	// Branch X answers at 3,601 s; its refresh at 3,876 s reports a hit.
+	h.branch.length = 0;
+	h.run(true);
+	await h.idle(276_000);
+	assert.deepEqual(h.warms.map((w) => w.at / 1000), [3876]);
+	settings({ keepWarmMinutes: 0, compactBeforeExpiry: false });
+	await h.idle(5_000);
+	assert.match(lastFooter(h) ?? "", /^cache warm · 4m left/, "X: its hit still counts on X");
+	h.branch.splice(0, h.branch.length, ...y);
+	h.emit("session_tree");
+	mock.timers.tick(1000);
+	assert.match(lastFooter(h) ?? "", /^cache cold/, "Y, an hour old");
+	assert.match(await h.command("cache-keeper"), /cache: expired/);
 });
 
 test("R9: one miss counted, then the command with only a count to clear", async (t) => {
