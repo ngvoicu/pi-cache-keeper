@@ -120,7 +120,7 @@ import {
 	type Found,
 } from "./model-data.ts";
 import { end, expiryOf, leave, mayLeave, settle, WAITING, type WarmPhase } from "./warm-period.ts";
-import { formatFooter, lifetimesView, priceAt, sentView, type Countdown, type DataView, type FooterView, type KeepWarmView, type PriceView } from "./footer.ts";
+import { formatFooter, lifetimesView, priceAt, sentView, tierInUse, type Countdown, type DataView, type FooterView, type KeepWarmView, type PriceView } from "./footer.ts";
 
 interface CapturedRequest {
 	transcript: AgentMessage[];
@@ -697,18 +697,26 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const owned = owns(p) && p.fixed.model === key;
 		const request = captured && captured.model.provider === model.provider && captured.model.id === model.id ? captured : undefined;
 		const asked = request !== undefined || entries.some((e) => e.type === "message" && e.message.role === "assistant" && e.message.provider === model.provider && e.message.model === model.id);
-		const tier = !asked || bridge ? undefined : owned ? p.fixed.tier : cacheTier(entries, model);
+		// The model's own tier as the answer's write bucket names it (the countdown's, where it is this model's).
+		const ownTier = !asked || bridge ? undefined : owned ? p.fixed.tier : cacheTier(entries, model);
 		// The tier the countdown runs on, read as stateOf reads it: with keep-warm off, the latest tier any model's answer
 		// reported, which after a model switch can be another model's.
 		const countdownTier = owns(p) ? cacheTier(entries, model, p.fixed.requested) : cacheTier(entries);
 		const counted = owned ? undefined : stateOf(model, entries).lifetime;
+		const cache = request?.payload && MARKERS_READ.has(model.api) ? (request.cache ?? requestCache(request.payload)) : undefined;
+		const retention = process.env.PI_CACHE_RETENTION === "long" ? "long" : "short";
+		// The tier marked "(in use)": the one the request asked for where this route's lifetime for it is the countdown's
+		// (a route can write its short tier as a one-hour cache), else see tierInUse. Display only.
+		const countdownMs = owned ? p.fixed.ms : counted?.ms;
+		// A period the extension keeps warm for this model knows the tier its request asked for, also once the request
+		// itself is forgotten (a model switch and back).
+		const askedTier = cache?.tier ?? (owned ? p.fixed.requested : undefined);
+		const tier = ownTier === undefined ? undefined : tierInUse({ asked: askedTier, countdownMs, route: served.promptCache, retention, fallback: ownTier });
 		const declared = tier === undefined ? undefined : served.promptCache?.[tier];
 		// Where the model declares none for the tier, the countdown's own (the provider's report, a family's documented
 		// one), when the countdown runs on that tier.
 		const inUse = owned ? p.fixed.ms / 1000 : (declared ?? (tier === countdownTier && counted && counted.source !== "declared by the model" ? counted.ms / 1000 : undefined));
 		const lifetimes = lifetimesView(served.promptCache, { tier, seconds: inUse }, found);
-		const cache = request?.payload && MARKERS_READ.has(model.api) ? (request.cache ?? requestCache(request.payload)) : undefined;
-		const retention = process.env.PI_CACHE_RETENTION === "long" ? "long" : "short";
 		const sent = cache && tier ? sentView(cache, { tier, ms: inUse === undefined ? undefined : inUse * 1000 }, served.promptCache, retention) : undefined;
 		const rates = hasPrices(model) ? priceAt(model.cost, ctx.getContextUsage()?.tokens ?? undefined) : undefined;
 		const priceState = found && found.refs.length > 0 ? fieldStates(found).price : undefined;
@@ -730,7 +738,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		// The countdown on another tier than the model's own, or counted from another model's answer (also where this model
 		// has made no request yet, as after a switch and /reload, /resume or /fork): said beside it, so the two are not
 		// read as one.
-		const otherTier = !owned && ((tier !== undefined && countdownTier !== tier) || latestAnswerIsOthers(entries, key)) ? countdownTier : undefined;
+		const otherTier = !owned && ((ownTier !== undefined && countdownTier !== ownTier) || latestAnswerIsOthers(entries, key)) ? countdownTier : undefined;
 		return { lifetimes, ...(sent ? { sent } : {}), ...(otherTier ? { countdownTier: otherTier } : {}), price, data: dataView };
 	};
 	// Whether the answer the countdown counts from is another model's. Read as `cacheState` reads it where the extension

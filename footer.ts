@@ -180,6 +180,32 @@ export function lifetimesView(declared: { short?: number; long?: number } | unde
 }
 
 /**
+ * The tier the footer marks "(in use)". A request asks for a tier; how long a tier lasts is the route's (its model data);
+ * an answer reports the write bucket the provider used (5 minutes or 1 hour), which is the tier's name only on
+ * Anthropic's own API: a route can write its short tier as a one-hour cache. So:
+ * - the tier the request asked for (`asked`), where this route's lifetime for it is the one the countdown runs on;
+ * - without a request the extension read (after /reload, /resume, /fork, a compaction or /tree, or a form whose markers
+ *   it does not read): the tier whose lifetime on this route is the countdown's, and where both tiers have it, the
+ *   retention in force (what the next request asks for);
+ * - otherwise `fallback`, the tier the countdown runs on as the answer's bucket names it (a stated hour the provider
+ *   wrote as 5 minutes reads as the 5-minute tier, and "sent" warns).
+ * `route` is in seconds, `countdownMs` in milliseconds.
+ */
+export function tierInUse(o: { asked?: Tier; countdownMs?: number; route?: { short?: number; long?: number }; retention: Tier; fallback?: Tier }): Tier | undefined {
+	const routeMs = (tier: Tier) => (o.route?.[tier] === undefined ? undefined : (o.route[tier] as number) * 1000);
+	if (o.countdownMs !== undefined) {
+		if (o.asked) {
+			if (routeMs(o.asked) === o.countdownMs) return o.asked;
+		} else {
+			const matching = (["short", "long"] as const).filter((tier) => routeMs(tier) === o.countdownMs);
+			if (matching.length === 1) return matching[0];
+			if (matching.length === 2) return o.retention;
+		}
+	}
+	return o.fallback;
+}
+
+/**
  * What the request asked for, against the lifetime in use (`inUse`), this route's lifetimes in seconds (`declared`), and
  * the retention in force. The lifetime asked for is the one the request states, else the route's lifetime for the tier
  * it asks; where neither is known there is nothing to compare, and different tier names alone are not a difference.

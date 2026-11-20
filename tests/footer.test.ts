@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { fitParts, footerParts, formatFooter, lifetimesView, priceAt, sentView, type FooterView, type Tone } from "../footer.ts";
+import { fitParts, footerParts, formatFooter, lifetimesView, priceAt, sentView, tierInUse, type FooterView, type Tone } from "../footer.ts";
 import { requestCache } from "../keep-warm.ts";
 import { factsOf, findFacts, lookupsFor, type DataStore } from "../model-data.ts";
 
@@ -173,6 +173,33 @@ test("what was sent, wide and narrow: a proxy on a subscription login, Anthropic
 	assert.equal(line(differs, 20), "warm 4m · ⚠ sent 1h");
 });
 
+test("the tier in use: the one the request asked for where the route's lifetime for it is the countdown's; without a request, the lifetime decides", () => {
+	const HOUR_S = 3600;
+	const hourBoth = { short: HOUR_S, long: HOUR_S };
+	const anthropic = { short: 300, long: HOUR_S };
+	// A route whose short tier lasts an hour: asked short, the one-hour write reported (the bucket names it "long").
+	assert.equal(tierInUse({ asked: "short", countdownMs: HOUR, route: hourBoth, retention: "short", fallback: "long" }), "short");
+	assert.equal(tierInUse({ asked: "short", countdownMs: HOUR, route: hourBoth, retention: "long", fallback: "long" }), "short", "the request, not the retention");
+	// Anthropic's API: the tier asked and the bucket agree.
+	assert.equal(tierInUse({ asked: "short", countdownMs: 5 * MIN, route: anthropic, retention: "short", fallback: "short" }), "short");
+	assert.equal(tierInUse({ asked: "long", countdownMs: HOUR, route: anthropic, retention: "long", fallback: "long" }), "long");
+	// Asked for the hour, written as 5 minutes: what is in use is the 5-minute tier.
+	assert.equal(tierInUse({ asked: "long", countdownMs: 5 * MIN, route: anthropic, retention: "long", fallback: "short" }), "short");
+	// No request read (after /reload, /resume, /fork, a compaction or /tree): the tier whose lifetime is the countdown's,
+	// and where both tiers have it, the retention in force.
+	assert.equal(tierInUse({ countdownMs: 5 * MIN, route: anthropic, retention: "long", fallback: "short" }), "short");
+	assert.equal(tierInUse({ countdownMs: HOUR, route: anthropic, retention: "short", fallback: "long" }), "long");
+	assert.equal(tierInUse({ countdownMs: HOUR, route: hourBoth, retention: "short", fallback: "long" }), "short");
+	assert.equal(tierInUse({ countdownMs: HOUR, route: hourBoth, retention: "long", fallback: "short" }), "long");
+	// Nothing to go by (no lifetime on the route for it, or no countdown lifetime): the tier as before.
+	assert.equal(tierInUse({ countdownMs: HOUR, route: undefined, retention: "short", fallback: "long" }), "long");
+	assert.equal(tierInUse({ asked: "short", countdownMs: undefined, route: hourBoth, retention: "short", fallback: "long" }), "long");
+	// Formats whose answers report no write bucket: the tier asked is the retention's, and reads as before.
+	assert.equal(tierInUse({ asked: "short", countdownMs: 30 * MIN, route: { short: 1800, long: 43_200 }, retention: "short", fallback: "short" }), "short");
+	assert.equal(tierInUse({ asked: "long", countdownMs: HOUR, route: { short: 300, long: HOUR_S }, retention: "long", fallback: "long" }), "long");
+	assert.equal(tierInUse({ asked: "short", countdownMs: 12 * HOUR, route: { short: 1800, long: 43_200 }, retention: "long", fallback: "long" }), "long", "GPT's 30-minute conversation marker, the countdown on the 12 hours");
+});
+
 test("the price in use: per million tokens at the context size, no per-token price on a subscription, unknown said", () => {
 	const tiered = { input: 1.25, output: 10, tiers: [{ inputTokensAbove: 200_000, input: 2.5, output: 15 }] };
 	assert.deepEqual(priceAt(tiered, 150_000), { input: 1.25, output: 10 });
@@ -255,6 +282,7 @@ test("narrow terminals: wording goes first, then the least important values; the
 test("at every width from 1 to 200 columns, in every state: within the width, and no value outlasts an error", () => {
 	const views: FooterView[] = [
 		warm(59 * MIN),
+		warm(59 * MIN, { lifetimes: { inUse: "short", short: { seconds: 3600 }, long: { seconds: 3600 } }, sent: { what: { lifetimes: [], tiers: ["short"] }, conflict: false }, price: { via: "sub", subscription: true } }),
 		{ countdown: { state: "running" }, lifetimes: { inUse: "long", short: { seconds: 3600 }, long: { seconds: 3600 } }, sent: { what: { lifetimes: [], tiers: ["short"] }, conflict: false }, price: { via: "sub", subscription: true } },
 		warm(59 * MIN, { ...claude, lifetimes: { inUse: "short", short: { seconds: 300 }, long: { seconds: 3600 } }, countdownTier: "long", data: { served: "api" } }),
 		{ countdown: { state: "cold" }, keepWarm: { fallback: true }, ...claude },

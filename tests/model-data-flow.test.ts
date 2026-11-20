@@ -339,7 +339,7 @@ test("a proxy extension that knows what serves its models: their values, fetched
 	}
 	answered([login("anthropic")]);
 	assert.equal(h.statuses.get("cache-keeper"), LOGIN);
-	// Pi asks for the long tier (the default setting); Anthropic says it wrote the short one: the footer follows.
+	// Pi asks for the long tier (the default setting); the answer reports a 5-minute write.
 	h.branch.push({
 		type: "message",
 		id: "r1",
@@ -356,8 +356,9 @@ test("a proxy extension that knows what serves its models: their values, fetched
 		},
 	});
 	h.handlers.get("agent_settled")!({}, h.ctx);
-	// The model's own answer says which tier is in use; it is long expired in this test, so the countdown says cold.
-	assert.equal(h.statuses.get("cache-keeper"), "cache cold · next message full price · short 1h (in use) · long 1h · sub, no per-token price");
+	// No request was seen, and on this route both tiers last an hour, so the write bucket cannot tell which tier was asked
+	// for: the retention in force (long) is marked. The answer is long expired in this test, so the countdown says cold.
+	assert.equal(h.statuses.get("cache-keeper"), "cache cold · next message full price · long 1h (in use) · short 1h · sub, no per-token price");
 	h.branch.length = 0;
 	h.handlers.get("agent_settled")!({}, h.ctx);
 	// What answered for another model does not touch this one; a new model starts without one.
