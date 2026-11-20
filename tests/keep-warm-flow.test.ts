@@ -2244,8 +2244,11 @@ test("the owned period never counts a longer lifetime than the one read now: a r
 	keyRoute(h);
 	await flush();
 	await h.idle(15_000);
-	assert.match(lastFooter(h) ?? "", /^cache cold/);
+	// The period is Pi's; its own refresh, recorded at 548 s, keeps the key's 150-second cache until 698 s: the countdown
+	// shows that, and nothing is sent on it.
+	assert.match(lastFooter(h) ?? "", /^cache warm · 2m left · /);
 	await h.idle(HOUR);
+	assert.match(lastFooter(h) ?? "", /^cache cold/);
 	assert.equal(h.state.compacts, 0, "no summary after the shorter lifetime passed");
 	assert.deepEqual(h.warms, []);
 	assert.equal(traces().find((r) => r.stop)?.stop, "unable");
@@ -2666,8 +2669,10 @@ test("after a hand-over on evidence against, the countdown counts the shortest l
 		evidence(h);
 		await h.idle(15_000);
 		assert.equal(h.decide(), undefined, `${label}: Pi's`);
-		assert.match(lastFooter(h) ?? "", /^cache cold/, `${label}: counted from the answer at 1 s, five minutes: cold`);
-		assert.match(await h.command("cache-keeper"), /\ncache: expired \(lifetime 5 min, /, `${label}: /cache-keeper too`);
+		// Counted from the answer at 1 s, five minutes: nothing is sent on it. Pi's refresh recorded at 350 s keeps the cache
+		// until 650 s: the footer and /cache-keeper count down to that.
+		assert.match(lastFooter(h) ?? "", /^cache warm · 4m left · /, `${label}: the countdown, to Pi's 650 s`);
+		assert.match(await h.command("cache-keeper"), /\ncache: 4m left by Pi's own warming \(lifetime 5 min, [^)]*\); nothing is sent on it\n/, `${label}: /cache-keeper too`);
 		await h.idle(2 * HOUR);
 		assert.equal(h.state.compacts, 0, `${label}: no summary`);
 		assert.deepEqual(refreshesOf(h), [], label);
@@ -2978,7 +2983,7 @@ function everyState(t: { after: (fn: () => void) => void }, o: { respond?: (n: n
 type Run = ReturnType<typeof everyState>;
 // Each state of the warmer, reached from a period whose answer is at 1 s; `anchor`: the period's last sure fact (its
 // answer, or the send of its latest refresh that reported a hit), `out`: a refresh stays out, `plain`: keep-warm read off.
-const STATES: { state: string; options?: Parameters<typeof everyState>[1]; settings?: Record<string, unknown>; reach: (r: Run) => Promise<{ anchor: number; out?: boolean; plain?: boolean; ownEvidence?: boolean }> }[] = [
+const STATES: { state: string; options?: Parameters<typeof everyState>[1]; settings?: Record<string, unknown>; reach: (r: Run) => Promise<{ anchor: number; pi?: number; out?: boolean; plain?: boolean; ownEvidence?: boolean }> }[] = [
 	{ state: "waiting", reach: async (r) => (await r.h.idle(99_000), { anchor: 1_000, ownEvidence: true }) },
 	{ state: "out", options: { holdFirst: true }, reach: async (r) => (await r.h.idle(1_719_000), { anchor: 1_000, out: true, ownEvidence: true }) },
 	{ state: "ended on its budget", settings: { keepWarmMinutes: 1440 }, reach: async (r) => (await r.h.idle(3_429_000), { anchor: 1_711_000 }) },
@@ -2994,7 +2999,7 @@ const STATES: { state: string; options?: Parameters<typeof everyState>[1]; setti
 			// Pi's refresh wrote the hour: another lifetime than the period's 30 minutes, not a shorter one.
 			r.h.ctx.sessionManager.appendUsage("cache_warm", r.h.model.provider, r.h.model.id, { input: 5, output: 1, cacheRead: 570_000, cacheWrite: 30_000, cacheWrite1h: 30_000 });
 			await r.h.idle(50_000);
-			return { anchor: 1_000 };
+			return { anchor: 1_000, pi: 50_000 };
 		},
 	},
 	{ state: "let go", reach: async (r) => (await r.h.idle(49_000), r.h.emit("session_tree"), await r.h.idle(50_000), { anchor: 1_000 }) },
@@ -3021,6 +3026,8 @@ const EVIDENCE: { evidence: string; own?: boolean; floor?: number; unknown?: "th
 	{ evidence: "another route is announced, then the first one again", unknown: "the route changed", apply: (r) => (r.keyRoute(), r.loginRoute()) },
 ];
 const minutesLabel = (ms: number) => `${Math.round(ms / 60_000)}m`;
+// The states in which Pi's own warming keeps the period's cache once the evidence hands it over (or the model is Pi's).
+const PI_WARMS = new Set(["waiting", "out", "ended on its time limit", "ended as unable", "handed over on evidence", "let go", "two misses on the model"]);
 
 test("one clock: in every state of the warmer, after every kind of later evidence, the footer, its lifetime in use, /cache-keeper, compacting before expiry and the summary's last check read the same expiry, and nothing leaves at or after it or while it is unknown", async (t) => {
 	t.after(() => mock.timers.reset());
@@ -3067,11 +3074,23 @@ test("one clock: in every state of the warmer, after every kind of later evidenc
 			const now = Date.now();
 			const footer = lastFooter(r.h) ?? "";
 			const shown = (await r.h.command("cache-keeper")).match(/\ncache: .*/)?.[0] ?? "";
+			// Where Pi warms the period (handed over, or two misses on the model) and its expiry has passed or is unknown, the
+			// footer and /cache-keeper count down to the moment nothing seen says the cache is alive any more: the period's
+			// last sure fact or Pi's latest refresh, plus the shortest lifetime. Nothing is sent on that (below).
+			const pis = !reached.plain && PI_WARMS.has(s.state);
+			const piAt = Math.max(reached.pi ?? 0, e.evidence.startsWith("Pi's") ? at : 0);
+			const goneBy = pis && lifetime !== undefined ? Math.max(anchor, piAt) + lifetime : undefined;
+			const byPi = goneBy !== undefined && goneBy > now && (expiry === undefined || expiry <= now);
 			// The footer's countdown and /cache-keeper's line.
 			if (lifetime === undefined) assert.match(shown, /cache: lifetime unknown, so no countdown/, `${label}: /cache-keeper`);
-			if (expiry === undefined) {
+			if (byPi) {
+				const left = `${formatRemaining(goneBy - now)} left`;
+				if (!reached.out || e.own) assert.ok(footer.startsWith(`cache warm · ${left} · `), `${label}: the footer ${footer}, expected Pi's ${left}`);
+				assert.ok(shown.startsWith(`\ncache: ${left} by Pi's own warming (lifetime ${lifetime! / 60_000} min`), `${label}: /cache-keeper ${shown}, expected Pi's ${left}`);
+			} else if (expiry === undefined) {
 				if (lifetime !== undefined) assert.match(shown, new RegExp(`cache: expired \\(lifetime ${formatRemaining(lifetime).replace(" left", "")}|cache: expired \\(lifetime \\d+ min.*counted as expired: ${unknown}`), `${label}: /cache-keeper`);
-				if (unknown) assert.match(footer, /^cache cold/, `${label}: the footer`);
+				// While a refresh is still out the footer says it is refreshing, as in every other case.
+				if (unknown && (!reached.out || e.own)) assert.match(footer, /^cache cold/, `${label}: the footer`);
 			} else if (expiry > now) {
 				const left = `${formatRemaining(expiry - now)} left`;
 				if (!reached.out || e.own) assert.ok(footer.startsWith(`cache warm · ${left} · `), `${label}: the footer ${footer}, expected ${left}`);

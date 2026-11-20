@@ -145,6 +145,20 @@ interface CapturedRequest {
 	sharedPrefix?: boolean;
 }
 
+/** What a proxy reported served a request of a model (ANSWERED_EVENT): the report whole, as one text, and when it came. */
+interface RouteReport {
+	at: number;
+	/** The whole report, every field the proxy sent, keys in a fixed order: two reports are one route only when equal. */
+	identity: string;
+	upstreams: Upstream[];
+}
+/** A value as JSON with its object keys sorted, so that equal reports read as equal text. */
+function canonical(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+	if (isPlainObject(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+	return JSON.stringify(value) ?? "null";
+}
+
 /** A cache lifetime under this cannot carry a refresh: Pi's own warming keeps such a session, if anything does. */
 const MIN_OWNED_LIFETIME_MS = 60_000;
 
@@ -226,6 +240,8 @@ interface WarmPeriod {
 	taken: boolean;
 	/** The clock of a taken period's cache: the only thing that says when it expires. */
 	clock?: PeriodClock;
+	/** When the run that brought the period's answer started: reports of its model since then are about its route. */
+	since: number;
 	/** What the log says of a taken period: its model and the lifetime it started with. */
 	logged?: TimerContext;
 	/**
@@ -366,15 +382,19 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (!model) return { regime: "plain", cached: false, replied: false };
 		const entries = at.entries ?? ctx.sessionManager.getBranch();
 		const key = `${model.provider}/${model.id}`;
-		const served = servedModel(model);
 		const p = period;
+		// A taken period's model is read with what served it since its run started (its own report), else as configured.
+		const mine = p?.taken === true && p.fixed?.model === key;
+		const own = mine && p ? reportSince(model, p.since) : undefined;
+		const served = servedModel(model);
+		const routed = own ? servedModel(model, own.upstreams) : model;
 		// The session's model is not the one the period's cached request was written with.
 		if (p?.fixed && key !== p.fixed.model && model === ctx.model) handTo(ctx, p, { reason: `the model is now ${key}, the cached request was written with ${p.fixed.model}`, label: "the model changed" }, taken);
 		const clock = p?.taken && p.fixed?.model === key ? p.clock : undefined;
 		const view = cacheView(
 			served,
 			entries,
-			clock && p?.fixed ? { clock, on: warmMinutes() > 0, routeKey: routeKeyOf(model), dataMs: lifetimeFor(served, p.fixed.tier)?.ms, requested: p.fixed.requested } : undefined,
+			clock && p?.fixed ? { clock, on: warmMinutes() > 0, served: routed, routeKey: own?.identity ?? standIn(model), dataMs: lifetimeFor(routed, p.fixed.tier)?.ms, requested: p.fixed.requested } : undefined,
 		);
 		if (p && view.regime === "period" && view.against) handTo(ctx, p, view.against, taken, view);
 		return view;
@@ -422,7 +442,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	};
 	// Why the extension cannot take a period, from facts that last for the period, with what the footer says of it in a
 	// few words; else the clock of the period's cache.
-	const whyNotOwned = (state: StartFacts | undefined, model: Model<Api> | undefined): { reason: string; label?: string } | { clock: PeriodClock } => {
+	const whyNotOwned = (
+		state: StartFacts | undefined,
+		model: Model<Api> | undefined,
+		route: { identity: string; changed: boolean; upstreams?: Upstream[] },
+	): { reason: string; label?: string } | { clock: PeriodClock } => {
 		const no = (label: string | undefined, reason: string) => ({ reason, ...(label ? { label } : {}) });
 		const fellBack = fallbackFor(model);
 		// While it lasts the footer says it on its own; after /cache-keeper-warm the period stays Pi's until the next answer.
@@ -453,9 +477,13 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const cache = request.cache ?? requestCache(request.payload);
 		if (cache.unreadable) return no("unreadable cache marker", `the request carries a cache marker the extension does not read (${cache.unreadable})`);
 		if (request.sharedPrefix || cache.mixed) return no("several cache lifetimes", "the request carries more than one cache lifetime");
+		// The proxy reported different routes for the model during the answer's run (also between the answer and Pi going
+		// idle): which cache the answer wrote is not known.
+		if (route.changed) return no("the route changed", "the proxy reported different routes for this model during the run of the last answer, so which route's cache it wrote is not known");
 		// The period's lifetime, whether everything seen so far agrees with it, and whether it is the one the start facts
 		// count with (cache-clock.ts, lifetime-evidence.ts): the clock of the period's cache, else why not.
-		const started = PeriodClock.start({ facts: state, api: request.model.api, cache, dataMs: lifetimeFor(servedModel(request.model), cache.tier)?.ms, routeKey: routeKeyOf(request.model) });
+		const routed = route.upstreams ? servedModel(request.model, route.upstreams) : request.model;
+		const started = PeriodClock.start({ facts: state, api: request.model.api, cache, dataMs: lifetimeFor(routed, cache.tier)?.ms, routeKey: route.identity });
 		if ("declined" in started) return started.declined;
 		// A lifetime assumed for a model family holds only on that provider's own API.
 		const ownApi = ASSUMED_LIFETIMES[state.lifetime.source];
@@ -476,10 +504,18 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		running = false;
 		const requested = answerRequest?.cache?.tier ?? answerRequest?.tier ?? "short";
 		const model = ctx.model;
-		const state = model ? startFacts(servedModel(model), ctx.sessionManager.getBranch(), requested) : undefined;
+		// The route of the period's answer: the report of its model during the run that brought it (none reported: the
+		// configured upstreams stand in); reports that differed during that run leave it unknown.
+		const reported = model ? runReports.get(`${model.provider}/${model.id}`) : undefined;
+		const route = {
+			identity: reported?.first.identity ?? (model ? standIn(model) : "none reported"),
+			changed: reported?.differs === true,
+			...(reported ? { upstreams: reported.first.upstreams } : {}),
+		};
+		const state = model ? startFacts(reported ? servedModel(model, reported.first.upstreams) : model, ctx.sessionManager.getBranch(), requested) : undefined;
 		const answeredAt = state?.answeredAt;
 		if (!fresh && period && (answeredAt === undefined || answeredAt === period.answeredAt)) return;
-		const took = whyNotOwned(state, answerRequest?.model ?? ctx.model);
+		const took = whyNotOwned(state, answerRequest?.model ?? ctx.model, route);
 		const why = "reason" in took ? took : undefined;
 		const clock = "clock" in took ? took.clock : undefined;
 		const request = clock ? answerRequest : undefined;
@@ -497,6 +533,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			...(why?.label ? { notOwnedLabel: why.label } : {}),
 			...(model ? { model: `${model.provider}/${model.id}` } : {}),
 			onAtStart,
+			since: runStartedAt,
 			taken: onAtStart && clock !== undefined && budget !== undefined && fixed !== undefined,
 			...(clock ? { clock } : {}),
 			...(fixed && state?.lifetime ? { logged: { model: fixed.model, lifetimeSeconds: state.lifetime.ms / 1000, lifetimeSource: state.lifetime.source } } : {}),
@@ -566,6 +603,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// and what keep-warm says now, fitted to the terminal's width. Pi is told only when the text changes.
 	let countdown: Countdown | undefined;
 	let modelView: Omit<FooterView, "countdown" | "keepWarm"> | undefined;
+	// The regime of the countdown's reading when it started, and a way to make it read again at once.
+	let timerRegime: CacheView["regime"] | undefined;
+	let rereadNow: (() => void) | undefined;
 	// The lifetime the footer's values were read with: in a taken period they are read again when the clock's changes.
 	let shownLifetimeMs: number | undefined;
 	let footerText: string | undefined;
@@ -605,6 +645,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const stopTimer = (ctx: ExtensionContext, render = true) => {
 		clearInterval(ticker);
 		ticker = undefined;
+		rereadNow = undefined;
 		countdown = undefined;
 		if (render) renderFooter(ctx);
 	};
@@ -672,15 +713,17 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const answeredFor = (model: Model<Api> | undefined): Upstream[] | undefined =>
 		model && answered && answered.provider === model.provider && answered.id === model.id ? answered.upstreams : undefined;
 	const lookupKeys = (model: Model<Api>, access: Access) => lookupsFor(model, access).map((one) => `${one.provider}/${one.model}`).sort().join(" ");
-	// What answered, when it is not what the values are for.
-	const servedOtherwise = (model: Model<Api> | undefined): Upstream[] | undefined => {
-		const upstreams = answeredFor(model);
+	// What answered (`upstreams`, by default the last answer reported for any model), when it is not what the values
+	// are for.
+	const servedOtherwise = (model: Model<Api> | undefined, upstreams = answeredFor(model)): Upstream[] | undefined => {
 		const route = model ? data.upstreams[model.provider]?.[model.id] : undefined;
 		if (!model || !upstreams || !route) return undefined;
 		return lookupKeys(model, { upstreams }) === lookupKeys(model, { upstreams: route.upstreams }) ? undefined : upstreams;
 	};
-	const servedModel = (model: Model<Api>): Model<Api> => {
-		const upstreams = servedOtherwise(model);
+	// The model with the lifetimes of what served it: `upstreams` where given (a taken period's own report), else the last
+	// answer reported for any model, as with keep-warm off.
+	const servedModel = (model: Model<Api>, served?: Upstream[]): Model<Api> => {
+		const upstreams = servedOtherwise(model, served ?? answeredFor(model));
 		if (!upstreams) return model;
 		const found = findFacts(lookupsFor(model, { upstreams }), data.providers);
 		const short = usableLifetime(found.facts.short);
@@ -688,11 +731,26 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const promptCache = short === undefined && long === undefined ? undefined : { ...(short === undefined ? {} : { short }), ...(long === undefined ? {} : { long }) };
 		return { ...model, promptCache };
 	};
-	// The route serving a model, as one key: what answered where a proxy said so, else the route's configured upstreams,
-	// else the model itself (a provider no proxy describes, which never changes). A subscription login and an API key of
-	// the same provider are different routes, with caches of their own.
-	const routeKeyOf = (model: { provider: string; id: string }, upstreams = answeredFor(model as Model<Api>) ?? data.upstreams[model.provider]?.[model.id]?.upstreams): string =>
-		upstreams ? lookupKeys(model as Model<Api>, { upstreams }) : `${model.provider}/${model.id}`;
+	// What served a request of each model (`provider/id`), as a proxy reported it (ANSWERED_EVENT): the latest report,
+	// whole, with when it arrived. A report for one model never stands for another, and a model switch keeps them. The
+	// route's identity a taken period compares is the whole report (every field the proxy sent), not the model-data lookup
+	// it leads to: a subscription login and an API key of one upstream are different routes, with caches of their own.
+	const reports = new Map<string, RouteReport>();
+	// The reports of the current run (since its agent_start, or since the extension loaded): per model, the first, and
+	// whether a later one differed. The period a run's answer starts takes its route from here.
+	let runStartedAt = Date.now();
+	let runReports = new Map<string, { first: RouteReport; differs: boolean }>();
+	// Where no report of the model arrived in the period's run: "none reported", and the route's configured upstreams
+	// stand in, read now.
+	const standIn = (model: { provider: string; id: string }): string => {
+		const upstreams = data.upstreams[model.provider]?.[model.id]?.upstreams;
+		return upstreams ? canonical({ provider: model.provider, model: model.id, upstreams }) : "none reported";
+	};
+	// What serves a taken period's model now: the latest report of it since the period's run started, else the stand-in.
+	const reportSince = (model: { provider: string; id: string }, since: number): RouteReport | undefined => {
+		const report = reports.get(`${model.provider}/${model.id}`);
+		return report && report.at >= since ? report : undefined;
+	};
 
 	// The model's values for the footer: the cache lifetimes and the tier in use, what the last request asked for, the
 	// price, and what providers.dev has to say. Each value is one Pi or the extension has: Pi's model as it is now (its
@@ -1371,22 +1429,23 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		})();
 	};
 
-	// The countdown. It takes the cache's reading as it is: where the expiry is unknown (a taken period whose route
-	// changed, or whose lifetime can't be read any more), the cache counts as cold and nothing is refreshed or compacted.
-	// A taken period's reading picks the branch (`regime`): the period's, whoever warms it; otherwise exactly as with
-	// keep-warm off.
+	// The countdown. It takes the cache's reading as it is. A taken period's reading picks the branch (`regime`): the
+	// period's, whoever warms it; otherwise exactly as with keep-warm off. Where a taken period's expiry has passed or is
+	// unknown (its route changed, or its lifetime can't be read any more), nothing is refreshed or compacted, and the timer
+	// goes on reading the cache, so that a change of regime (keep-warm switched off or on, here or in another window) is
+	// seen: the countdown then starts again from that reading. Where Pi warms such a period and nothing seen says its
+	// cache is gone yet (`goneBy`), the countdown shows that, for display only: nothing is sent on it.
 	const startTimer = (ctx: ExtensionContext, compactAtExpiry = true) => {
 		stopTimer(ctx, false);
 		const first = look(ctx);
+		timerRegime = first.regime;
 		if (first.regime === "period" && first.lifetime?.ms !== shownLifetimeMs) {
 			modelView = ctx.hasUI && ctx.model ? modelViewOf(ctx, ctx.model) : modelView;
 		}
-		if (first.sendBy === undefined) {
-			if (first.unknown) countdown = { state: "cold" };
-			return renderFooter(ctx);
-		}
+		// As with keep-warm off: no expiry, no countdown.
+		if (first.regime !== "period" && first.sendBy === undefined) return renderFooter(ctx);
 		let view = first;
-		let expiresAt: number = first.sendBy;
+		let expiresAt: number | undefined = first.sendBy;
 		let warmLead = first.lifetime ? warmLeadMs(first.lifetime.ms, EXPIRY_LEAD_MS) : 0;
 		const timer: TimerContext = {
 			model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
@@ -1396,35 +1455,50 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		let ticks = 0;
 		let attempted = !compactAtExpiry;
 		let warmChecked = false;
-		const tick = () => {
-			if (++ticks % 15 === 0 || expiresAt - Date.now() <= Math.max(EXPIRY_LEAD_MS, warmLead)) {
-				view = look(ctx);
-				if (view.unknown) {
-					// Unknown for the rest of the period: cold, and the countdown stops.
-					countdown = { state: "cold" };
-					if (view.lifetime?.ms !== shownLifetimeMs) showData(ctx);
-					renderFooter(ctx);
-					clearInterval(ticker);
-					ticker = undefined;
-					return;
-				}
-				expiresAt = view.sendBy ?? expiresAt;
-				// A taken period's lead follows the lifetime read now, and so does the lifetime the footer marks in use.
-				if (view.regime === "period" && view.lifetime) warmLead = warmLeadMs(view.lifetime.ms, EXPIRY_LEAD_MS);
-				if (view.regime === "period" && view.lifetime?.ms !== shownLifetimeMs) showData(ctx);
+		// What the countdown shows: the expiry anything may be sent on, or, where Pi warms the period and that has passed or
+		// is unknown, the moment nothing seen says the cache is alive any more.
+		const shown = (now: number): number | undefined => {
+			const who = warmerOf(period);
+			const pis = who === "Pi" || who === "Pi, handed over";
+			if (view.regime === "period" && pis && (expiresAt === undefined || expiresAt <= now) && view.goneBy !== undefined && view.goneBy > now) return view.goneBy;
+			return expiresAt;
+		};
+		// Read the cache again; false where the regime changed and the countdown started again.
+		const read = (): boolean => {
+			view = look(ctx);
+			if (view.regime !== timerRegime) {
+				startTimer(ctx, compactAtExpiry);
+				return false;
 			}
-			const remaining = expiresAt - Date.now();
+			if (view.regime === "period") {
+				expiresAt = view.sendBy;
+				// A taken period's lead follows the lifetime read now, and so does the lifetime the footer marks in use.
+				if (view.lifetime) warmLead = warmLeadMs(view.lifetime.ms, EXPIRY_LEAD_MS);
+				if (view.lifetime?.ms !== shownLifetimeMs) showData(ctx);
+			} else expiresAt = view.sendBy ?? expiresAt;
+			return true;
+		};
+		const tick = (now_: boolean = false) => {
+			const near = (at: number | undefined) => at !== undefined && at - Date.now() <= Math.max(EXPIRY_LEAD_MS, warmLead);
+			if ((now_ || ++ticks % 15 === 0 || near(expiresAt) || near(shown(Date.now()))) && !read()) return;
+			const now = Date.now();
+			const remaining = expiresAt === undefined ? 0 : expiresAt - now;
+			const showing = shown(now);
 			const keepWarmOn = warmMinutes() > 0;
-			if (keepWarmOn && remaining > 0 && !warming) noteLimit(ctx, expiresAt, timer);
+			if (keepWarmOn && expiresAt !== undefined && remaining > 0 && !warming) noteLimit(ctx, expiresAt, timer);
 			// One of the period's refreshes is out (also after a run that sent nothing cancelled it): wait for it to settle.
 			const out = period?.warm.phase === "out";
-			if (!keepWarmOn) noteSwitchOff(ctx, expiresAt, timer);
-			countdown = warming ? { state: "refreshing" } : remaining > 0 ? { state: "warm", ms: remaining } : { state: "cold" };
+			if (!keepWarmOn) noteSwitchOff(ctx, expiresAt ?? now, timer);
+			countdown = warming ? { state: "refreshing" } : showing !== undefined && showing > now ? { state: "warm", ms: showing - now } : { state: "cold" };
 			renderFooter(ctx);
 			if (remaining <= 0) {
-				// Expired (or the timer ran this late): nothing is refreshed or compacted from a cache that is gone.
-				clearInterval(ticker);
-				ticker = undefined;
+				// Expired, unknown, or the timer ran this late: nothing is refreshed or compacted from a cache that is gone. As
+				// with keep-warm off the countdown stops; a taken period's goes on reading (above).
+				if (view.regime !== "period") {
+					clearInterval(ticker);
+					ticker = undefined;
+					rereadNow = undefined;
+				}
 			} else if (warming) {
 				// Wait for the refresh; it restarts the countdown when it lands.
 			} else if (!keepWarmOn || view.regime !== "period") {
@@ -1459,6 +1533,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		}, 1000);
 		ticker = own;
 		own.unref();
+		// A report of what served the period's model changes the reading: it is read again at once.
+		rereadNow = () => {
+			if (ticker === own) tick(true);
+		};
 		tick();
 	};
 
@@ -1550,6 +1628,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		return undefined;
 	});
 	pi.on("agent_start", (_event, ctx) => {
+		// A run starts: the reports that come from now on are about its requests.
+		runStartedAt = Date.now();
+		runReports = new Map();
 		abortWarm();
 		// The idle period, its spending and its time limit stay: they end only when this run brings a new real answer.
 		running = true;
@@ -1605,10 +1686,23 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const ctx = sessionCtx;
 		if (!event) return;
 		answered = { provider: event.provider, id: event.model, upstreams: event.upstreams };
-		// The period's clock is told the route that served its model, also where nothing reads it before it changes again.
+		// Kept per model, whole, with when it came; and among the current run's reports.
+		const key = `${event.provider}/${event.model}`;
+		const report: RouteReport = { at: Date.now(), identity: canonical(payload), upstreams: event.upstreams };
+		reports.set(key, report);
+		const inRun = runReports.get(key);
+		if (!inRun) runReports.set(key, { first: report, differs: false });
+		else if (inRun.first.identity !== report.identity) inRun.differs = true;
+		// The period's clock is told the route that served its model, also where nothing reads it before it changes again;
+		// a report about another model never touches it.
 		const p = period;
-		if (p?.clock && p.fixed?.model === `${event.provider}/${event.model}`) p.clock.served(routeKeyOf({ provider: event.provider, id: event.model }, event.upstreams));
-		if (ctx) ifSessionAlive(() => showData(ctx));
+		if (p?.clock && p.taken && p.fixed?.model === key) p.clock.served(report.identity);
+		if (ctx)
+			ifSessionAlive(() => {
+				showData(ctx);
+				// The countdown reads the cache again at once.
+				if (p?.fixed?.model === key) rereadNow?.();
+			});
 	});
 	pi.on("model_select", (_event, ctx) => {
 		answered = undefined;
@@ -1714,7 +1808,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			if (!fromExpiry) return;
 			let view: CacheView | undefined;
 			try {
-				view = look(ctx, { model: request.model, entries: event.branchEntries });
+				// A taken period's cache is read on the branch as it is now (a refresh of Pi's recorded during the preparation
+				// counts); otherwise on the entries the compaction started with, as with keep-warm off.
+				const live = look(ctx, { model: request.model, entries: ctx.sessionManager.getBranch() });
+				view = live.regime === "period" ? live : look(ctx, { model: request.model, entries: event.branchEntries });
 			} catch {
 				view = undefined;
 			}
@@ -1973,6 +2070,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 						describeWarm();
 						keepWarmSetting(true);
 						showData(ctx);
+						// Keep-warm switched on or off changes how a taken period's cache is read: the countdown starts again from
+						// that reading (from another window, the countdown sees it when it reads next).
+						if (!running && ctx.isIdle() && ctx.model && timerRegime !== undefined && look(ctx).regime !== timerRegime) startTimer(ctx);
 					}
 					if (id === "compactAtPercent" || id === "compactAtTokens") {
 						fullStuck = false;
@@ -2043,10 +2143,17 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			let cache = "lifetime unknown, so no countdown";
 			if (state?.lifetime) {
 				let left = state.replied ? "the last request did not use the prompt cache" : "no request since the session started or compacted";
-				if (state.sendBy !== undefined) left = state.sendBy > Date.now() ? `${formatRemaining(state.sendBy - Date.now())} left` : "expired";
+				const now = Date.now();
+				const who = warmerOf(period);
+				// Where Pi warms a taken period whose expiry has passed or is unknown, its cache lasts as long as anything seen
+				// (Pi's own refreshes included) says; nothing is sent on that.
+				const piKeeps = state.regime === "period" && (who === "Pi" || who === "Pi, handed over") && (state.sendBy === undefined || state.sendBy <= now) && state.goneBy !== undefined && state.goneBy > now;
+				if (piKeeps && state.goneBy !== undefined) left = `${formatRemaining(state.goneBy - now)} left by Pi's own warming`;
+				else if (state.sendBy !== undefined) left = state.sendBy > now ? `${formatRemaining(state.sendBy - now)} left` : "expired";
 				// Where the expiry is unknown, the cache counts as expired, and why.
 				else if (state.unknown) left = "expired";
-				cache = `${left} (lifetime ${formatDuration(state.lifetime.ms)}, ${state.lifetime.source})${state.unknown ? `, counted as expired: ${state.unknown}` : ""}`;
+				const why = state.unknown ? (piKeeps ? `; nothing is sent on it: ${state.unknown}` : `, counted as expired: ${state.unknown}`) : piKeeps ? "; nothing is sent on it" : "";
+				cache = `${left} (lifetime ${formatDuration(state.lifetime.ms)}, ${state.lifetime.source})${why}`;
 			}
 			const check = checkCachedPath(ctx, entries, model);
 			const next = "reason" in check

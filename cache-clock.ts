@@ -239,13 +239,14 @@ function plainView(state: CacheState): CacheView {
 /**
  * The one reading. `period` is passed where the period's model is the model asked about; this checks the branch: the
  * period's facts hold only while the branch in front of the user still holds the period's answer. `on`: keep-warm reads
- * on now. `routeKey`: the route serving the model, read now; `dataMs`: the route's lifetime for the request's tier, read
- * now; `requested`: the tier the period's request asked for.
+ * on now. `served`: the model with the lifetimes of what served the period (its own route; else `served` as given).
+ * `routeKey`: the identity of the route serving the model, read now (the whole report of it); `dataMs`: the route's
+ * lifetime for the request's tier, read now; `requested`: the tier the period's request asked for.
  */
 export function cacheView(
 	served: Model<Api>,
 	entries: SessionEntry[],
-	period?: { clock: PeriodClock; on: boolean; routeKey: string; dataMs: number | undefined; requested: "short" | "long" },
+	period?: { clock: PeriodClock; on: boolean; served?: Model<Api>; routeKey: string; dataMs: number | undefined; requested: "short" | "long" },
 ): CacheView {
 	const plain = cacheState(served, entries);
 	if (!period || plain.answeredAt === undefined || plain.answeredAt !== answerOf(period.clock)) return plainView(plain);
@@ -253,7 +254,8 @@ export function cacheView(
 		const hit = hitOf(period.clock);
 		return plainView(hit === undefined ? plain : cacheState(served, entries, hit));
 	}
-	const kept = cacheState(served, entries, undefined, true, period.requested);
+	// The period's own reading: the model with the lifetimes of what served the period (its own route), where given.
+	const kept = cacheState(period.served ?? served, entries, undefined, true, period.requested);
 	if (kept.answeredAt !== plain.answeredAt) return plainView(plain);
 	return readClock(period.clock, kept, period.routeKey, period.dataMs);
 }
