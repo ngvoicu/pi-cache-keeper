@@ -42,9 +42,9 @@ export interface CacheState {
 	latestWritten?: Written;
 	/**
 	 * With keep-warm on: what Pi's refreshes wrote after that answer started (`cache_warm` entries of the model's
-	 * provider). A later answer that wrote is a new answer itself.
+	 * provider), with when each was recorded. A later answer that wrote is a new answer itself.
 	 */
-	piRefreshes?: Written[];
+	piRefreshes?: { at: number; written: Written }[];
 }
 
 /**
@@ -121,7 +121,7 @@ export function cacheTier(entries: SessionEntry[], model?: { provider: string; i
  */
 // Pi's refreshes after the answer started: one is recorded when it settles, so one during a long answer can come before
 // the answer on the branch (Pi appends an answer when it has finished, stamped with its start).
-const after = (refreshes: { at: number; written: Written }[], answeredAt: number): Written[] => refreshes.filter((w) => w.at > answeredAt).map((w) => w.written);
+const after = (refreshes: { at: number; written: Written }[], answeredAt: number) => refreshes.filter((w) => w.at > answeredAt);
 
 export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?: number, keepWarmOn = false, requested?: "short" | "long"): CacheState {
 	let refreshedAt: number | undefined;

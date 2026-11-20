@@ -524,7 +524,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		return [
 			{ from: "answer", written: answer },
 			...(earlier ? [{ from: "earlier answer" as const, written: earlier }] : []),
-			...(state.piRefreshes ?? []).map((w) => ({ from: "Pi's refresh" as const, written: w })),
+			...(state.piRefreshes ?? []).map((w) => ({ from: "Pi's refresh" as const, written: w.written })),
 			...refreshes.map((w) => ({ from: "refresh" as const, written: w })),
 		];
 	};
