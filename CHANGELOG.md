@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **"(in use)" names the tier the request asked for** — A request asks for a tier, how long a tier lasts is the route's, and the write the answer reports (5 minutes or 1 hour) names the tier only on Anthropic's own API. On a route whose short tier lasts an hour (a subscription login behind a proxy, a gateway that gives the short tier an hour), a request for the short tier read `long 1h (in use) · short 1h · sent short`; it reads `short 1h (in use) · long 1h · sent short`. "(in use)" now marks the tier the request asked for wherever this route's lifetime for it is the one the countdown runs on. Where it is not (a stated hour the provider wrote as 5 minutes), the line says the 5-minute tier is in use and warns, as before. Without a request the extension read (after `/reload`, `/resume`, `/fork`, a compaction or `/tree`), it marks the tier whose lifetime on the route is the one in use, and where both tiers have it, the retention in force. Formats whose answers report no write bucket (OpenAI, Kimi) read as before. Display only: the countdown, compaction and keeping warm are unchanged.
+
 ## [0.5.1] - 2026-11-20
 
 ### Changed
