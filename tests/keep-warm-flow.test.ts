@@ -66,6 +66,8 @@ interface Options {
 	before?: unknown[];
 	/** Pi's thinking level when the first request is sent (later changed through `thinkingLevel.value`). */
 	level?: string;
+	/** What a proxy reports served the first request, while it is out (`model-upstreams:answered`). */
+	report?: unknown;
 }
 
 function harness(options: Options = {}) {
@@ -195,8 +197,11 @@ function harness(options: Options = {}) {
 		emit("context_with_system", { messages });
 		if (options.bridge) emit("message_start", { message: answer });
 		else emit("before_provider_request", { payload });
+		if (first && options.report) bus.get("model-upstreams:answered")?.(options.report);
+		first = false;
 		emit("message_end", { message: answer });
 	};
+	let first = true;
 	request([user], sent, reply);
 	// A run after the first: false is cancelled before any request goes out; true sends one whose answer reads the
 	// cache; "aborted" sends one that is aborted after reading the cache; "error" sends one that fails before using it;
@@ -2299,9 +2304,8 @@ test("route lifetimes: the same request whose answer reports the 5-minute write 
 	// The proxy said the API key served it: that route's data (5 minutes short) holds, and the 5-minute write agrees.
 	clock();
 	fresh({ compactBeforeExpiry: false });
-	const keyRoute = gateway(t, 300);
-	const served = harness({ lifetime: 3600, sent: plainMarker, answer: FIVE_MINUTE_WRITE });
-	keyRoute(served);
+	gateway(t, 300);
+	const served = harness({ lifetime: 3600, sent: plainMarker, answer: FIVE_MINUTE_WRITE, report: { provider: "cliproxyapi", model: "sub/claude", upstreams: [{ provider: "anthropic", model: "claude-sonnet-5-5", subscription: false }] } });
 	assert.equal(await ownedRefresh(served, HOUR), 276_000, "25 s before the 5-minute expiry");
 	assert.equal(traces().find((r) => r.event === "warm" && r.action === "warm").lifetimeSeconds, 300);
 	// Nobody said so: the data gives the short tier an hour, the answer says five minutes. They disagree: Pi's.

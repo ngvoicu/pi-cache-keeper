@@ -143,11 +143,18 @@ interface CapturedRequest {
 	cache?: ReturnType<typeof requestCache>;
 	/** The extension's shared-prefix cache (a 12-hour prefix) was applied: the request carries two cache lifetimes. */
 	sharedPrefix?: boolean;
+	/** When it was sent and when its answer ended, as places in the order of events (see `order`). */
+	sentSeq?: number;
+	answeredSeq?: number;
 }
 
 /** What a proxy reported served a request of a model (ANSWERED_EVENT): the report whole, as one text, and when it came. */
 interface RouteReport {
 	at: number;
+	/** Its place among the events that order a period's route: requests sent, answers ended, reports (see `order`). */
+	seq: number;
+	/** The model it is for, as `provider/id`. */
+	key: string;
 	/** The whole report, every field the proxy sent, keys in a fixed order: two reports are one route only when equal. */
 	identity: string;
 	upstreams: Upstream[];
@@ -240,7 +247,8 @@ interface WarmPeriod {
 	taken: boolean;
 	/** The clock of a taken period's cache: the only thing that says when it expires. */
 	clock?: PeriodClock;
-	/** When the run that brought the period's answer started: reports of its model since then are about its route. */
+	/** When the period's request was sent, as a place in the order of events: reports of its model since then are about
+	 * its route. */
 	since: number;
 	/** What the log says of a taken period: its model and the lifetime it started with. */
 	logged?: TimerContext;
@@ -445,7 +453,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const whyNotOwned = (
 		state: StartFacts | undefined,
 		model: Model<Api> | undefined,
-		route: { identity: string; changed: boolean; upstreams?: Upstream[] },
+		route: { identity: string; changed?: "while out" | "after the answer"; upstreams?: Upstream[] },
 	): { reason: string; label?: string } | { clock: PeriodClock } => {
 		const no = (label: string | undefined, reason: string) => ({ reason, ...(label ? { label } : {}) });
 		const fellBack = fallbackFor(model);
@@ -479,7 +487,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (request.sharedPrefix || cache.mixed) return no("several cache lifetimes", "the request carries more than one cache lifetime");
 		// The proxy reported different routes for the model during the answer's run (also between the answer and Pi going
 		// idle): which cache the answer wrote is not known.
-		if (route.changed) return no("the route changed", "the proxy reported different routes for this model during the run of the last answer, so which route's cache it wrote is not known");
+		if (route.changed === "while out") return no("the route changed", "the proxy reported different routes for this model while the last answer's request was out, so which route's cache it wrote is not known");
+		if (route.changed === "after the answer") {
+			return no("the route changed", "the proxy reported a route for this model after the last answer ended that is not the answer's own (or none for the answer itself), so which route's cache the answer wrote is not known");
+		}
 		// The period's lifetime, whether everything seen so far agrees with it, and whether it is the one the start facts
 		// count with (cache-clock.ts, lifetime-evidence.ts): the clock of the period's cache, else why not.
 		const routed = route.upstreams ? servedModel(request.model, route.upstreams) : request.model;
@@ -504,15 +515,28 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		running = false;
 		const requested = answerRequest?.cache?.tier ?? answerRequest?.tier ?? "short";
 		const model = ctx.model;
-		// The route of the period's answer: the report of its model during the run that brought it (none reported: the
-		// configured upstreams stand in); reports that differed during that run leave it unknown.
-		const reported = model ? runReports.get(`${model.provider}/${model.id}`) : undefined;
+		// The route of the period's answer: the report of its model that came while the answer's request was out, between
+		// its sending and the answer's end (none reported: the configured upstreams stand in). Reports in that window that
+		// differ leave it unknown; so does a report of the model after the answer's end, before Pi went idle, that is not
+		// the answer's own (or any, where none came for the answer): it may be another request's, on another route.
+		const key = model ? `${model.provider}/${model.id}` : "";
+		const asked = answerRequest && `${answerRequest.model.provider}/${answerRequest.model.id}` === key ? answerRequest : undefined;
+		const sentSeq = asked?.sentSeq ?? order;
+		const answeredSeq = asked?.answeredSeq ?? order;
+		const ofModel = runLog.filter((r) => r.key === key);
+		const inWindow = ofModel.filter((r) => r.seq > sentSeq && r.seq < answeredSeq);
+		const reported = inWindow[0];
+		const later = ofModel.filter((r) => r.seq > answeredSeq);
 		const route = {
-			identity: reported?.first.identity ?? (model ? standIn(model) : "none reported"),
-			changed: reported?.differs === true,
-			...(reported ? { upstreams: reported.first.upstreams } : {}),
+			identity: reported?.identity ?? (model ? standIn(model) : "none reported"),
+			changed: inWindow.some((r) => r.identity !== reported?.identity)
+				? ("while out" as const)
+				: later.some((r) => reported === undefined || r.identity !== reported.identity)
+					? ("after the answer" as const)
+					: undefined,
+			...(reported ? { upstreams: reported.upstreams } : {}),
 		};
-		const state = model ? startFacts(reported ? servedModel(model, reported.first.upstreams) : model, ctx.sessionManager.getBranch(), requested) : undefined;
+		const state = model ? startFacts(reported ? servedModel(model, reported.upstreams) : model, ctx.sessionManager.getBranch(), requested) : undefined;
 		const answeredAt = state?.answeredAt;
 		if (!fresh && period && (answeredAt === undefined || answeredAt === period.answeredAt)) return;
 		const took = whyNotOwned(state, answerRequest?.model ?? ctx.model, route);
@@ -533,7 +557,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			...(why?.label ? { notOwnedLabel: why.label } : {}),
 			...(model ? { model: `${model.provider}/${model.id}` } : {}),
 			onAtStart,
-			since: runStartedAt,
+			since: sentSeq,
 			taken: onAtStart && clock !== undefined && budget !== undefined && fixed !== undefined,
 			...(clock ? { clock } : {}),
 			...(fixed && state?.lifetime ? { logged: { model: fixed.model, lifetimeSeconds: state.lifetime.ms / 1000, lifetimeSource: state.lifetime.source } } : {}),
@@ -734,20 +758,23 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// route's identity a taken period compares is the whole report (every field the proxy sent), not the model-data lookup
 	// it leads to: a subscription login and an API key of one upstream are different routes, with caches of their own.
 	const reports = new Map<string, RouteReport>();
-	// The reports of the current run (since its agent_start, or since the extension loaded): per model, the first, and
-	// whether a later one differed. The period a run's answer starts takes its route from here.
-	let runStartedAt = Date.now();
-	let runReports = new Map<string, { first: RouteReport; differs: boolean }>();
+	// The order of the events that place a report with a request: a request sent, its answer ended, a report arrived. A
+	// report carries no request id, so whether it is a request's own goes by where it falls in this order.
+	let order = 0;
+	// The reports of the current run (since its agent_start, or since the extension loaded), in order. The period a run's
+	// answer starts takes its route from here.
+	let runLog: RouteReport[] = [];
 	// Where no report of the model arrived in the period's run: "none reported", and the route's configured upstreams
 	// stand in, read now.
 	const standIn = (model: { provider: string; id: string }): string => {
 		const upstreams = data.upstreams[model.provider]?.[model.id]?.upstreams;
 		return upstreams ? canonical({ provider: model.provider, model: model.id, upstreams }) : "none reported";
 	};
-	// What serves a taken period's model now: the latest report of it since the period's run started, else the stand-in.
+	// What serves a taken period's model now: the latest report of it since the period's request was sent, else the
+	// stand-in.
 	const reportSince = (model: { provider: string; id: string }, since: number): RouteReport | undefined => {
 		const report = reports.get(`${model.provider}/${model.id}`);
-		return report && report.at >= since ? report : undefined;
+		return report && report.seq > since ? report : undefined;
 	};
 
 	// The model's values for the footer: the cache lifetimes and the tier in use, what the last request asked for, the
@@ -1546,7 +1573,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (isKimiOnMoonshot(ctx.model)) payload = withKimiLongCache(payload);
 		if (transcript) {
 			const tier = payloadTier(ctx.model.api, payload) ?? (process.env.PI_CACHE_RETENTION === "long" ? "long" : "short");
-			captured = { transcript, payload, model: ctx.model, at: Date.now(), tier, cache: requestCache(payload), sharedPrefix };
+			captured = { transcript, payload, model: ctx.model, at: Date.now(), tier, cache: requestCache(payload), sharedPrefix, sentSeq: ++order };
 		}
 		return payload === event.payload ? undefined : payload;
 	});
@@ -1554,7 +1581,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const transcript = pendingTranscript;
 		pendingTranscript = undefined;
 		if (transcript && event.message.role === "assistant" && ctx.model?.api === BRIDGE_API) {
-			captured = { transcript, model: ctx.model, at: Date.now(), tier: process.env.PI_CACHE_RETENTION === "long" ? "long" : "short" };
+			captured = { transcript, model: ctx.model, at: Date.now(), tier: process.env.PI_CACHE_RETENTION === "long" ? "long" : "short", sentSeq: ++order };
 		}
 	});
 	// Which answer the captured request got, so a keep-warm period knows the request of its real answer.
@@ -1563,6 +1590,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (message.role !== "assistant" || !captured || captured.answeredAt !== undefined) return;
 		if (message.usage.cacheRead + message.usage.cacheWrite <= 0) return;
 		captured.answeredAt = message.timestamp;
+		captured.answeredSeq = ++order;
 		answerRequest = captured;
 	});
 	pi.on("session_start", (_event, ctx) => {
@@ -1622,8 +1650,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	});
 	pi.on("agent_start", (_event, ctx) => {
 		// A run starts: the reports that come from now on are about its requests.
-		runStartedAt = Date.now();
-		runReports = new Map();
+		runLog = [];
 		abortWarm();
 		// The idle period, its spending and its time limit stay: they end only when this run brings a new real answer.
 		running = true;
@@ -1681,11 +1708,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		answered = { provider: event.provider, id: event.model, upstreams: event.upstreams };
 		// Kept per model, whole, with when it came; and among the current run's reports.
 		const key = `${event.provider}/${event.model}`;
-		const report: RouteReport = { at: Date.now(), identity: canonical(payload), upstreams: event.upstreams };
+		const report: RouteReport = { at: Date.now(), seq: ++order, key, identity: canonical(payload), upstreams: event.upstreams };
 		reports.set(key, report);
-		const inRun = runReports.get(key);
-		if (!inRun) runReports.set(key, { first: report, differs: false });
-		else if (inRun.first.identity !== report.identity) inRun.differs = true;
+		runLog.push(report);
 		// The period's clock is told the route that served its model, also where nothing reads it before it changes again;
 		// a report about another model never touches it.
 		const p = period;

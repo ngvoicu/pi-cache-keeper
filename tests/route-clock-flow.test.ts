@@ -82,6 +82,8 @@ interface Setup {
 	beforeHook?: (kind: Kind) => void;
 	/** Pi's own warmer runs beside the extension, started with the period's request, asking the extension each time. */
 	piWarmer?: boolean;
+	/** What happens while the period's request is out, after it was sent and before its answer ends (a proxy's report). */
+	whileOut?: (announce: (upstreams: readonly unknown[]) => void) => void;
 	/** What happens in the period's run after its answer, before Pi goes idle (a proxy's reports, say). */
 	afterAnswer?: (run: { announce: (upstreams: readonly unknown[]) => void; until: (at: number) => Promise<void> }) => Promise<void> | void;
 }
@@ -223,6 +225,7 @@ async function session(s: Setup) {
 	const { read, write, oneHour } = s.answered;
 	const usage = { input: s.prompt - read - write, output: 5, cacheRead: read, cacheWrite: write, ...(s.model.api === "anthropic-messages" ? { cacheWrite1h: oneHour } : {}), totalTokens: s.prompt + 5, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, total: 0 } };
 	const reply = { role: "assistant", content: [{ type: "text", text: "Here are the changes." }], api: s.model.api, provider: s.model.provider, model: s.model.id, timestamp: START, stopReason: "stop", usage };
+	s.whileOut?.(announce);
 	emit("message_end", { message: reply });
 	branch.push({ type: "message", id: "u", parentId: null, timestamp: new Date(START - 100).toISOString(), message: user });
 	branch.push({ type: "message", id: "a", parentId: "u", timestamp: new Date(START).toISOString(), message: reply });
@@ -571,7 +574,7 @@ test("a report about another model never touches the period: a helper's request 
 		prompt: N,
 		answered: { read: 0, write: N, oneHour: N },
 		serve: provider.serve,
-		afterAnswer: ({ announce }) => announce([LOGIN]),
+		whileOut: (announce) => announce([LOGIN]),
 	});
 	t.after(() => s.done());
 	await s.until(270);
@@ -596,7 +599,7 @@ test("a reported switch from a subscription to an API key of one upstream is a c
 		prompt: N,
 		answered: { read: 0, write: N, oneHour: N },
 		serve: provider.serve,
-		afterAnswer: ({ announce }) => announce([login]),
+		whileOut: (announce) => announce([login]),
 	});
 	t.after(() => s.done());
 	await s.until(600);
@@ -611,11 +614,11 @@ test("a reported switch from a subscription to an API key of one upstream is a c
 	assert.deepEqual(s.wires, [], "no refresh (on the third review one wrote 600,000 into the key's cache for $3.60)");
 });
 
-for (const [label, reports] of [
-	["the API key is reported at 10 s, before Pi goes idle", [[LOGIN], [KEY]]],
-	["the API key at 1 s, then the login again at 2 s, before Pi goes idle", [[LOGIN], [KEY], [LOGIN]]],
+for (const [label, later] of [
+	["the API key is reported at 10 s, before Pi goes idle", [[10, KEY]]],
+	["the API key at 1 s, then the login again at 2 s, before Pi goes idle", [[1, KEY], [2, LOGIN]]],
 ] as const) {
-	test(`the answer's run reports two routes: ${label}: the period is Pi's, the route changed`, { skip }, async (t) => {
+	test(`the answer's own report is the login's, then ${label}: the period is Pi's, the route changed`, { skip }, async (t) => {
 		const N = 600_000;
 		const provider = accountCaches(N);
 		const s = await session({
@@ -625,18 +628,18 @@ for (const [label, reports] of [
 			prompt: N,
 			answered: { read: 0, write: N, oneHour: N },
 			serve: provider.serve,
+			whileOut: (announce) => announce([LOGIN]),
 			afterAnswer: async ({ announce, until }) => {
-				announce(reports[0]);
-				for (let i = 1; i < reports.length; i++) {
-					await until(reports.length === 2 ? 10 : i);
-					announce(reports[i]);
+				for (const [at, upstream] of later) {
+					await until(at);
+					announce([upstream]);
 				}
 			},
 		});
 		t.after(() => s.done());
 		await s.until(270);
 		assert.equal(s.decide(), undefined, "not taken: Pi's warming decides");
-		assert.match(await s.command(), /left to Pi's own warming: the proxy reported different routes for this model during the run of the last answer/);
+		assert.match(await s.command(), /left to Pi's own warming: the proxy reported a route for this model after the last answer ended that is not the answer's own/);
 		await s.until(3700);
 		assert.deepEqual(s.wires, [], "no refresh at 3,420 s");
 	});
@@ -652,7 +655,7 @@ test("a model switch away and back keeps the route's report: 58 min on return, P
 		answered: { read: 0, write: N, oneHour: N },
 		serve: () => ({ read: N, write: 0, oneHour: 0 }),
 		piWarmer: true,
-		afterAnswer: ({ announce }) => announce([LOGIN]),
+		whileOut: (announce) => announce([LOGIN]),
 	});
 	t.after(() => s.done());
 	await s.until(60);
@@ -683,7 +686,7 @@ test("after a reported change of route, neither the footer nor /cache-keeper cla
 		prompt: N,
 		answered: { read: 0, write: N, oneHour: N },
 		serve: () => ({ read: N, write: 0, oneHour: 0 }),
-		afterAnswer: ({ announce }) => announce([LOGIN]),
+		whileOut: (announce) => announce([LOGIN]),
 	});
 	t.after(() => s.done());
 	await s.until(60);
@@ -823,4 +826,55 @@ test("a receipt of Pi's recorded during the summary's preparation is read at its
 	assert.deepEqual(s.wires, [], "nothing reaches the transport");
 	const record = s.traces().find((r: Any) => r.event === "compact");
 	assert.deepEqual([record.outcome, record.reason], ["cancelled", "the prompt cache expired before the summary request left"]);
+});
+
+// ------------------------------------------------------------ whose report it is: only one that came while the request was out
+
+// A proxy configured with a subscription login whose short tier lasts an hour; an API key serves a helper's requests on
+// the same model, with a cache of its own (empty). A report carries no request id: it is the period's own only where it
+// came while the period's request was out.
+const loginConfigured = () => ({
+	upstreams: { "gateway-fixture": { [CLAUDE_ID]: { upstreams: [LOGIN] } } },
+	providers: { "claude-subscription": { [CLAUDE_ID]: { short: 3600, long: 3600 } }, anthropic: { [CLAUDE_ID]: { short: 300, long: 3600 } } },
+});
+const helperSession = (o: Partial<Setup>) => {
+	const N = 600_000;
+	const provider = accountCaches(N);
+	return session({
+		model: claudeGateway(),
+		store: loginConfigured(),
+		settings: { keepWarmMinutes: 240, compactBeforeExpiry: false },
+		prompt: N,
+		answered: { read: 0, write: N, oneHour: N },
+		serve: provider.serve,
+		...o,
+	});
+};
+
+test("the answer's own route unreported, a helper's request on the API key reported after the answer and before Pi goes idle: the period is Pi's, no refresh at 3,420 s", { skip }, async (t) => {
+	const s = await helperSession({ afterAnswer: async ({ announce, until }) => (await until(2), announce([KEY])) });
+	t.after(() => s.done());
+	await s.until(270);
+	assert.equal(s.decide(), undefined, "not taken");
+	assert.match(await s.command(), /left to Pi's own warming: the proxy reported a route for this model after the last answer ended that is not the answer's own \(or none for the answer itself\)/);
+	await s.until(3700);
+	assert.deepEqual(s.wires, [], "no refresh (on the second look one wrote 600,000 on the key for $3.60)");
+});
+
+test("the helper's report after Pi went idle: the configured login stands in, and the key's report is a change of route: no refresh, as before", { skip }, async (t) => {
+	const s = await helperSession({});
+	t.after(() => s.done());
+	await s.until(14);
+	s.announce([KEY]);
+	await s.until(270);
+	assert.equal(s.decide(), undefined, "Pi's");
+	await s.until(3700);
+	assert.deepEqual(s.wires, []);
+});
+
+test("the stable short-hour route with its own report while the request was out: refreshed at 3,420 s and 6,840 s, each reading all 600,000", { skip }, async (t) => {
+	const s = await helperSession({ whileOut: (announce) => announce([LOGIN]) });
+	t.after(() => s.done());
+	await s.until(7000);
+	assert.deepEqual(s.wires.map((w) => [w.kind, w.at, w.read, w.cap]), [["refresh", 3420, 600_000, 1], ["refresh", 6840, 600_000, 1]]);
 });
