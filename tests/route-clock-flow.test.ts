@@ -993,6 +993,7 @@ test("Pi re-sent the answer's request without strict tools (17 unions, a 400): t
 	await s.until(270);
 	assert.equal(s.decide(), undefined, "not taken: Pi's warming decides");
 	assert.match(await s.command(), /left to Pi's own warming: Pi re-sent the last answer's request in another form/);
+	assert.match(s.statuses.at(-1) ?? "", /keep-warm: Pi's \(request re-sent\)/);
 	await s.until(3700);
 	assert.deepEqual(s.wires.filter((w) => w.kind === "refresh"), [], "no refresh (it re-sent the rejected form at 3,420 s and got a 400 again)");
 	assert.ok(s.decisions.length > 0 && s.decisions.every((d) => d.answer === undefined), "Pi's questions answered with nothing");
