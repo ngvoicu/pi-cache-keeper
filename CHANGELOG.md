@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **Keep-warm: a marker that states no lifetime takes the route's lifetime, where an answer confirms it** — Anthropic's `cache_control` without `ttl` asks for a tier and states no lifetime; with keep-warm on, its lifetime is now the one the route's data gives that tier, not Anthropic's documented 5 minutes. A tier the answer reports writing is compared by the lifetime the data gives it, not by its name, and a period never counts longer than the reported tier's own 5 minutes or hour. Where the route's lifetime for such a marker is not the 5 minutes (a proxy on a Claude subscription login, both tiers an hour), the period is kept warm only where an answer of the model on the branch reported a write in the tier of that lifetime; otherwise it is Pi's (`route's lifetime unconfirmed`). So that proxy with `"cacheRetention": "short"`, whose answers report the 1-hour write, is now kept warm at the hour (refreshed at 57 minutes); before, it was Pi's ("the answer wrote the other tier"). An answer reporting the 5-minute write there (the proxy fell back to an API key) is kept warm at 5 minutes where the proxy said the key served it, and is Pi's otherwise, never kept at an hour. Anthropic's own API, and every route whose data agrees with the documented lifetimes, are kept warm as before; with keep-warm off nothing changes.
+
 ## [0.5.3] - 2026-11-20
 
 ### Added

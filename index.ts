@@ -13,7 +13,7 @@ import {
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { Container, SettingsList, Text, type SettingItem } from "@earendil-works/pi-tui";
-import { cacheState, cacheTier, hasExplicitPromptCache, isKimiOnMoonshot, type CacheState } from "./cache-state.ts";
+import { cacheState, cacheTier, hasExplicitPromptCache, isKimiOnMoonshot, lifetimeFor, reportedTierMs, type CacheState } from "./cache-state.ts";
 import {
 	checkpointSummary,
 	isPlainObject,
@@ -446,12 +446,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const cache = request.cache ?? requestCache(request.payload);
 		if (cache.unreadable) return no("unreadable cache marker", `the request carries a cache marker the extension does not read (${cache.unreadable})`);
 		if (request.sharedPrefix || cache.mixed) return no("several cache lifetimes", "the request carries more than one cache lifetime");
-		// The answer's own report wins: writes in the other tier, or in both, and the request is not what was cached.
+		// Writes in both tiers: the request is not what was cached.
 		const answered = state.answerTiers;
 		if (answered && answered.length > 1) return no("both tiers written", "the answer reports cache writes in both tiers (5 min and 1 h)");
-		if (answered?.length === 1 && answered[0] !== cache.tier) return no("the answer wrote the other tier", `the answer reports cache writes in the ${answered[0]} tier, the request asked for the ${cache.tier} one`);
-		if (state.tier !== cache.tier) return no("tier mismatch", `the cache tier reported earlier (${state.tier}) does not match the one the request asked for (${cache.tier})`);
-		if (cache.markers.some((m) => m.ms !== undefined && m.ms !== state.lifetime?.ms)) return no("lifetime differs from the data", "the request's cache lifetime does not match the model data");
+		const why = whyNotOneLifetime(state, request, cache, state.lifetime.ms);
+		if (why) return why;
 		// A lifetime assumed for a model family holds only on that provider's own API.
 		const ownApi = ASSUMED_LIFETIMES[state.lifetime.source];
 		if (ownApi && !ownApi.test(request.model.baseUrl)) {
@@ -463,6 +462,49 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		// Owned or left alone, never in between: where one refresh costs as much as the miss it avoids, the gate would
 		// stop the first refresh, so the period is not taken from Pi at all.
 		if (state.answerPrompt !== undefined && !refreshCanPay(warmBudget(request.model, state.answerPrompt))) return no("a refresh costs a miss", "at this model's prices a refresh costs as much as a miss");
+		return undefined;
+	};
+	// The request's lifetime, and whether the route's data and the answers' reports give it one: a lifetime a marker
+	// states is compared with the data; a marker that states none (Anthropic's `cache_control` without `ttl`) asks for a
+	// tier, and its lifetime is the one the route's data gives that tier. A tier an answer reports is compared by the
+	// lifetime the data gives it, never by its name, and the period never counts longer than the reported tier's own
+	// documented lifetime. Where the route's lifetime for an unstated marker is not the one the format documents for it
+	// (5 minutes), only a write tier reported by an answer of this model on the branch that documents that same lifetime
+	// confirms it. `periodMs` is the lifetime the period would fix. Undefined when one lifetime holds.
+	const whyNotOneLifetime = (
+		state: CacheState,
+		request: CapturedRequest,
+		cache: ReturnType<typeof requestCache>,
+		periodMs: number,
+	): { reason: string; label?: string } | undefined => {
+		const no = (label: string, reason: string) => ({ reason, label });
+		const asked = cache.tier;
+		const served = servedModel(request.model);
+		const dataFor = (tier: "short" | "long") => lifetimeFor(served, tier, tier === state.writeTier, asked)?.ms;
+		const stated = cache.markers.find((m) => m.ms !== undefined && !m.implied)?.ms;
+		const unstated = cache.markers.find((m) => m.implied);
+		const requestMs = stated ?? dataFor(asked) ?? unstated?.ms ?? periodMs;
+		const lasts = (ms: number | undefined) => (ms === undefined ? "no lifetime" : formatDuration(ms));
+		const answered = state.answerTiers?.length === 1 ? state.answerTiers[0] : undefined;
+		if (answered && dataFor(answered) !== requestMs) {
+			return no("the answer wrote another lifetime", `the answer reports cache writes in the ${answered} tier, which lasts ${lasts(dataFor(answered))} here; the request's cache lasts ${lasts(requestMs)}`);
+		}
+		const reported = state.writeTier;
+		if (reported && dataFor(reported) !== requestMs) {
+			return no("tier mismatch", `the cache tier reported earlier (${reported}) lasts ${lasts(dataFor(reported))} here, the request's cache ${lasts(requestMs)}`);
+		}
+		if (requestMs !== periodMs) return no("lifetime differs from the data", "the request's cache lifetime does not match the model data");
+		for (const tier of new Set([answered, reported])) {
+			if (tier && reportedTierMs(tier) < requestMs) {
+				return no("the answer wrote a shorter tier", `the answer reports cache writes in the ${tier} tier (${formatDuration(reportedTierMs(tier))}), shorter than the ${formatDuration(requestMs)} the route's data gives the request`);
+			}
+		}
+		if (stated === undefined && unstated?.ms !== undefined && requestMs !== unstated.ms && !(reported && reportedTierMs(reported) === requestMs)) {
+			return no(
+				"route's lifetime unconfirmed",
+				`the request states no cache lifetime (${unstated.at}), and the route's lifetime for its tier (${formatDuration(requestMs)}) is not the ${formatDuration(unstated.ms)} that marker defaults to; no answer of this model reported a cache write that confirms it`,
+			);
+		}
 		return undefined;
 	};
 	// Pi is idle. After a run that brought a new real answer (or at a session's start) a new period starts; after one that

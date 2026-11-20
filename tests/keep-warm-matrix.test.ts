@@ -58,8 +58,12 @@ const API_CAPS: Record<string, { keys: string[]; max: number }> = {
 };
 const LIMIT_KEYS = ["max_tokens", "max_output_tokens", "max_completion_tokens", "maxTokens", "maxOutputTokens"];
 
-/** Every cache lifetime a request states, wherever it sits, read here independently of the extension (milliseconds). */
-function statedLifetimes(payload: unknown): number[] {
+/**
+ * Every cache lifetime a request states, wherever it sits, read here independently of the extension (milliseconds).
+ * Anthropic's marker without a ttl states none: it counts as its documented 5 minutes, or as the hour where the answer
+ * reported writing the 1-hour tier (`answeredLong`), the only proof of a longer lifetime for it.
+ */
+function statedLifetimes(payload: unknown, answeredLong: boolean): number[] {
 	const out: number[] = [];
 	const duration = (value: unknown) => {
 		const match = typeof value === "string" ? /^(\d+)(s|m|h)$/.exec(value) : null;
@@ -69,8 +73,7 @@ function statedLifetimes(payload: unknown): number[] {
 		if (Array.isArray(value)) value.forEach(visit);
 		else if (value && typeof value === "object") {
 			for (const [key, field] of Object.entries(value)) {
-				// Anthropic's marker without a ttl is the 5-minute cache.
-				if (key === "cache_control" && field && typeof field === "object" && (field as Record<string, unknown>).ttl === undefined) out.push(300_000);
+				if (key === "cache_control" && field && typeof field === "object" && (field as Record<string, unknown>).ttl === undefined) out.push(answeredLong ? 3_600_000 : 300_000);
 				if (key === "ttl" || key === "prompt_cache_retention") {
 					const ms = duration(field);
 					if (ms !== undefined) out.push(ms);
@@ -284,7 +287,7 @@ async function runCombo(combo: Combo): Promise<Outcome> {
 		const stopped = traces().find((r) => r.action === "pi-stopped");
 		const owned = JSON.stringify(onWarm) === JSON.stringify({ action: "stop" });
 		outcome.owned = owned;
-		const stated = statedLifetimes(captured);
+		const stated = statedLifetimes(captured, ((usage as { cacheWrite1h?: number }).cacheWrite1h ?? 0) > 0);
 		const earliest = stated.length ? Math.min(...stated) : Infinity;
 
 		if (owned) {
@@ -443,6 +446,10 @@ const SHORT: [RegExp, string][] = [
 	[/^at this model's prices a refresh costs as much as a miss$/, "refresh costs a miss"],
 	[/^the request carries a cache marker the extension does not read/, "unread marker"],
 	[/^the request's cache lifetime does not match the model data$/, "stated lifetime ≠ data"],
+	[/^the request states no cache lifetime .* no answer of this model reported a cache write that confirms it$/, "route's lifetime unconfirmed"],
+	[/^the answer reports cache writes in the \w+ tier, which lasts /, "reported tier lasts otherwise"],
+	[/^the cache tier reported earlier \(\w+\) lasts /, "reported tier lasts otherwise"],
+	[/^the answer reports cache writes in the \w+ tier \(.*\), shorter than /, "reported tier shorter"],
 	[/^the request carries more than one cache lifetime$/, "two lifetimes"],
 	[/^the request carries no output limit/, "no output limit"],
 	[/is only assumed on the provider's own API/, "assumed lifetime elsewhere"],

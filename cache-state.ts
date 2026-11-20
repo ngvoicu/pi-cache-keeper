@@ -2,6 +2,14 @@ import type { Api, Model, OpenAICompletionsCompat, OpenAIResponsesCompat } from 
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 const REPORTED_TIER_SECONDS = { short: 300, long: 3600 } as const;
+
+/**
+ * The lifetime a provider that reports its writes per tier (Anthropic's `ephemeral_5m_input_tokens` and
+ * `ephemeral_1h_input_tokens`) documents for the tier it reported: the 5-minute and the 1-hour cache.
+ */
+export function reportedTierMs(tier: "short" | "long"): number {
+	return REPORTED_TIER_SECONDS[tier] * 1000;
+}
 const OPENAI_MIN_LIFETIME_SECONDS = 1800;
 const KIMI_TTL_SECONDS = { short: 300, long: 3600 } as const;
 
@@ -33,6 +41,25 @@ export interface CacheState {
 	answerTiers?: ("short" | "long")[];
 	/** With keep-warm on: the tier the lifetime is for, the one the latest write reported, else the requested one. */
 	tier?: "short" | "long";
+	/** With keep-warm on: the tier the latest cache write of the model's own answers reported, where one reported it. */
+	writeTier?: "short" | "long";
+}
+
+/**
+ * The lifetime the model's data gives a tier: declared for it (Pi's catalog, models.json, providers.dev's values written
+ * there); else, where an answer reported writing that tier, the provider's documented lifetime for it; else a lifetime
+ * assumed for the model family (OpenAI's 30-minute minimum, Kimi's 5 minutes or 1 hour for the tier `asked`).
+ */
+export function lifetimeFor(model: Model<Api>, tier: "short" | "long", reported: boolean, asked: "short" | "long"): CacheState["lifetime"] {
+	const declared = model.promptCache?.[tier];
+	if (declared !== undefined) return { ms: declared * 1000, source: "declared by the model" };
+	if (reported) return { ms: REPORTED_TIER_SECONDS[tier] * 1000, source: "reported by the provider" };
+	if (hasExplicitPromptCache(model)) return { ms: OPENAI_MIN_LIFETIME_SECONDS * 1000, source: "OpenAI's minimum" };
+	if (isKimiOnMoonshot(model)) {
+		const long = asked === "long" && (model.compat as OpenAICompletionsCompat | undefined)?.supportsLongCacheRetention !== false;
+		return { ms: KIMI_TTL_SECONDS[long ? "long" : "short"] * 1000, source: long ? "Kimi's 1-hour option" : "Kimi's default" };
+	}
+	return undefined;
 }
 
 /**
@@ -109,15 +136,7 @@ export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?
 	if (refreshedAt !== undefined && warmedAt !== undefined) refreshedAt = Math.max(refreshedAt, warmedAt);
 	const asked = requested ?? (process.env.PI_CACHE_RETENTION === "long" ? "long" : "short");
 	const tier = reported ?? asked;
-	const declared = model.promptCache?.[tier];
-	let lifetime: CacheState["lifetime"];
-	if (declared !== undefined) lifetime = { ms: declared * 1000, source: "declared by the model" };
-	else if (reported) lifetime = { ms: REPORTED_TIER_SECONDS[reported] * 1000, source: "reported by the provider" };
-	else if (hasExplicitPromptCache(model)) lifetime = { ms: OPENAI_MIN_LIFETIME_SECONDS * 1000, source: "OpenAI's minimum" };
-	else if (isKimiOnMoonshot(model)) {
-		const long = asked === "long" && (model.compat as OpenAICompletionsCompat | undefined)?.supportsLongCacheRetention !== false;
-		lifetime = { ms: KIMI_TTL_SECONDS[long ? "long" : "short"] * 1000, source: long ? "Kimi's 1-hour option" : "Kimi's default" };
-	}
+	const lifetime = lifetimeFor(model, tier, reported !== undefined, asked);
 	const expiresAt = lifetime && refreshedAt !== undefined ? refreshedAt + lifetime.ms : undefined;
-	return { lifetime, cached: refreshedAt !== undefined, expiresAt, ...(refreshedAt === undefined ? {} : { refreshedAt }), replied, ...(keepWarmOn ? { tier } : {}), ...(answer ? { answeredAt: answer.at, answerPrompt: answer.prompt, ...(keepWarmOn && answer.tiers ? { answerTiers: answer.tiers } : {}) } : {}) };
+	return { lifetime, cached: refreshedAt !== undefined, expiresAt, ...(refreshedAt === undefined ? {} : { refreshedAt }), replied, ...(keepWarmOn ? { tier, ...(reported ? { writeTier: reported } : {}) } : {}), ...(answer ? { answeredAt: answer.at, answerPrompt: answer.prompt, ...(keepWarmOn && answer.tiers ? { answerTiers: answer.tiers } : {}) } : {}) };
 }
