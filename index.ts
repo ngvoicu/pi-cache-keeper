@@ -146,6 +146,9 @@ interface CapturedRequest {
 	/** When it was sent and when its answer ended, as places in the order of events (see `order`). */
 	sentSeq?: number;
 	answeredSeq?: number;
+	/** Its answer says Pi re-sent the request in another form after the provider rejected it (RESENT_DIAGNOSTICS): the
+	 * request captured here is not the one whose answer wrote the cache. */
+	resent?: boolean;
 }
 
 /** What a proxy reported served a request of a model (ANSWERED_EVENT): the report whole, as one text, and when it came. */
@@ -168,6 +171,11 @@ function canonical(value: unknown): string {
 
 /** A cache lifetime under this cannot carry a refresh: Pi's own warming keeps such a session, if anything does. */
 const MIN_OWNED_LIFETIME_MS = 60_000;
+// What Pi 1.5.2's Anthropic adapter adds to an answer whose request the provider rejected for its strict tools (a 400 over
+// the provider's limits), after it re-sent the request without them: the answer's cache was written by the second form,
+// not the request the extension saw first. Such a period is left to Pi. Later requests of the session are built without
+// strict tools from the start, so they carry no such note and are captured as sent.
+const RESENT_DIAGNOSTICS = new Set(["anthropic_strict_tools_fallback"]);
 
 /**
  * R9: per model (provider/id), how many refreshes in a row did not show a hit (a miss, or a refresh that settled without
@@ -472,6 +480,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		}
 		const request = answerRequest;
 		if (!request || request.answeredAt !== state.answeredAt) return no("request not seen", "the request of the last answer was not captured");
+		if (request.resent) {
+			return no("request re-sent", "Pi re-sent the last answer's request in another form after the provider rejected it (strict tools over the provider's limits), so the request the extension saw is not the one whose cache the answer wrote");
+		}
 		if (!request.payload) return no("no request to re-send", `${request.model.api} requests cannot be re-sent`);
 		// The same checks the refresh makes, on the payload as it was sent: only where a refresh is proven to go out with
 		// its output capped (see REPLAYABLE_APIS) does the extension keep the cache warm and stop Pi's warming.
@@ -1591,6 +1602,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (message.usage.cacheRead + message.usage.cacheWrite <= 0) return;
 		captured.answeredAt = message.timestamp;
 		captured.answeredSeq = ++order;
+		if (message.diagnostics?.some((d) => RESENT_DIAGNOSTICS.has(d.type))) captured.resent = true;
 		answerRequest = captured;
 	});
 	pi.on("session_start", (_event, ctx) => {

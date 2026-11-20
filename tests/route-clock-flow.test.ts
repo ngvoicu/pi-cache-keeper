@@ -34,6 +34,7 @@ const adapter = async (api: string) => (await import(`@earendil-works/pi-ai/api/
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const START = 10_000;
+let sessions = 0;
 const sec = () => (Date.now() - START) / 1000;
 const user = { role: "user", content: [{ type: "text", text: "Explain the changes in detail." }], timestamp: START - 100 };
 const tools = [{ name: "read", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } }];
@@ -41,15 +42,22 @@ const transcript = normalizeContext({ systemPrompt: "You are pi.", messages: [us
 
 // A provider's answer, as its stream reports it: what was read from the cache, what was written and into which cache
 // (Anthropic reports the 1-hour part; Chat Completions only what was read).
-function answer(api: string, prompt: number, read: number, write: number, oneHour: number, output: number): Response {
+function answer(api: string, prompt: number, read: number, write: number, oneHour: number, output: number, toolCall = false): Response {
 	const events: unknown[] =
 		api === "anthropic-messages"
 			? [
 					{ type: "message_start", message: { id: "m", type: "message", role: "assistant", model: "m", content: [], usage: { input_tokens: prompt - read - write, output_tokens: 1, cache_read_input_tokens: read, cache_creation_input_tokens: write, cache_creation: { ephemeral_5m_input_tokens: write - oneHour, ephemeral_1h_input_tokens: oneHour } } } },
-					{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
-					{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Checkpoint." } },
+					...(toolCall
+						? [
+								{ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_1", name: "read", input: {} } },
+								{ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"path":"a.ts"}' } },
+							]
+						: [
+								{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+								{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Checkpoint." } },
+							]),
 					{ type: "content_block_stop", index: 0 },
-					{ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: output } },
+					{ type: "message_delta", delta: { stop_reason: toolCall ? "tool_use" : "end_turn" }, usage: { output_tokens: output } },
 					{ type: "message_stop" },
 				]
 			: [
@@ -60,14 +68,17 @@ function answer(api: string, prompt: number, read: number, write: number, oneHou
 	return new Response(text, { headers: { "content-type": "text/event-stream" } });
 }
 
-type Kind = "refresh" | "summary" | "pi";
+type Kind = "refresh" | "summary" | "pi" | "answer";
 interface Wire {
 	at: number;
 	kind: Kind;
 	read: number;
 	write: number;
 	cap?: number;
+	/** The provider rejected the request (a 400). */
+	rejected?: true;
 }
+type Served = { read: number; write: number; oneHour: number; toolCall?: boolean } | { reject: string };
 interface Setup {
 	model: Any;
 	/** The proxy's routes and providers.dev's lifetimes for them (the extension's saved data). */
@@ -76,8 +87,14 @@ interface Setup {
 	/** The prompt's size; the period's answer, as the provider reports it. */
 	prompt: number;
 	answered: { read: number; write: number; oneHour: number };
-	/** The provider: given what is sent and when, what is read and written, and into which cache. */
-	serve: (w: { kind: Kind; at: number }) => { read: number; write: number; oneHour: number };
+	/** The provider: given what is sent and when (and the request's body), what is read and written, and into which
+	 * cache; or that it rejects the request. */
+	serve: (w: { kind: Kind; at: number; body: Any }) => Served;
+	/** The tools in the period's context (the default: one plain `read` tool). */
+	tools?: Any[];
+	/** The period's run sends its request(s) to the provider through Pi's adapter, and its answer is the adapter's own
+	 * message (with what the adapter noted on it): one request, or two where the first answer calls a tool. */
+	send?: { legs: 1 | 2 };
 	/** Called just before the extension's payload hook of a request it sends (a credential lookup, say). */
 	beforeHook?: (kind: Kind) => void;
 	/** Pi's own warmer runs beside the extension, started with the period's request, asking the extension each time. */
@@ -121,10 +138,18 @@ async function session(s: Setup) {
 	// The in-memory provider: what each request reads and writes.
 	const transport = (kind: Kind) => async (_input: unknown, init?: { body?: unknown }) => {
 		const body = JSON.parse(String(init?.body));
-		const used = s.serve({ kind, at: sec() });
-		wires.push({ at: sec(), kind, read: used.read, write: used.write, cap: body.max_tokens ?? body.max_completion_tokens });
-		return answer(s.model.api, s.prompt + 4, used.read, used.write, used.oneHour, kind === "summary" ? 20 : 1);
+		const used = s.serve({ kind, at: sec(), body });
+		const cap = body.max_tokens ?? body.max_completion_tokens;
+		if ("reject" in used) {
+			wires.push({ at: sec(), kind, read: 0, write: 0, cap, rejected: true });
+			return new Response(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: used.reject } }), { status: 400, headers: { "content-type": "application/json" } });
+		}
+		wires.push({ at: sec(), kind, read: used.read, write: used.write, cap });
+		return answer(s.model.api, s.prompt + 4, used.read, used.write, used.oneHour, kind === "summary" ? 20 : 1, used.toolCall);
 	};
+	// The session's id, for Pi's adapter: it remembers per session that strict tools were rejected.
+	const sessionId = `route-clock-${++sessions}`;
+	const sent = s.tools ? normalizeContext({ systemPrompt: "You are pi.", messages: [user], tools: s.tools }).messages : transcript;
 	const ctx: Any = {
 		hasUI: true,
 		mode: "tui",
@@ -199,7 +224,7 @@ async function session(s: Setup) {
 	const decisions: { at: number; answer: string | undefined }[] = [];
 	const warmer =
 		s.piWarmer && CacheWarmer
-			? new CacheWarmer({ streamSimple: (m: Any, context: unknown, options: Any) => streamSimple(m, context, { ...options, apiKey: "sk-fixture", maxRetries: 0, fetch: transport("pi") }) }, ctx.sessionManager, () => "idle", async (event: { action: string }) => {
+			? new CacheWarmer({ streamSimple: (m: Any, context: unknown, options: Any) => streamSimple(m, context, { ...options, apiKey: "sk-fixture", maxRetries: 0, sessionId, fetch: transport("pi") }) }, ctx.sessionManager, () => "idle", async (event: { action: string }) => {
 					const result = emit("cache_warming_decision", event) as { action?: string } | undefined;
 					decisions.push({ at: Math.round(sec()), answer: result?.action });
 					return result?.action ?? event.action;
@@ -207,28 +232,58 @@ async function session(s: Setup) {
 			: undefined;
 	// The period's run: its request, as Pi sends it, and its answer at 0 s.
 	emit("agent_start");
-	emit("context_with_system", { messages: transcript });
-	let original: unknown;
-	await streamSimple(s.model, { messages: transcript }, {
-		apiKey: "sk-fixture",
-		maxTokens: 8192,
-		cacheRetention: "short",
-		maxRetries: 0,
-		onPayload: async (payload: Record<string, unknown>) => {
-			original = (await emit("before_provider_request", { payload })) ?? payload;
-			throw new Error("captured without transport");
-		},
-	}).result();
-	assert.ok(original, "the adapter built the period's request");
-	warmer?.start({ model: s.model, context: { messages: transcript }, options: { cacheRetention: "short" } }, () => true);
-	mock.timers.setTime(START);
-	const { read, write, oneHour } = s.answered;
-	const usage = { input: s.prompt - read - write, output: 5, cacheRead: read, cacheWrite: write, ...(s.model.api === "anthropic-messages" ? { cacheWrite1h: oneHour } : {}), totalTokens: s.prompt + 5, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, total: 0 } };
-	const reply = { role: "assistant", content: [{ type: "text", text: "Here are the changes." }], api: s.model.api, provider: s.model.provider, model: s.model.id, timestamp: START, stopReason: "stop", usage };
-	s.whileOut?.(announce);
-	emit("message_end", { message: reply });
-	branch.push({ type: "message", id: "u", parentId: null, timestamp: new Date(START - 100).toISOString(), message: user });
-	branch.push({ type: "message", id: "a", parentId: "u", timestamp: new Date(START).toISOString(), message: reply });
+	emit("context_with_system", { messages: sent });
+	// A request of Pi's, through its adapter and the extension's payload hook (each form the adapter builds).
+	const ask = (messages: unknown[], kind: Kind) =>
+		streamSimple(s.model, { messages }, {
+			apiKey: "sk-fixture",
+			maxTokens: 8192,
+			cacheRetention: "short",
+			maxRetries: 0,
+			sessionId,
+			onPayload: async (payload: Record<string, unknown>) => (await emit("before_provider_request", { payload })) ?? payload,
+			fetch: transport(kind),
+		}).result();
+	if (s.send) {
+		mock.timers.setTime(START);
+		branch.push({ type: "message", id: "u", parentId: null, timestamp: new Date(START - 100).toISOString(), message: user });
+		let messages: unknown[] = sent;
+		for (let leg = 1; leg <= s.send.legs; leg++) {
+			const reply = await ask(messages, "answer");
+			assert.notEqual(reply.stopReason, "error", reply.errorMessage);
+			if (leg === s.send.legs) s.whileOut?.(announce);
+			emit("message_end", { message: reply });
+			branch.push({ type: "message", id: leg === s.send.legs ? "a" : `a${leg}`, parentId: branch.at(-1).id, timestamp: new Date(START).toISOString(), message: reply });
+			if (leg === s.send.legs) break;
+			const result = { role: "toolResult", toolCallId: "toolu_1", toolName: "read", content: [{ type: "text", text: "export {};" }], isError: false, timestamp: START };
+			branch.push({ type: "message", id: `r${leg}`, parentId: branch.at(-1).id, timestamp: new Date(START).toISOString(), message: result });
+			messages = [...messages, reply, result];
+			emit("context_with_system", { messages });
+		}
+		warmer?.start({ model: s.model, context: { messages: sent }, options: { cacheRetention: "short", sessionId } }, () => true);
+	} else {
+		let original: unknown;
+		await streamSimple(s.model, { messages: sent }, {
+			apiKey: "sk-fixture",
+			maxTokens: 8192,
+			cacheRetention: "short",
+			maxRetries: 0,
+			onPayload: async (payload: Record<string, unknown>) => {
+				original = (await emit("before_provider_request", { payload })) ?? payload;
+				throw new Error("captured without transport");
+			},
+		}).result();
+		assert.ok(original, "the adapter built the period's request");
+		warmer?.start({ model: s.model, context: { messages: sent }, options: { cacheRetention: "short" } }, () => true);
+		mock.timers.setTime(START);
+		const { read, write, oneHour } = s.answered;
+		const usage = { input: s.prompt - read - write, output: 5, cacheRead: read, cacheWrite: write, ...(s.model.api === "anthropic-messages" ? { cacheWrite1h: oneHour } : {}), totalTokens: s.prompt + 5, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, total: 0 } };
+		const reply = { role: "assistant", content: [{ type: "text", text: "Here are the changes." }], api: s.model.api, provider: s.model.provider, model: s.model.id, timestamp: START, stopReason: "stop", usage };
+		s.whileOut?.(announce);
+		emit("message_end", { message: reply });
+		branch.push({ type: "message", id: "u", parentId: null, timestamp: new Date(START - 100).toISOString(), message: user });
+		branch.push({ type: "message", id: "a", parentId: "u", timestamp: new Date(START).toISOString(), message: reply });
+	}
 	await s.afterAnswer?.({ announce, until });
 	emit("agent_settled", { aborted: false });
 	warmer?.onAgentSettled();
@@ -247,7 +302,12 @@ async function session(s: Setup) {
 		for (let i = 0; i < 24 && JSON.parse(readFileSync(join(dir, "settings.json"), "utf8")).cacheKeeper.keepWarmMinutes !== 0; i++) menu.handleInput(" ");
 		assert.equal(JSON.parse(readFileSync(join(dir, "settings.json"), "utf8")).cacheKeeper.keepWarmMinutes, 0);
 	};
-	return { ctx, emit, wires, decisions, announceFor, switchOffInMenu, statuses, compactions, branch, until, decide, command, announce, traces, streamSimple, compaction: () => compaction, done: () => (warmer?.cancel(), emit("session_shutdown"), mock.timers.reset()) };
+	// The next real message at `at`: what the provider reads for it (sent through Pi's adapter, outside the extension).
+	const continueAt = async (at: number) => {
+		await until(at);
+		return streamSimple(s.model, { messages: sent }, { apiKey: "sk-fixture", maxTokens: 8192, cacheRetention: "short", maxRetries: 0, sessionId, fetch: transport("answer") }).result();
+	};
+	return { ctx, emit, wires, decisions, announceFor, switchOffInMenu, statuses, compactions, branch, until, decide, command, announce, traces, streamSimple, continueAt, compaction: () => compaction, done: () => (warmer?.cancel(), emit("session_shutdown"), mock.timers.reset()) };
 }
 
 const claudeGateway = (promptCache = { short: 3600, long: 3600 }) => ({ ...MODELS.anthropic["claude-sonnet-4-6"], provider: "gateway-fixture", baseUrl: "https://fixture.invalid", promptCache });
@@ -877,4 +937,87 @@ test("the stable short-hour route with its own report while the request was out:
 	t.after(() => s.done());
 	await s.until(7000);
 	assert.deepEqual(s.wires.map((w) => [w.kind, w.at, w.read, w.cap]), [["refresh", 3420, 600_000, 1], ["refresh", 6840, 600_000, 1]]);
+});
+
+// ---------------------------------------------- an answer whose request Pi re-sent in another form: the period is Pi's
+
+// A tool whose filters are all optional: in strict form each one is a union with null. With the plain `read` tool, the
+// request carries `unions` of them; the provider rejects strict tools over 16 (a 400), and Pi's adapter re-sends the
+// request without strict tools, noting it on the answer (`anthropic_strict_tools_fallback`).
+const searchTool = (unions: number) => ({
+	name: "search",
+	description: "Search the catalog",
+	parameters: { type: "object", properties: Object.fromEntries(Array.from({ length: unions }, (_, i) => [`filter${i}`, { type: "string" }])), required: [] },
+	constrainedSampling: { type: "json_schema", strict: "prefer" },
+});
+const unionsIn = (schema: unknown): number => (Array.isArray(schema) ? schema.reduce((n: number, v) => n + unionsIn(v), 0) : schema && typeof schema === "object" ? ("anyOf" in schema ? 1 : 0) + Object.values(schema).reduce((n: number, v) => n + unionsIn(v), 0) : 0);
+// The provider: an hour cache per form of the request (its tools and how many messages it has), renewed by each read; a
+// longer request of the same form reads the shorter one's and writes the rest (10,000). Strict tools over 16 unions are
+// rejected. Where `toolFirst`, the period's first request is answered with a call of `read`.
+const strictProvider = (N: number, toolFirst = false) => {
+	const caches = new Map<string, number>();
+	return ({ kind, at, body }: { kind: Kind; at: number; body: Any }): Served => {
+		const strict = (body.tools ?? []).filter((tool: Any) => tool.strict);
+		const unions = strict.reduce((n: number, tool: Any) => n + unionsIn(tool.input_schema), 0);
+		if (unions > 16) return { reject: `Schemas contains too many parameters with union types (${unions}), maximum 16` };
+		const form = JSON.stringify(body.tools);
+		const key = `${form}#${body.messages.length}`;
+		const alive = (k: string) => at < (caches.get(k) ?? -1);
+		const read = alive(key) ? N : [...caches.keys()].some((k) => k.startsWith(`${form}#`) && alive(k)) ? N - 10_000 : 0;
+		caches.set(key, at + 3600);
+		return { read, write: N - read, oneHour: N - read, toolCall: toolFirst && kind === "answer" && body.messages.length === 1 };
+	};
+};
+const strictSession = (unions: number, o: Partial<Setup> = {}) => {
+	const N = 600_000;
+	// Pi's model holds the API key's values (five minutes: Pi's own warming renews every 270 s); the login that serves
+	// it, reported while the request is out, an hour.
+	return session({
+		model: claudeGateway(keyValues),
+		store: loginOverKey(),
+		settings: { keepWarmMinutes: 240, compactBeforeExpiry: false },
+		prompt: N,
+		answered: { read: 0, write: N, oneHour: N },
+		tools: [tools[0], searchTool(unions)],
+		send: { legs: 1 },
+		serve: strictProvider(N),
+		whileOut: (announce) => announce([LOGIN]),
+		...o,
+	});
+};
+
+test("Pi re-sent the answer's request without strict tools (17 unions, a 400): the period is Pi's, no refresh at 3,420 s, Pi's renewals go out, and the message at 4,000 s reads the cache", { skip: noWarmer }, async (t) => {
+	const s = await strictSession(17, { piWarmer: true });
+	t.after(() => s.done());
+	assert.deepEqual(s.wires.filter((w) => w.kind === "answer").map((w) => [w.rejected ?? false, w.write]), [[true, 0], [false, 600_000]], "the strict form rejected, the plain one wrote the hour cache");
+	await s.until(270);
+	assert.equal(s.decide(), undefined, "not taken: Pi's warming decides");
+	assert.match(await s.command(), /left to Pi's own warming: Pi re-sent the last answer's request in another form/);
+	await s.until(3700);
+	assert.deepEqual(s.wires.filter((w) => w.kind === "refresh"), [], "no refresh (it re-sent the rejected form at 3,420 s and got a 400 again)");
+	assert.ok(s.decisions.length > 0 && s.decisions.every((d) => d.answer === undefined), "Pi's questions answered with nothing");
+	const pis = s.wires.filter((w) => w.kind === "pi");
+	assert.ok(pis.length > 0 && pis.every((w) => !w.rejected && w.read === 600_000), "Pi's renewals go out and read the cache");
+	const next = await s.continueAt(4000);
+	assert.equal(next.usage.cacheRead, 600_000, "the message at 4,000 s reads the cache ($0.18, not a rewrite for $3.60)");
+});
+
+test("strict tools within the provider's limits (16 unions): the request is sent as captured, refreshed at 3,420 s reading all 600,000", { skip }, async (t) => {
+	const s = await strictSession(16);
+	t.after(() => s.done());
+	assert.deepEqual(s.wires.map((w) => [w.kind, w.rejected ?? false]), [["answer", false]]);
+	await s.until(270);
+	assert.deepEqual(s.decide(), { action: "stop" }, "taken");
+	await s.until(3700);
+	assert.deepEqual(s.wires.filter((w) => w.kind === "refresh").map((w) => [w.at, w.read, w.cap, w.rejected ?? false]), [[3420, 600_000, 1, false]]);
+});
+
+test("after Pi re-sent the first leg without strict tools, the run's later tool leg is built that way from the start: its period is taken, refreshed at 3,420 s reading all 600,000", { skip }, async (t) => {
+	const s = await strictSession(17, { send: { legs: 2 }, serve: strictProvider(600_000, true) });
+	t.after(() => s.done());
+	assert.deepEqual(s.wires.filter((w) => w.kind === "answer").map((w) => w.rejected ?? false), [true, false, false], "only the first leg's strict form was rejected");
+	await s.until(270);
+	assert.deepEqual(s.decide(), { action: "stop" }, "taken");
+	await s.until(3700);
+	assert.deepEqual(s.wires.filter((w) => w.kind === "refresh").map((w) => [w.at, w.read, w.cap, w.rejected ?? false]), [[3420, 600_000, 1, false]]);
 });
