@@ -184,7 +184,7 @@ test("a session start fetches the data, fills models.json, reloads the models an
 	// The proxy extension may speak before this one's session starts.
 	h.emit("model-upstreams", UNSURE_ROUTES);
 	h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
-	assert.equal(h.statuses.get("cache-keeper-data"), undefined, "nothing is shown before any data was fetched");
+	assert.equal(h.statuses.get("cache-keeper"), "cache lifetime unknown · sub or api $2/$10 per M", "before any data was fetched: Pi's own values, and nothing about providers.dev");
 	assert.equal(h.emitted.at(-1), "model-upstreams:request", "proxy extensions are asked where their models come from");
 	await h.settle();
 
@@ -220,7 +220,9 @@ test("a session start fetches the data, fills models.json, reloads the models an
 	// The session's model is selected again, so it carries the new window.
 	assert.deepEqual(h.selected, ["cliproxyapi/gpt-6.1-sol"]);
 	assert.equal(h.model()?.contextWindow, 922_000);
-	assert.equal(h.statuses.get("cache-keeper-data"), "· sub or api · window ✓ · cache short ⚠ · long ? (in use) · price ✓ · ⚠ login or API key unknown: shorter values");
+	// Login or key, not known: the shorter of the two short lifetimes (a guess), the long one only the key has (not used).
+	// The model has made no request in this session, so no tier is in use: short, then long.
+	assert.equal(h.statuses.get("cache-keeper"), "short 5m ⚠ · long ? · sub or api $2/$10 per M · ⚠ login or API key unknown: shorter values");
 	assert.match(h.notices.join("\n"), /Model data from https:\/\/providers\.dev: 5 models updated/);
 	const saved = JSON.parse(readFileSync(storePath, "utf8"));
 	assert.equal(saved.datasetVersion, "d1");
@@ -233,11 +235,11 @@ test("the next session start asks nothing while the data is fresh; changing the 
 	h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
 	await h.settle();
 	assert.deepEqual(h.requests, []);
-	assert.equal(h.statuses.get("cache-keeper-data"), "· sub or api · window ✓ · cache short ⚠ · long ? (in use) · price ✓ · ⚠ login or API key unknown: shorter values", "the saved data is shown at once");
+	assert.equal(h.statuses.get("cache-keeper"), "short 5m ⚠ · long ? · sub or api $2/$10 per M · ⚠ login or API key unknown: shorter values", "the saved data is shown at once");
 	h.select("openai-codex", "gpt-6.1-sol");
-	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✗ (in use) · price ✓");
+	assert.equal(h.statuses.get("cache-keeper"), "short 5m · long unknown · sub, no per-token price");
 	h.select("openai-codex", "unknown-model");
-	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · providers.dev: no data for this model · cache in use: long");
+	assert.equal(h.statuses.get("cache-keeper"), "cache lifetime unknown · sub, no per-token price · providers.dev: no data for this model");
 });
 
 test("/cache-keeper-refresh fetches again, keeps a value the user set, and a failed refresh keeps models.json", async () => {
@@ -259,14 +261,12 @@ test("/cache-keeper-refresh fetches again, keeps a value the user set, and a fai
 	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
 	assert.match(h.notices.at(-1)!, /could not refresh the model data: offline\. The saved data stays in use\./);
 	assert.equal(readFileSync(modelsPath, "utf8"), before);
-	assert.equal(
-		h.statuses.get("cache-keeper-data"),
-		"· sub or api · window ✓ · cache short ⚠ · long ? (in use) · price ✓ · ⚠ login or API key unknown: shorter values · ⚠ refresh failed: saved data",
-	);
+	// The saved data stays in use, and the footer says so right away, with its age.
+	assert.equal(h.statuses.get("cache-keeper"), "⚠ providers.dev refresh failed: data 1m old · short 5m ⚠ · long ? · sub or api $2/$10 per M · ⚠ login or API key unknown: shorter values");
 	// A refresh that works again takes the warning away.
 	h.state.online = true;
 	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
-	assert.equal(h.statuses.get("cache-keeper-data"), "· sub or api · window ✓ · cache short ⚠ · long ? (in use) · price ✓ · ⚠ login or API key unknown: shorter values");
+	assert.equal(h.statuses.get("cache-keeper"), "short 5m ⚠ · long ? · sub or api $2/$10 per M · ⚠ login or API key unknown: shorter values");
 });
 
 test("with modelData set to false, the values this extension wrote are taken out and the user's stay", async () => {
@@ -282,7 +282,8 @@ test("with modelData set to false, the values this extension wrote are taken out
 	assert.deepEqual(h.requests, []);
 	assert.deepEqual(h.overrides(), { "openai-codex": { modelOverrides: { "gpt-6.1-sol": { contextWindow: 400_000 } } } });
 	assert.deepEqual(JSON.parse(readFileSync(storePath, "utf8")).written, {});
-	assert.equal(h.statuses.get("cache-keeper-data"), undefined);
+	// Pi's own values only: no lifetime for the proxy model any more, and nothing from providers.dev.
+	assert.equal(h.statuses.get("cache-keeper"), "cache lifetime unknown · sub or api $2/$10 per M");
 	writeFileSync(settingsPath, JSON.stringify({ cacheKeeper: { compactBeforeExpiry: false } }));
 });
 
@@ -294,7 +295,7 @@ test("a proxy extension that knows what serves its models: their values, fetched
 	await h.settle();
 	// Nobody said where the proxy's models come from: nothing for them.
 	assert.equal(h.overrides().cliproxyapi, undefined);
-	assert.equal(h.statuses.get("cache-keeper-data"), "· api · providers.dev: no data for this model · cache in use: long");
+	assert.equal(h.statuses.get("cache-keeper"), "cache lifetime unknown · api $2/$10 per M · providers.dev: no data for this model");
 
 	// Said during the session: what is new to look up is fetched, models.json follows.
 	h.requests.length = 0;
@@ -304,7 +305,7 @@ test("a proxy extension that knows what serves its models: their values, fetched
 	// The Claude login keeps the cache for an hour, both tiers; the Codex login has a 5-minute short lifetime.
 	assert.deepEqual(proxy["claude-opus-5-5"], { promptCache: { short: 3600, long: 3600 } });
 	assert.deepEqual(proxy["gpt-6.1-sol"], { contextWindow: 922_000, promptCache: { short: 300 } });
-	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✗ (in use) · price ✓", "no guess, so no warning");
+	assert.equal(h.statuses.get("cache-keeper"), "short 5m · long unknown · sub, no per-token price", "no guess, so no warning");
 	assert.ok(h.requests.some((request) => request.url.includes("/entries?provider=openai")), "what the proxy falls back to is fetched too");
 	// The same again changes nothing and asks nothing.
 	h.requests.length = 0;
@@ -314,14 +315,16 @@ test("a proxy extension that knows what serves its models: their values, fetched
 
 	// Opus on the proxy: the login's hour.
 	h.select("cliproxyapi", "claude-opus-5-5");
-	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✓ (in use) · price ✓");
+	const LOGIN = "short 1h · long 1h · sub, no per-token price";
+	assert.equal(h.statuses.get("cache-keeper"), LOGIN);
 	// An answer from the login changes nothing; one from an API key (the login failed or is cooling down) is warned
 	// about, and the countdown follows the key's 5 minutes.
 	const answered = (upstreams: unknown[], model = "claude-opus-5-5", provider = "cliproxyapi") => h.emit("model-upstreams:answered", { provider, model, upstreams });
 	answered([login("anthropic")]);
-	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✓ (in use) · price ✓");
+	assert.equal(h.statuses.get("cache-keeper"), LOGIN);
 	answered([key("anthropic")]);
-	assert.equal(h.statuses.get("cache-keeper-data"), "· api · window ✓ · cache short ✓ · long ✓ (in use) · price ✓ · ⚠ answered by an API key");
+	// The values follow what answered (the key's 5-minute short cache, its price), with a warning right at the front.
+	assert.equal(h.statuses.get("cache-keeper"), "⚠ answered by an API key · short 5m · long 1h · api $2/$10 per M");
 	// With Pi's short retention the key's cache lasts 5 minutes, the login's an hour.
 	const retention = process.env.PI_CACHE_RETENTION;
 	process.env.PI_CACHE_RETENTION = "short";
@@ -335,7 +338,7 @@ test("a proxy extension that knows what serves its models: their values, fetched
 		else process.env.PI_CACHE_RETENTION = retention;
 	}
 	answered([login("anthropic")]);
-	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✓ (in use) · price ✓");
+	assert.equal(h.statuses.get("cache-keeper"), LOGIN);
 	// Pi asks for the long tier (the default setting); Anthropic says it wrote the short one: the footer follows.
 	h.branch.push({
 		type: "message",
@@ -353,15 +356,16 @@ test("a proxy extension that knows what serves its models: their values, fetched
 		},
 	});
 	h.handlers.get("agent_settled")!({}, h.ctx);
-	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ (in use) · long ✓ · price ✓");
+	// The model's own answer says which tier is in use; it is long expired in this test, so the countdown says cold.
+	assert.equal(h.statuses.get("cache-keeper"), "cache cold · next message full price · short 1h (in use) · long 1h · sub, no per-token price");
 	h.branch.length = 0;
 	h.handlers.get("agent_settled")!({}, h.ctx);
 	// What answered for another model does not touch this one; a new model starts without one.
 	answered([key("anthropic")], "claude-opus-5-5", "anthropic");
-	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✓ (in use) · price ✓");
+	assert.equal(h.statuses.get("cache-keeper"), LOGIN);
 	answered([key("anthropic")]);
 	h.select("cliproxyapi", "claude-opus-5-5");
-	assert.equal(h.statuses.get("cache-keeper-data"), "· sub · window ✓ · cache short ✓ · long ✓ (in use) · price ✓");
+	assert.equal(h.statuses.get("cache-keeper"), LOGIN);
 });
 
 test("routes said while a refresh runs: what they add is fetched when it ends, once", async () => {
@@ -394,7 +398,7 @@ test("nothing is fetched on its own in PI_OFFLINE mode or without a UI, and mode
 	offline.handlers.get("session_start")!({ reason: "startup" }, offline.ctx);
 	await offline.settle();
 	assert.deepEqual(offline.requests, []);
-	assert.equal(offline.statuses.get("cache-keeper-data"), "· api · providers.dev: no data (PI_OFFLINE) · cache in use: long");
+	assert.equal(offline.statuses.get("cache-keeper"), "cache lifetime unknown · api $2/$10 per M · providers.dev: no data (PI_OFFLINE)");
 	delete process.env.PI_OFFLINE;
 	const print = harness();
 	print.handlers.get("session_start")!({ reason: "startup" }, { ...print.ctx, hasUI: false });
@@ -414,12 +418,13 @@ test("providers.dev blocked from the start: the footer says so, and still shows 
 	writeFileSync(modelsPath, "{}");
 	const h = harness({ online: false });
 	h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
-	assert.equal(h.statuses.get("cache-keeper-data"), undefined, "nothing is shown while the first fetch runs");
+	assert.equal(h.statuses.get("cache-keeper"), "cache lifetime unknown · api $2/$10 per M", "nothing about providers.dev while the first fetch runs");
 	await h.settle();
-	assert.equal(h.statuses.get("cache-keeper-data"), "· api · providers.dev: no data, fetch failed · cache in use: long");
+	// Right at the front, before the values that may be missing because of it.
+	assert.equal(h.statuses.get("cache-keeper"), "⚠ providers.dev: no data, fetch failed · cache lifetime unknown · api $2/$10 per M");
 	assert.equal(h.notices.length, 0, "a refresh at the start fails without a notice");
 	// Reachable again: the data replaces the message.
 	h.state.online = true;
 	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
-	assert.doesNotMatch(h.statuses.get("cache-keeper-data")!, /fetch failed|refresh failed/);
+	assert.doesNotMatch(h.statuses.get("cache-keeper")!, /fetch failed|refresh failed/);
 });

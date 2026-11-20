@@ -17,14 +17,29 @@ export interface CacheState {
 	lifetime?: { ms: number; source: string };
 	cached: boolean;
 	expiresAt?: number;
+	/** When the cache was last read or written: the answer, or a later refresh (Pi's or this extension's). */
+	refreshedAt?: number;
 	replied: boolean;
+	/**
+	 * When the latest answer arrived: the latest assistant message whose usage reports a cache read or write, whatever
+	 * its stop reason (an aborted answer that read the cache counts), or a later successful one that reports none (then
+	 * `cached` is false). Refreshes (Pi's or this extension's) do not move it. A new value means a request has gone to
+	 * the provider since: a new keep-warm period.
+	 */
+	answeredAt?: number;
+	/** That answer's prompt: input + cache read + cache write tokens. */
+	answerPrompt?: number;
+	/** With keep-warm on: the tiers that answer reports writing the cache in, where it reports them (Anthropic). */
+	answerTiers?: ("short" | "long")[];
+	/** With keep-warm on: the tier the lifetime is for, the one the latest write reported, else the requested one. */
+	tier?: "short" | "long";
 }
 
 /**
- * The cache tier in use: the one the latest cache write reported (Anthropic says which it wrote), else the one Pi asks
- * for. A compaction starts over.
+ * The cache tier in use: the one the latest cache write reported (Anthropic says which it wrote), else `requested` (the
+ * tier a request was sent with), else the one Pi asks for now. A compaction starts over.
  */
-export function cacheTier(entries: SessionEntry[], model?: { provider: string; id: string }): "short" | "long" {
+export function cacheTier(entries: SessionEntry[], model?: { provider: string; id: string }, requested?: "short" | "long"): "short" | "long" {
 	let reported: "short" | "long" | undefined;
 	for (const entry of entries) {
 		if (entry.type === "compaction") reported = undefined;
@@ -35,43 +50,74 @@ export function cacheTier(entries: SessionEntry[], model?: { provider: string; i
 			if (cacheWrite > 0 && cacheWrite1h !== undefined) reported = cacheWrite1h > 0 ? "long" : "short";
 		}
 	}
-	return reported ?? (process.env.PI_CACHE_RETENTION === "long" ? "long" : "short");
+	return reported ?? requested ?? (process.env.PI_CACHE_RETENTION === "long" ? "long" : "short");
 }
 
 /**
- * `warmedAt` is when this extension last re-sent the cached request to keep it warm. Pi's own refreshes are
- * `cache_warm` usage entries; the extension's are kept in memory, because an extension cannot add usage entries.
+ * `warmedAt` is when the latest of the current period's refreshes by this extension that reported a hit left (a period
+ * the extension kept warm before it was left to Pi). Pi's own refreshes are `cache_warm` usage entries; the extension's
+ * are kept in memory, because an extension cannot add usage entries. A period the extension keeps warm does not count its
+ * expiry here (see `expiryOf` in warm-period.ts).
+ * `keepWarmOn` changes three things, so the countdown follows the cache the period keeps warm; with it off everything
+ * is counted as before:
+ * - the expiry is counted from the latest real answer, so a failed or aborted answer whose usage reports a cache read
+ *   or write moves it too (otherwise such an answer is skipped);
+ * - a `cache_warm` entry later than the answer counts wherever it sits: Pi appends an answer when it has finished
+ *   streaming, with the timestamp of its start, so Pi's refresh during a long answer can come before it on the branch;
+ * - the tier is the one the model's own answers reported (as `cacheTier` with a model): another model's cache is
+ *   another cache.
+ * `requested`, the tier the cached request was sent with, stands in for the retention Pi asks for now where no answer
+ * reported one.
  */
-export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?: number): CacheState {
+export function cacheState(model: Model<Api>, entries: SessionEntry[], warmedAt?: number, keepWarmOn = false, requested?: "short" | "long"): CacheState {
 	let refreshedAt: number | undefined;
+	let latestWarm: number | undefined;
+	let answer: { at: number; prompt: number; tiers?: ("short" | "long")[] } | undefined;
 	let reported: "short" | "long" | undefined;
 	let replied = false;
 	for (const entry of entries) {
 		if (entry.type === "compaction") {
-			refreshedAt = reported = undefined;
+			refreshedAt = reported = answer = latestWarm = undefined;
 			replied = false;
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
-			const { cacheRead, cacheWrite, cacheWrite1h } = entry.message.usage;
-			if (cacheWrite > 0 && cacheWrite1h !== undefined) reported = cacheWrite1h > 0 ? "long" : "short";
+			const { input, cacheRead, cacheWrite, cacheWrite1h } = entry.message.usage;
+			const own = !keepWarmOn || (entry.message.provider === model.provider && entry.message.model === model.id);
+			if (own && cacheWrite > 0 && cacheWrite1h !== undefined) reported = cacheWrite1h > 0 ? "long" : "short";
+			const failed = entry.message.stopReason === "error" || entry.message.stopReason === "aborted";
+			if (cacheRead + cacheWrite > 0 || !failed) {
+				const tiers: ("short" | "long")[] | undefined =
+					cacheWrite > 0 && cacheWrite1h !== undefined
+						? [...(cacheWrite > cacheWrite1h ? (["short"] as const) : []), ...(cacheWrite1h > 0 ? (["long"] as const) : [])]
+						: undefined;
+				answer = { at: entry.message.timestamp, prompt: input + cacheRead + cacheWrite, ...(tiers ? { tiers } : {}) };
+			}
 			// A failed request may not have reached the cache.
-			if (entry.message.stopReason === "error" || entry.message.stopReason === "aborted") continue;
+			if (entry.message.stopReason === "error" || entry.message.stopReason === "aborted") {
+				if (keepWarmOn && cacheRead + cacheWrite > 0) refreshedAt = entry.message.timestamp;
+				continue;
+			}
 			replied = true;
 			refreshedAt = cacheRead + cacheWrite > 0 ? entry.message.timestamp : undefined;
-		} else if (entry.type === "usage" && entry.kind === "cache_warm" && refreshedAt !== undefined) {
-			refreshedAt = Math.max(refreshedAt, Date.parse(entry.timestamp));
+		} else if (entry.type === "usage" && entry.kind === "cache_warm") {
+			const at = Date.parse(entry.timestamp);
+			latestWarm = Math.max(latestWarm ?? at, at);
+			if (refreshedAt !== undefined) refreshedAt = Math.max(refreshedAt, at);
 		}
 	}
+	if (keepWarmOn && refreshedAt !== undefined && latestWarm !== undefined) refreshedAt = Math.max(refreshedAt, latestWarm);
 	// A refresh before the latest real request (or before a compaction, which leaves refreshedAt unset) is stale.
 	if (refreshedAt !== undefined && warmedAt !== undefined) refreshedAt = Math.max(refreshedAt, warmedAt);
-	const declared = model.promptCache?.[reported ?? (process.env.PI_CACHE_RETENTION === "long" ? "long" : "short")];
+	const asked = requested ?? (process.env.PI_CACHE_RETENTION === "long" ? "long" : "short");
+	const tier = reported ?? asked;
+	const declared = model.promptCache?.[tier];
 	let lifetime: CacheState["lifetime"];
 	if (declared !== undefined) lifetime = { ms: declared * 1000, source: "declared by the model" };
 	else if (reported) lifetime = { ms: REPORTED_TIER_SECONDS[reported] * 1000, source: "reported by the provider" };
 	else if (hasExplicitPromptCache(model)) lifetime = { ms: OPENAI_MIN_LIFETIME_SECONDS * 1000, source: "OpenAI's minimum" };
 	else if (isKimiOnMoonshot(model)) {
-		const long = process.env.PI_CACHE_RETENTION === "long" && (model.compat as OpenAICompletionsCompat | undefined)?.supportsLongCacheRetention !== false;
+		const long = asked === "long" && (model.compat as OpenAICompletionsCompat | undefined)?.supportsLongCacheRetention !== false;
 		lifetime = { ms: KIMI_TTL_SECONDS[long ? "long" : "short"] * 1000, source: long ? "Kimi's 1-hour option" : "Kimi's default" };
 	}
 	const expiresAt = lifetime && refreshedAt !== undefined ? refreshedAt + lifetime.ms : undefined;
-	return { lifetime, cached: refreshedAt !== undefined, expiresAt, replied };
+	return { lifetime, cached: refreshedAt !== undefined, expiresAt, ...(refreshedAt === undefined ? {} : { refreshedAt }), replied, ...(keepWarmOn ? { tier } : {}), ...(answer ? { answeredAt: answer.at, answerPrompt: answer.prompt, ...(keepWarmOn && answer.tiers ? { answerTiers: answer.tiers } : {}) } : {}) };
 }
