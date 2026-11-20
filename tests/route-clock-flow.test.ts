@@ -1,0 +1,344 @@
+// The cache's clock through Pi's own adapters: the extension beside a gateway whose route changes, every request built by
+// Pi's real adapter (Anthropic Messages, OpenAI Chat Completions) and answered from an in-memory transport that keeps the
+// provider's cache as the provider would (what is read, what is written, how long it lasts). Pi's own warmer, where a
+// case needs it, is Pi's real CacheWarmer. Nothing leaves the process: the global fetch throws.
+import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test, { mock } from "node:test";
+
+const dir = mkdtempSync(join(tmpdir(), "pck-route-clock-"));
+process.env.PI_CODING_AGENT_DIR = dir;
+process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
+const { default: cacheKeeper } = await import("../index.ts");
+const { formatRemaining } = await import("../trace.ts");
+const realFetch = globalThis.fetch;
+globalThis.fetch = (async () => {
+	throw new Error("no network in tests");
+}) as typeof fetch;
+process.on("exit", () => (globalThis.fetch = realFetch));
+
+type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
+const catalogFile = new URL("../node_modules/@earendil-works/pi-ai/dist/models.generated.js", import.meta.url);
+const warmerFile = new URL("../node_modules/@earendil-works/pi-coding-agent/dist/core/cache-warmer.js", import.meta.url);
+const { MODELS } = existsSync(catalogFile) ? await import(catalogFile.href) : { MODELS: undefined };
+const { CacheWarmer } = existsSync(warmerFile) ? await import(warmerFile.href) : { CacheWarmer: undefined };
+const skip = MODELS ? false : "the installed pi-ai has no model catalog";
+const noWarmer = skip || (CacheWarmer ? false : "the installed Pi has no CacheWarmer");
+const { normalizeContext } = (await import("@earendil-works/pi-ai/utils/transcript")) as { normalizeContext: (context: unknown) => { messages: unknown[] } };
+const adapter = async (api: string) => (await import(`@earendil-works/pi-ai/api/${api}`)) as { streamSimple: (model: unknown, context: unknown, options: unknown) => { result: () => Promise<Any> } };
+
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+const START = 10_000;
+const sec = () => (Date.now() - START) / 1000;
+const user = { role: "user", content: [{ type: "text", text: "Explain the changes in detail." }], timestamp: START - 100 };
+const tools = [{ name: "read", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } }];
+const transcript = normalizeContext({ systemPrompt: "You are pi.", messages: [user], tools }).messages;
+
+// A provider's answer, as its stream reports it: what was read from the cache, what was written and into which cache
+// (Anthropic reports the 1-hour part; Chat Completions only what was read).
+function answer(api: string, prompt: number, read: number, write: number, oneHour: number, output: number): Response {
+	const events: unknown[] =
+		api === "anthropic-messages"
+			? [
+					{ type: "message_start", message: { id: "m", type: "message", role: "assistant", model: "m", content: [], usage: { input_tokens: prompt - read - write, output_tokens: 1, cache_read_input_tokens: read, cache_creation_input_tokens: write, cache_creation: { ephemeral_5m_input_tokens: write - oneHour, ephemeral_1h_input_tokens: oneHour } } } },
+					{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+					{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Checkpoint." } },
+					{ type: "content_block_stop", index: 0 },
+					{ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: output } },
+					{ type: "message_stop" },
+				]
+			: [
+					{ id: "c", model: "m", object: "chat.completion.chunk", created: 0, choices: [{ index: 0, delta: { role: "assistant", content: "Checkpoint." }, finish_reason: "stop" }] },
+					{ id: "c", model: "m", object: "chat.completion.chunk", created: 0, choices: [], usage: { prompt_tokens: prompt, completion_tokens: output, total_tokens: prompt + output, prompt_tokens_details: { cached_tokens: read } } },
+				];
+	const text = events.map((e) => `${api === "anthropic-messages" ? `event: ${(e as { type: string }).type}\n` : ""}data: ${JSON.stringify(e)}\n\n`).join("") + (api === "anthropic-messages" ? "" : "data: [DONE]\n\n");
+	return new Response(text, { headers: { "content-type": "text/event-stream" } });
+}
+
+type Kind = "refresh" | "summary" | "pi";
+interface Wire {
+	at: number;
+	kind: Kind;
+	read: number;
+	write: number;
+	cap?: number;
+}
+interface Setup {
+	model: Any;
+	/** The proxy's routes and providers.dev's lifetimes for them (the extension's saved data). */
+	store: Record<string, unknown>;
+	settings: Record<string, unknown>;
+	/** The prompt's size; the period's answer, as the provider reports it. */
+	prompt: number;
+	answered: { read: number; write: number; oneHour: number };
+	/** The provider: given what is sent and when, what is read and written, and into which cache. */
+	serve: (w: { kind: Kind; at: number }) => { read: number; write: number; oneHour: number };
+	/** Called just before the extension's payload hook of a request it sends (a credential lookup, say). */
+	beforeHook?: (kind: Kind) => void;
+}
+
+// One session: the period's request built by Pi's real adapter and answered at 0 s (Pi idle from then), the extension's
+// refreshes and summaries through the same adapter, Pi's own warmer (when started) through it too.
+async function session(s: Setup) {
+	writeFileSync(join(dir, "settings.json"), JSON.stringify({ cacheKeeper: { modelData: false, cacheRetention: "short", compactAtPercent: 0, minContextTokens: 140_000, ...s.settings } }));
+	writeFileSync(join(dir, "cache-keeper-models.json"), JSON.stringify({ version: 1, written: {}, ...s.store }));
+	writeFileSync(join(dir, "cache-keeper.jsonl"), "");
+	delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-cache-keeper.warm-misses")];
+	delete process.env.PI_CACHE_RETENTION;
+	mock.timers.reset();
+	mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"], now: START - 100 });
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	const commands = new Map<string, (args: string, ctx: unknown) => unknown>();
+	const bus = new Map<string, (payload: unknown) => void>();
+	cacheKeeper({
+		on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(event, handler),
+		registerEntryRenderer: () => {},
+		events: { on: (name: string, handler: (payload: unknown) => void) => (bus.set(name, handler), () => {}), emit: () => {} },
+		registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => unknown }) => commands.set(name, command.handler),
+		appendEntry: () => {},
+		getThinkingLevel: () => "off",
+	} as never);
+	const { streamSimple } = await adapter(s.model.api);
+	const wires: Wire[] = [];
+	const statuses: string[] = [];
+	const notes: string[] = [];
+	const branch: Any[] = [];
+	let compaction: Promise<unknown> | undefined;
+	const compactions: number[] = [];
+	// The in-memory provider: what each request reads and writes.
+	const transport = (kind: Kind) => async (_input: unknown, init?: { body?: unknown }) => {
+		const body = JSON.parse(String(init?.body));
+		const used = s.serve({ kind, at: sec() });
+		wires.push({ at: sec(), kind, read: used.read, write: used.write, cap: body.max_tokens ?? body.max_completion_tokens });
+		return answer(s.model.api, s.prompt + 4, used.read, used.write, used.oneHour, kind === "summary" ? 20 : 1);
+	};
+	const ctx: Any = {
+		hasUI: true,
+		mode: "tui",
+		cwd: dir,
+		model: s.model,
+		isIdle: () => true,
+		hasPendingMessages: () => false,
+		isProjectTrusted: () => false,
+		getContextUsage: () => ({ tokens: s.prompt }),
+		ui: { setStatus: (key: string, text: string) => key === "cache-keeper" && statuses.push(text), notify: (text: string) => notes.push(text), theme: { fg: (_c: string, text: string) => text } },
+		sessionManager: {
+			getBranch: () => branch,
+			getSessionId: () => "s1",
+			getSessionFile: () => undefined,
+			appendUsage: (kind: string, provider: string, model: string, usage: unknown) => {
+				const entry = { type: "usage", id: `w${branch.length}`, parentId: branch.at(-1)?.id ?? null, kind, provider, model, usage, timestamp: new Date().toISOString() };
+				branch.push(entry);
+				return entry;
+			},
+		},
+		modelRegistry: {
+			isUsingOAuth: () => false,
+			getProvider: () => undefined,
+			getAvailable: () => [s.model],
+			streamSimple: (m: Any, context: unknown, options: Any) => {
+				const kind: Kind = options.maxTokens === 1 ? "refresh" : "summary";
+				return streamSimple(m, context, {
+					...options,
+					apiKey: "sk-fixture",
+					maxRetries: 0,
+					cacheRetention: "short",
+					onPayload: async (params: unknown) => {
+						s.beforeHook?.(kind);
+						return options.onPayload(params);
+					},
+					fetch: transport(kind),
+				});
+			},
+		},
+		compact: () => {
+			compactions.push(sec());
+			compaction = emit("session_before_compact", {
+				reason: "manual",
+				branchEntries: [...branch],
+				signal: new AbortController().signal,
+				preparation: { tokensBefore: s.prompt, firstKeptEntryId: "u", messagesToSummarize: [], turnPrefixMessages: [], isSplitTurn: false, fileOps: { read: new Set(), written: new Set(), edited: new Set() }, settings: { reserveTokens: 16_384, keepRecentTokens: 20_000 } },
+			}) as Promise<unknown>;
+		},
+	};
+	const emit = (event: string, payload: unknown = {}) => handlers.get(event)?.(payload, ctx);
+	emit("session_start");
+	// The period's request, as Pi sends it, and its answer at 0 s.
+	emit("context_with_system", { messages: transcript });
+	let original: unknown;
+	await streamSimple(s.model, { messages: transcript }, {
+		apiKey: "sk-fixture",
+		maxTokens: 8192,
+		cacheRetention: "short",
+		maxRetries: 0,
+		onPayload: async (payload: Record<string, unknown>) => {
+			original = (await emit("before_provider_request", { payload })) ?? payload;
+			throw new Error("captured without transport");
+		},
+	}).result();
+	assert.ok(original, "the adapter built the period's request");
+	mock.timers.setTime(START);
+	const { read, write, oneHour } = s.answered;
+	const usage = { input: s.prompt - read - write, output: 5, cacheRead: read, cacheWrite: write, ...(s.model.api === "anthropic-messages" ? { cacheWrite1h: oneHour } : {}), totalTokens: s.prompt + 5, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, total: 0 } };
+	const reply = { role: "assistant", content: [{ type: "text", text: "Here are the changes." }], api: s.model.api, provider: s.model.provider, model: s.model.id, timestamp: START, stopReason: "stop", usage };
+	emit("message_end", { message: reply });
+	branch.push({ type: "message", id: "u", parentId: null, timestamp: new Date(START - 100).toISOString(), message: user });
+	branch.push({ type: "message", id: "a", parentId: "u", timestamp: new Date(START).toISOString(), message: reply });
+	emit("agent_settled", { aborted: false });
+	// What a proxy says served a request of the model.
+	const announce = (upstreams: unknown[]) => bus.get("model-upstreams:answered")?.({ provider: s.model.provider, model: s.model.id, upstreams });
+	const until = async (at: number, each?: () => void | Promise<void>) => {
+		while (sec() < at) {
+			mock.timers.tick(1000);
+			await flush();
+			await flush();
+			await each?.();
+		}
+		if (compaction) await compaction;
+	};
+	const decide = () => emit("cache_warming_decision", { type: "cache_warming_decision", warmCost: 0.18, missCost: 2.07, continuationProbability: 0.15, action: "warm" }) as { action?: string } | undefined;
+	const command = async () => {
+		notes.length = 0;
+		await commands.get("cache-keeper")?.("", ctx);
+		return notes.join("\n");
+	};
+	const traces = () => readFileSync(join(dir, "cache-keeper.jsonl"), "utf8").split("\n").filter(Boolean).map((line: string) => JSON.parse(line));
+	return { ctx, emit, wires, statuses, compactions, branch, until, decide, command, announce, traces, streamSimple, compaction: () => compaction, done: () => (emit("session_shutdown"), mock.timers.reset()) };
+}
+
+const claudeGateway = () => ({ ...MODELS.anthropic["claude-sonnet-4-6"], provider: "gateway-fixture", baseUrl: "https://fixture.invalid", promptCache: { short: 3600, long: 3600 } });
+const deepseek = (provider: string, promptCache: { short: number; long: number }) => ({ ...MODELS.openrouter["deepseek/deepseek-v4-pro"], provider, baseUrl: "https://gateway.invalid/v1", promptCache });
+const CLAUDE_ID = "claude-sonnet-4-6";
+const DEEPSEEK_ID = "deepseek/deepseek-v4-pro";
+
+// ----------------------------------------------------------------------------- the first review's finding 1, and 2's first
+
+for (const on of [11, 1]) {
+	test(`an end for good, then a summary: the Anthropic gateway's refresh ${on} reads 570,000 and writes 30,000 into the five-minute cache`, { skip }, async (t) => {
+		const N = 600_000;
+		let expires = 3600;
+		let life = 3600;
+		let refreshes = 0;
+		const s = await session({
+			model: claudeGateway(),
+			store: { providers: {}, upstreams: {} },
+			settings: { keepWarmMinutes: 720, compactBeforeExpiry: true },
+			prompt: N,
+			answered: { read: 0, write: N, oneHour: N },
+			serve: ({ kind, at }) => {
+				if (kind === "refresh") refreshes++;
+				// The gateway fell over to a route whose cache lasts five minutes: 95% of the prompt is still read there.
+				const switched = kind === "refresh" && refreshes === on;
+				if (switched) life = 300;
+				const read = switched ? 570_000 : at < expires ? N : 0;
+				expires = at + life;
+				return { read, write: N - read, oneHour: life === 3600 ? N - read : 0 };
+			},
+		});
+		t.after(() => s.done());
+		const step = 3420;
+		const refreshedAt = Array.from({ length: on }, (_, i) => (i + 1) * step);
+		const last = refreshedAt.at(-1)!;
+		await s.until(last + 30);
+		assert.deepEqual(s.wires.map((w) => [w.kind, w.at, w.cap]), refreshedAt.map((at) => ["refresh", at, 1]), "every refresh capped at one token");
+		const stops = s.traces().filter((r: Any) => r.stop);
+		if (on === 11) {
+			assert.deepEqual(stops.map((r: Any) => r.stop), ["budget"], "warming ended on its budget");
+			assert.deepEqual(s.decide(), { action: "stop" }, "Pi's warming stays stopped");
+		} else {
+			assert.deepEqual(stops.map((r: Any) => [r.stop, r.reason]), [["unable", "the extension's refresh reports a 5 min cache write; the request's cache lasts 60 min by the route's data"]], "handed over");
+			assert.equal(s.decide(), undefined, "Pi's warming decides");
+		}
+		// The countdown runs to five minutes after that refresh left.
+		const expiry = last + 300;
+		assert.ok(s.statuses.at(-1)?.startsWith(`cache warm · ${formatRemaining((expiry - sec()) * 1000)} left`), s.statuses.at(-1));
+		assert.match(await s.command(), new RegExp(`cache: ${formatRemaining((expiry - sec()) * 1000)} left \\(lifetime 5 min, the shortest lifetime read since\\)`));
+		await s.until(41_300);
+		const summaries = s.wires.filter((w) => w.kind === "summary");
+		assert.deepEqual(summaries.map((w) => [w.at, w.read, w.write]), [[expiry - 20, N, 0]], "the summary leaves 20 s before that expiry and reads the whole prompt");
+		assert.ok(s.wires.every((w) => w.at < expiry), "nothing leaves at or after it (41,200 s on the second review)");
+		assert.deepEqual(s.wires.filter((w) => w.kind === "refresh").length, on, `no refresh after it (6,840 s)`);
+	});
+}
+
+// A Chat Completions gateway whose period runs on the private account's hour; its public fallback's cache lasts 150 s.
+const chatStore = (fallbackShort: number) => ({
+	upstreams: { "switchable-gateway": { [DEEPSEEK_ID]: { upstreams: [{ provider: "private-account", model: DEEPSEEK_ID, subscription: false }] } } },
+	providers: { "private-account": { [DEEPSEEK_ID]: { short: 3600, long: 3600 } }, openrouter: { [DEEPSEEK_ID]: { short: fallbackShort } } },
+});
+const FALLBACK = [{ provider: "openrouter", model: DEEPSEEK_ID, subscription: false }];
+
+test("a refresh that misses while the gateway announces its 150-second route: no summary at 3,580 s, as on 0.5.3", { skip }, async (t) => {
+	const N = 180_000;
+	let expires = 3600;
+	let life = 3600;
+	let s: Awaited<ReturnType<typeof session>>;
+	s = await session({
+		model: deepseek("switchable-gateway", { short: 3600, long: 3600 }),
+		store: chatStore(150),
+		settings: { keepWarmMinutes: 120, compactBeforeExpiry: true },
+		prompt: N,
+		answered: { read: N, write: 0, oneHour: 0 },
+		serve: ({ kind, at }) => {
+			if (kind === "refresh") {
+				// The private account failed: the public route answers, without the cache, and says so.
+				life = 150;
+				expires = at;
+				s.announce(FALLBACK);
+			}
+			const read = at < expires ? N : 0;
+			expires = at + life;
+			return { read, write: 0, oneHour: 0 };
+		},
+	});
+	t.after(() => s.done());
+	await s.until(4000);
+	assert.deepEqual(s.wires.map((w) => [w.kind, w.at, w.read]), [["refresh", 3420, 0]], "the refresh missed; nothing after it");
+	assert.deepEqual(s.compactions, [], "no summary: the route changed, so the cache's expiry is unknown");
+	assert.match(await s.command(), /cache: expired \(lifetime 3 min, the shortest lifetime read since\), counted as expired: the route changed/);
+	assert.match(s.statuses.at(-1) ?? "", /^cache cold/);
+});
+
+for (const route of ["the 150-second route is announced just before the summary's payload hook", "the route stays"] as const) {
+	test(`a covered period, compacting before expiry at 3,580 s: ${route}`, { skip }, async (t) => {
+		const N = 180_000;
+		let expires = 3600;
+		let life = 3600;
+		let s: Awaited<ReturnType<typeof session>>;
+		const changes = route.startsWith("the 150");
+		s = await session({
+			model: deepseek("switchable-gateway", { short: 3600, long: 3600 }),
+			store: chatStore(150),
+			settings: { keepWarmMinutes: 30, compactBeforeExpiry: true },
+			prompt: N,
+			answered: { read: N, write: 0, oneHour: 0 },
+			serve: ({ at }) => {
+				const read = at < expires ? N : 0;
+				expires = at + life;
+				return { read, write: 0, oneHour: 0 };
+			},
+			// The credential lookup: the gateway fell over meanwhile, and says so before the payload hook.
+			beforeHook: (kind) => {
+				if (kind !== "summary" || !changes) return;
+				life = 150;
+				expires = sec();
+				s.announce(FALLBACK);
+			},
+		});
+		t.after(() => s.done());
+		await s.until(4000);
+		assert.deepEqual(s.traces().filter((r: Any) => r.stop).map((r: Any) => r.stop), ["limit"], "the hour covers the 30 minutes");
+		assert.deepEqual(s.compactions, [3580]);
+		const record = s.traces().find((r: Any) => r.event === "compact");
+		if (changes) {
+			assert.deepEqual(s.wires, [], "nothing reaches the transport");
+			assert.deepEqual([record.outcome, record.reason], ["cancelled", "the prompt cache's expiry became unknown before the summary request left: the route changed"]);
+			assert.deepEqual(await s.compaction(), { cancel: true });
+		} else {
+			assert.deepEqual(s.wires.map((w) => [w.kind, w.at, w.read]), [["summary", 3580, N]], "the summary reads the whole prompt");
+			assert.equal(record.outcome, "cached");
+		}
+	});
+}
