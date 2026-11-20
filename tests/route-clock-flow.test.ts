@@ -77,6 +77,8 @@ interface Setup {
 	serve: (w: { kind: Kind; at: number }) => { read: number; write: number; oneHour: number };
 	/** Called just before the extension's payload hook of a request it sends (a credential lookup, say). */
 	beforeHook?: (kind: Kind) => void;
+	/** Pi's own warmer runs beside the extension, started with the period's request, asking the extension each time. */
+	piWarmer?: boolean;
 }
 
 // One session: the period's request built by Pi's real adapter and answered at 0 s (Pi idle from then), the extension's
@@ -165,6 +167,16 @@ async function session(s: Setup) {
 	};
 	const emit = (event: string, payload: unknown = {}) => handlers.get(event)?.(payload, ctx);
 	emit("session_start");
+	// Pi's own warmer: its refreshes through the same adapter and provider; its questions to the extension, recorded.
+	const decisions: { at: number; answer: string | undefined }[] = [];
+	const warmer =
+		s.piWarmer && CacheWarmer
+			? new CacheWarmer({ streamSimple: (m: Any, context: unknown, options: Any) => streamSimple(m, context, { ...options, apiKey: "sk-fixture", maxRetries: 0, fetch: transport("pi") }) }, ctx.sessionManager, () => "idle", async (event: { action: string }) => {
+					const result = emit("cache_warming_decision", event) as { action?: string } | undefined;
+					decisions.push({ at: Math.round(sec()), answer: result?.action });
+					return result?.action ?? event.action;
+				})
+			: undefined;
 	// The period's request, as Pi sends it, and its answer at 0 s.
 	emit("context_with_system", { messages: transcript });
 	let original: unknown;
@@ -179,6 +191,7 @@ async function session(s: Setup) {
 		},
 	}).result();
 	assert.ok(original, "the adapter built the period's request");
+	warmer?.start({ model: s.model, context: { messages: transcript }, options: { cacheRetention: "short" } }, () => true);
 	mock.timers.setTime(START);
 	const { read, write, oneHour } = s.answered;
 	const usage = { input: s.prompt - read - write, output: 5, cacheRead: read, cacheWrite: write, ...(s.model.api === "anthropic-messages" ? { cacheWrite1h: oneHour } : {}), totalTokens: s.prompt + 5, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, total: 0 } };
@@ -187,6 +200,7 @@ async function session(s: Setup) {
 	branch.push({ type: "message", id: "u", parentId: null, timestamp: new Date(START - 100).toISOString(), message: user });
 	branch.push({ type: "message", id: "a", parentId: "u", timestamp: new Date(START).toISOString(), message: reply });
 	emit("agent_settled", { aborted: false });
+	warmer?.onAgentSettled();
 	// What a proxy says served a request of the model.
 	const announce = (upstreams: unknown[]) => bus.get("model-upstreams:answered")?.({ provider: s.model.provider, model: s.model.id, upstreams });
 	const until = async (at: number, each?: () => void | Promise<void>) => {
@@ -205,7 +219,7 @@ async function session(s: Setup) {
 		return notes.join("\n");
 	};
 	const traces = () => readFileSync(join(dir, "cache-keeper.jsonl"), "utf8").split("\n").filter(Boolean).map((line: string) => JSON.parse(line));
-	return { ctx, emit, wires, statuses, compactions, branch, until, decide, command, announce, traces, streamSimple, compaction: () => compaction, done: () => (emit("session_shutdown"), mock.timers.reset()) };
+	return { ctx, emit, wires, decisions, statuses, compactions, branch, until, decide, command, announce, traces, streamSimple, compaction: () => compaction, done: () => (warmer?.cancel(), emit("session_shutdown"), mock.timers.reset()) };
 }
 
 const claudeGateway = () => ({ ...MODELS.anthropic["claude-sonnet-4-6"], provider: "gateway-fixture", baseUrl: "https://fixture.invalid", promptCache: { short: 3600, long: 3600 } });
@@ -413,4 +427,84 @@ test("another route with the same hour announced at 100 s, the first again at 13
 	assert.match(stops[0].reason, /^the period's answer was served by account-a\/.*, and a request of the model was served by account-b\/.* since: a cache on one route says nothing about the other's$/);
 	assert.match(s.statuses.at(-1) ?? "", /^cache cold · next message full price · keep-warm: Pi's \(the route changed\)/);
 	assert.match(await s.command(), /\ncache: expired \(lifetime 60 min, declared by the model\), counted as expired: the route changed\n/);
+});
+
+// ------------------------------------------------------------------------------- the third review's finding 3: Pi's question
+
+// A Chat Completions gateway whose 300-second route gives way at 100 s to another, announced, with a 150-second or a
+// 600-second cache; a 1,000,000-token prompt. Pi's own warmer keeps the 270-second cadence of the first route. The
+// period is Pi's from the announcement; Pi is stopped only once nothing seen says the cache is alive.
+for (const [label, ttl] of [["150-second", 150], ["600-second", 600]] as const) {
+	test(`Pi's real warmer after a hand-over: the ${label} route announced at 100 s`, { skip: noWarmer }, async (t) => {
+		const N = 1_000_000;
+		let expires = 300;
+		const s = await session({
+			model: deepseek("test-gateway", { short: 300, long: 300 }),
+			store: {
+				upstreams: { "test-gateway": { [DEEPSEEK_ID]: { upstreams: [{ provider: "ordinary-account", model: DEEPSEEK_ID, subscription: false }] } } },
+				providers: { "ordinary-account": { [DEEPSEEK_ID]: { short: 300 } }, openrouter: { [DEEPSEEK_ID]: { short: ttl } } },
+			},
+			settings: { keepWarmMinutes: 120, compactBeforeExpiry: false },
+			prompt: N,
+			answered: { read: N, write: 0, oneHour: 0 },
+			piWarmer: true,
+			serve: ({ at }) => {
+				const read = at < expires ? N : 0;
+				expires = at + ttl;
+				return { read, write: 0, oneHour: 0 };
+			},
+		});
+		t.after(() => s.done());
+		await s.until(100);
+		expires = 100 + ttl;
+		s.announce([{ provider: "openrouter", model: DEEPSEEK_ID, subscription: false }]);
+		await s.until(1850);
+		assert.deepEqual(s.wires.filter((w) => w.kind !== "pi"), [], "the extension sends nothing");
+		const pi = s.wires.filter((w) => w.kind === "pi");
+		if (ttl === 150) {
+			// Gone by 150 s: Pi's six full-price refreshes ($5.73 on the third review) are stopped at the first.
+			assert.deepEqual(s.decisions, [{ at: 270, answer: "stop" }]);
+			assert.deepEqual(pi, []);
+		} else {
+			// Gone by 300 s, then by 300 s after each of Pi's own refreshes: none is stopped, and each reads the cache.
+			assert.deepEqual(s.decisions, [270, 540, 810, 1080, 1350, 1620].map((at) => ({ at, answer: undefined })));
+			assert.deepEqual(pi.map((w) => [Math.round(w.at), w.read]), [270, 540, 810, 1080, 1350, 1620].map((at) => [at, N]));
+		}
+	});
+}
+
+// The second review's covered period: the hour covers a 30-minute goal, so warming ended on its time limit at the start.
+// Pi's refresh from the run is recorded at 273 s with a five-minute write, and the gateway names its API key's route. Pi
+// asks at 543 s: its own refresh kept the cache alive until 573 s, so it is not stopped. Its refresh, recorded at 544 s,
+// keeps it alive until 844 s; only after that is Pi stopped.
+test("a covered period handed over: Pi's question at 543 s is not stopped, its own receipts count; stopped once nothing says the cache is alive", { skip }, async (t) => {
+	const N = 600_000;
+	const s = await session({
+		model: claudeGateway(),
+		store: {
+			upstreams: { "gateway-fixture": { [CLAUDE_ID]: { upstreams: [{ provider: "claude-subscription", model: CLAUDE_ID, subscription: true }] } } },
+			providers: { "claude-subscription": { [CLAUDE_ID]: { short: 3600, long: 3600 } }, anthropic: { [CLAUDE_ID]: { short: 300, long: 3600 } } },
+		},
+		settings: { keepWarmMinutes: 30, compactBeforeExpiry: false },
+		prompt: N,
+		answered: { read: 0, write: N, oneHour: N },
+		serve: () => ({ read: N, write: 0, oneHour: 0 }),
+	});
+	t.after(() => s.done());
+	const receipt = (fields: Record<string, number>) => s.ctx.sessionManager.appendUsage("cache_warm", s.ctx.model.provider, s.ctx.model.id, { input: 5, output: 1, cacheRead: N, cacheWrite: 0, cacheWrite1h: 0, totalTokens: N + 6, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, ...fields });
+	await s.until(10);
+	assert.deepEqual(s.traces().filter((r: Any) => r.stop).map((r: Any) => r.stop), ["limit"]);
+	assert.deepEqual(s.decide(), { action: "stop" }, "Pi stays stopped while the period holds");
+	await s.until(273);
+	receipt({ cacheRead: 570_000, cacheWrite: 30_000 });
+	s.announce([{ provider: "anthropic", model: CLAUDE_ID, subscription: false }]);
+	await s.until(543);
+	assert.equal(s.decide(), undefined, "Pi's request at 543 s goes out");
+	await s.until(544);
+	receipt({});
+	await s.until(843);
+	assert.equal(s.decide(), undefined, "alive until 844 s by Pi's own refresh");
+	await s.until(845);
+	assert.deepEqual(s.decide(), { action: "stop" }, "nothing seen says the cache is alive any more");
+	assert.deepEqual(s.wires, [], "the extension sends nothing");
 });
