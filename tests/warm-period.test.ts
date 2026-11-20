@@ -12,7 +12,7 @@ test("waiting: the refresh that passes the last gate leaves, and the period is o
 	// After a hit it is waiting again, and the next one may leave.
 	const again = settle(out(1, 275_000), 1, { hit: true });
 	assert.equal(mayLeave(again), true);
-	assert.deepEqual(leave(again, 2, 550_000), { phase: "out", id: 2, sentAt: 550_000 });
+	assert.deepEqual(leave(again, 2, 550_000), { phase: "out", id: 2, sentAt: 550_000, refreshedAt: 275_000 }, "the last hit's time is kept");
 });
 
 test("out: nothing else leaves, whatever happens, until that refresh settles", () => {
@@ -48,13 +48,15 @@ test("waiting or out → ended: budget, time limit, unable", () => {
 	for (const from of [WAITING, out(5)]) {
 		for (const stop of ["budget", "limit", "unable"] as const) {
 			const ended = end(from, stop, `because ${stop}`);
-			assert.deepEqual(ended, { phase: "ended", stop, reason: `because ${stop}` });
+			assert.deepEqual(ended, { phase: "ended", stop, reason: `because ${stop}`, ...(from.phase === "out" ? { out: { id: 5, sentAt: 275_000 } } : {}) });
 			assert.equal(mayLeave(ended), false);
 		}
 	}
-	// Ended while out: that refresh's settlement, a hit included, changes nothing.
-	const ended = end(out(6), "budget", "spent");
-	assert.equal(settle(ended, 6, { hit: true }), ended);
+	// Ended while out: that refresh's settlement leaves it ended; a hit it reports still counts for the expiry.
+	const ended = end(out(6, 275_000), "budget", "spent");
+	assert.deepEqual(settle(ended, 6, { hit: true }), { ...ended, refreshedAt: 275_000 });
+	assert.equal(settle(ended, 6, { hit: false, stop: "missed", reason: "x" }), ended);
+	assert.equal(settle(ended, 7, { hit: true }), ended, "another refresh's hit: nothing");
 });
 
 test("ended: nothing moves it; only a new real answer starts a new period, at waiting", () => {

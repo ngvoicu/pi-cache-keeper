@@ -12,6 +12,7 @@ const settings = (cacheKeeper: Record<string, unknown>) => writeFileSync(join(di
 const readSettings = () => JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
 settings({ keepWarmMinutes: 120, minContextTokens: 100_000 });
 const { default: cacheKeeper } = await import("../index.ts");
+const { formatRemaining } = await import("../trace.ts");
 
 const HOUR = 3_600_000;
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -367,8 +368,10 @@ test("R1: during a run, and between Pi marking the run active and agent_start, t
 	await pi.advance(300_000);
 	assert.deepEqual(pi.piRefreshes, [271_000]);
 	assert.deepEqual(pi.decisions.at(-1)?.answer, { action: "stop" });
-	assert.ok(h.warms.length >= 1, "the extension refreshes for the expiry Pi's refresh moved");
-	assert.equal(h.warms[0].at, 546_000, "25 s before the new expiry (Pi's refresh at 271 s moved it to 571 s)");
+	assert.ok(h.warms.length >= 1, "the extension refreshes");
+	// The period's expiry comes from its own facts (its answer at 1 s), not Pi's refresh during the run: the refresh due at
+	// 276 s goes out as soon as the run settles, a few seconds after Pi's, on the safe side.
+	assert.equal(h.warms[0].at, 276_000, "25 s before the expiry counted from the period's answer");
 });
 
 for (const [label, options] of [
@@ -807,8 +810,9 @@ test("R4: each end reason is recorded once, with the amounts, in the log, the fo
 	r = await ended({ lifetime: 300, cost: WITH_WRITE, respond: () => ({ usage: { cacheRead: 300_000, cacheWrite: 300_000 } }) });
 	assert.deepEqual([r.stop.action, r.stop.stop, r.h.warms.length], ["missed", "missed", 1]);
 	assert.equal(r.stop.reason, "the refresh read only 49% from the cache, so it wrote the context again");
-	// Something gone wrong is marked, right after the countdown.
-	assert.equal(r.footer, `cache warm · 5m left · ⚠ keep-warm ended (a refresh missed the cache): $1.22 spent, a miss costs $2.07${values("5m")}`);
+	// Something gone wrong is marked, right after the countdown. Only a hit moves the period's expiry, so the countdown
+	// still counts from the answer (the miss wrote the cache again; the earlier time is the safe side).
+	assert.equal(r.footer, `cache warm · 0:25 left · ⚠ keep-warm ended (a refresh missed the cache): $1.22 spent, a miss costs $2.07${values("5m")}`);
 
 	// failed: a refresh ended in an error before it reported usage (one that reported a hit first is waiting again).
 	r = await ended({ lifetime: 300, cost: WITH_WRITE, respond: () => ({ stopReason: "error", errorMessage: "overloaded", usage: { input: 0, output: 0, cacheRead: 0 } }) });
@@ -818,7 +822,8 @@ test("R4: each end reason is recorded once, with the amounts, in the log, the fo
 	// unknown: a refresh came back without a prompt in its usage, so what it cost is unknown.
 	r = await ended({ lifetime: 300, cost: WITH_WRITE, respond: () => ({ usage: { input: 0, output: 1, cacheRead: 0, cacheWrite: 0 } }) });
 	assert.deepEqual([r.stop.action, r.stop.stop, r.h.warms.length, r.stop.reason], ["warm", "unknown", 1, "the refresh reported no usage, so what it cost is unknown"]);
-	assert.equal(r.footer, `cache warm · 5m left · ⚠ keep-warm ended (a refresh reported no usage): $0.18 spent, a miss costs $2.07${values("5m")}`);
+	// Not a hit, so the expiry still counts from the answer.
+	assert.equal(r.footer, `cache warm · 0:25 left · ⚠ keep-warm ended (a refresh reported no usage): $0.18 spent, a miss costs $2.07${values("5m")}`);
 	assert.match(r.shown, /keep-warm ended \(a refresh reported no usage\): \$0\.18 spent, a miss costs \$2\.07, until your next message \(the refresh reported no usage, so what it cost is unknown\)/);
 
 	// unable: the cached path no longer checks out (a branch move made the extension forget the request). Pi's
@@ -976,33 +981,40 @@ test("R7/2: another model's reported tier does not set the lifetime of the perio
 	assert.equal(h.warms[0]?.at, 276_000, "25 s before the 5-minute expiry, not the 1-hour one");
 });
 
-test("R7/3: Pi's refresh during a long answer, appended before it, counts: the extension refreshes before the cache expires", async (t) => {
+test("R7/3: an answer that streamed past its cache's last safe refresh moment: the period is Pi's, so Pi's warmer goes on and the extension sends nothing", { skip: noWarmer }, async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	fresh({ compactBeforeExpiry: false });
-	const h = harness({ lifetime: 300, cost: WITH_WRITE });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
 	h.emit("agent_settled");
 	await h.idle(100_000);
-	// A run at 101 s: Pi refreshes the new request at 371 s while the answer streams; the answer, timestamped when it
-	// started (101 s), is appended when it ends, at 420 s, after Pi's cache_warm entry.
+	// A run at 101 s: the answer, stamped when it started streaming (101 s), is appended when it ends, at 420 s. Pi's
+	// warmer, started with the request, refreshes it at 371 s while the answer streams.
+	const pi = withPiWarmer(h);
+	t.after(() => pi.warmer.cancel());
 	h.state.idle = false;
 	h.emit("agent_start");
+	pi.start();
 	const ask = { role: "user", content: [{ type: "text", text: "go" }], timestamp: Date.now() };
 	const payload = { ...h.sent, messages: [...h.sent.messages, { role: "user", content: "go" }] };
 	h.branch.push({ type: "message", id: "u1", parentId: null, timestamp: new Date().toISOString(), message: ask } as never);
 	h.emit("context_with_system", { messages: [ask] });
 	h.emit("before_provider_request", { payload });
 	const answer = { role: "assistant", content: [{ type: "text", text: "long" }], timestamp: Date.now(), stopReason: "stop", provider: h.model.provider, model: h.model.id, usage: { input: 2, output: 5, cacheRead: 600_000, cacheWrite: 0 } };
-	mock.timers.tick(270_000);
-	h.ctx.sessionManager.appendUsage("cache_warm", h.model.provider, h.model.id, h.usage());
-	mock.timers.tick(49_000);
+	await pi.advance(319_000);
+	assert.deepEqual(pi.piRefreshes, [371_000], "Pi refreshed during the run");
 	h.emit("message_end", { message: answer });
 	h.branch.push({ type: "message", id: "a1", parentId: null, timestamp: new Date().toISOString(), message: answer } as never);
 	h.state.idle = true;
 	h.emit("agent_settled");
-	await h.idle(400_000);
-	assert.equal(h.warms[0]?.at, 646_000, "25 s before 671 s, the expiry Pi's 371-s refresh set");
-	assert.deepEqual(h.warms[0].payload, { ...payload, max_tokens: 1 });
+	pi.warmer.onAgentSettled();
+	// The period's own expiry is 101 + 300 = 401 s; its last safe moment, 401 - 12.5 = 388.5 s, passed before Pi went idle
+	// at 420 s: not owned.
+	assert.match(lastFooter(h) ?? "", /keep-warm: Pi's \(no time to refresh\)/);
+	await pi.advance(600_000);
+	assert.deepEqual(h.warms, [], "the extension sends nothing in this period");
+	assert.deepEqual(pi.piRefreshes.slice(0, 3), [371_000, 641_000, 911_000], "Pi's warmer goes on, as with keep-warm off");
+	assert.ok(pi.decisions.filter((d) => d.at > 420_000).every((d) => d.answer === undefined), "Pi is not told to stop");
 });
 
 test("R7/5: a refresh cancelled while it was being prepared reserves nothing and is tried again; ten really go out", async (t) => {
@@ -2051,6 +2063,105 @@ test("the period's rule: a refresh that fails before it leaves ends warming (\"f
 	assert.deepEqual(h.notes.filter((n) => n.includes("could not keep the cache warm")), ["pi-cache-keeper could not keep the cache warm: no API key for cliproxyapi"]);
 });
 
+// ------------------------------------------------------------------------------- the owned period's one expiry
+
+// The reviewer's 1c: a preparation that takes 7 s (a credential lookup). The hit counts from when the refresh left, not
+// from when its preparation started: the cache is warm to 1,958 s, past the window's end at 1,955 s, so no seventh
+// refresh goes out (counted from the start of preparation, 1,951 s, one more went out at 1,926 s).
+test("the owned period's expiry: a hit counts from when its refresh passed the last gate, not from the start of a slow preparation", async (t) => {
+	t.after(() => mock.timers.reset());
+	clock();
+	fresh({ keepWarmMinutes: 30, compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE });
+	h.state.beforePayload = () => {
+		if (h.state.attempts === 6) mock.timers.tick(7_000);
+	};
+	// Pi goes idle at 155 s, so the window ends at 1,955 s.
+	mock.timers.tick(154_000);
+	h.emit("agent_settled");
+	await h.idle(HOUR);
+	assert.deepEqual(
+		h.warms.map((w) => w.at / 1000),
+		[276, 551, 826, 1101, 1376, 1658],
+		"the sixth left at 1,658 s after a 7-s preparation; no seventh",
+	);
+	assert.equal(traces().find((r) => r.stop)?.stop, "limit");
+});
+
+// The reviewer's 1d: the period before's refresh, cancelled by a real answer, settles late with its hit, after the new
+// period's own hit. It moves nothing in the new period: the new period's refresh due at 1,200 s goes out.
+test("the owned period's expiry: a late settlement of the period before's refresh moves nothing in the new period", async (t) => {
+	t.after(() => mock.timers.reset());
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, hold: (n) => n === 1 });
+	h.state.ignoresAbort = true;
+	h.emit("agent_settled");
+	await h.idle(649_000);
+	assert.deepEqual(h.warms.map((w) => w.at / 1000), [276]);
+	// A real answer at 650 s: a new period; the first refresh's stream stays open (the transport ignores the cancellation).
+	h.run(true);
+	await h.idle(331_000);
+	// Held for the model until 10 minutes after the first left (876 s), then sent at 925 s with a hit.
+	assert.deepEqual(h.warms.map((w) => w.at / 1000), [276, 925]);
+	// At 981 s the old stream settles with its hit from 276 s.
+	h.release();
+	await flush();
+	await h.idle(400_000);
+	assert.deepEqual(h.warms.map((w) => w.at / 1000).slice(0, 3), [276, 925, 1200], "the refresh due 25 s before 1,225 s goes out");
+});
+
+// The reviewer's 1e: Pi's own refresh entry recorded at 1,850 s (the receipt of a request sent earlier) after the
+// extension's refresh at 1,711 s: the next refresh counts from 1,711 s and goes out before the cache expires at 3,511 s.
+test("the owned period's expiry: Pi's refresh entries, or when they were recorded, move nothing", async (t) => {
+	t.after(() => mock.timers.reset());
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 1800, cost: WITH_WRITE });
+	h.emit("agent_settled");
+	await h.idle(1_800_000);
+	assert.deepEqual(h.warms.map((w) => w.at / 1000), [1711]);
+	mock.timers.tick(49_000);
+	h.ctx.sessionManager.appendUsage("cache_warm", h.model.provider, h.model.id, h.usage());
+	await h.idle(1_800_000);
+	assert.deepEqual(h.warms.map((w) => w.at / 1000).slice(0, 2), [1711, 3421], "90 s before 3,511 s (counted from Pi's entry: 3,560 s, after the cache expired)");
+});
+
+test("the owned period's expiry is the one value the footer, /cache-keeper, the refresh timer, the last safe moment and compaction before expiry read", async (t) => {
+	t.after(() => mock.timers.reset());
+	clock();
+	fresh({ minContextTokens: 0 });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	h.emit("agent_settled");
+	await h.idle(276_000);
+	// The refresh at 276 s reported a hit: the expiry is 576 s. Pi's entry recorded at 300 s would say 600 s.
+	assert.deepEqual(h.warms.map((w) => w.at / 1000), [276]);
+	mock.timers.tick(23_000);
+	h.ctx.sessionManager.appendUsage("cache_warm", h.model.provider, h.model.id, h.usage());
+	await h.idle(100_000);
+	const expiry = 576_000;
+	const left = `${formatRemaining(expiry - Date.now())} left`;
+	assert.ok(lastFooter(h)?.startsWith(`cache warm · ${left} · `), `the footer: ${lastFooter(h)}`);
+	assert.match(await h.command("cache-keeper"), new RegExp(`cache: ${left} \\(lifetime 5 min`), "/cache-keeper");
+	// A message stays queued: the refresh timer, the last safe moment and compaction before expiry each log what they
+	// counted with.
+	h.state.pending = true;
+	await h.idle(200_000);
+	const records = traces().filter((r) => (r.event === "warm" || r.event === "expiry") && r.secondsLeft !== undefined && Date.parse(r.at) > 400_000);
+	const seen = records.map((r) => [r.event, r.reason.slice(0, 20), Date.parse(r.at) / 1000, r.secondsLeft]);
+	assert.deepEqual(
+		seen,
+		[
+			["warm", "Pi is busy or has qu", 551, 25],
+			["expiry", "Pi is busy or has qu", 556, 20],
+			["warm", "too late: less than ", 564, 12],
+		],
+		"the refresh due at 551 s, compaction at 556 s, the last safe moment passed at 563.5 s",
+	);
+	for (const r of records) assert.equal(Date.parse(r.at) + r.secondsLeft * 1000, expiry, `${r.event} ${r.action}`);
+	assert.equal(h.warms.length, 1);
+});
+
 test("R9: one miss counted, then the command with only a count to clear", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
@@ -2074,6 +2185,7 @@ test("R9: the state belongs to the Pi process: a new extension instance (/new, /
 		const again = harness({ lifetime: 300, cost: WITH_WRITE, respond: () => HALF_MISS });
 		assert.deepEqual(await nextPeriod(again, true), { decided: undefined, refreshed: 0 }, `instance ${n}`);
 		assert.equal(await keepWarmLineOf(again), `${RULE}; ${line}`);
+		clock();
 		const other = harness({ lifetime: 300, cost: WITH_WRITE, model: { id: "sub/other" } });
 		other.emit("agent_settled");
 		assert.deepEqual(other.decide(), { action: "stop" }, `instance ${n}: another model`);

@@ -54,8 +54,10 @@ export function cacheTier(entries: SessionEntry[], model?: { provider: string; i
 }
 
 /**
- * `warmedAt` is when this extension last re-sent the cached request to keep it warm. Pi's own refreshes are
- * `cache_warm` usage entries; the extension's are kept in memory, because an extension cannot add usage entries.
+ * `warmedAt` is when the latest of the current period's refreshes by this extension that reported a hit left (a period
+ * the extension kept warm before it was left to Pi). Pi's own refreshes are `cache_warm` usage entries; the extension's
+ * are kept in memory, because an extension cannot add usage entries. A period the extension keeps warm does not count its
+ * expiry here (see `expiryOf` in warm-period.ts).
  * `keepWarmOn` changes three things, so the countdown follows the cache the period keeps warm; with it off everything
  * is counted as before:
  * - the expiry is counted from the latest real answer, so a failed or aborted answer whose usage reports a cache read

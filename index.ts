@@ -119,7 +119,7 @@ import {
 	type Fetch,
 	type Found,
 } from "./model-data.ts";
-import { end, leave, mayLeave, settle, WAITING, type WarmPhase } from "./warm-period.ts";
+import { end, expiryOf, leave, mayLeave, settle, WAITING, type WarmPhase } from "./warm-period.ts";
 import { formatFooter, lifetimesView, priceAt, sentView, type Countdown, type DataView, type FooterView, type KeepWarmView, type PriceView } from "./footer.ts";
 
 interface CapturedRequest {
@@ -335,21 +335,28 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// cache does not replace it.
 	let answerRequest: CapturedRequest | undefined;
 	let running = false;
-	let warmedAt: number | undefined;
 	let warming: AbortController | undefined;
 	let piWarmAt: number | undefined;
 	// The cache lifetime of a proxy model follows what answered (see servedModel below).
-	// How a period the extension keeps warm reads its cache, and how the ownership decision reads it: the expiry counted
-	// from the latest real answer (an aborted one that used the cache included), and, where no answer reported a tier,
-	// the tier the request as sent asked for (R8).
-	const keptState = (model: Model<Api>, entries: SessionEntry[], requested: "short" | "long") =>
-		cacheState(servedModel(model), entries, warmedAt, true, requested);
-	// The countdown, the footer, compacting before expiry and everything else: for a period the extension keeps warm, as
-	// that period reads it; otherwise (keep-warm off, or a period left to Pi) exactly as with keep-warm off.
-	const stateOf = (model: Model<Api>, entries: SessionEntry[]) => {
+	// How the ownership decision and the drift check read the cache: the latest real answer (an aborted one that used the
+	// cache included), and, where no answer reported a tier, the tier the request as sent asked for (R8).
+	const keptState = (model: Model<Api>, entries: SessionEntry[], requested: "short" | "long") => cacheState(servedModel(model), entries, undefined, true, requested);
+	// The one expiry everything reads: the countdown and the footer, the refresh timer and its last safe moment,
+	// compacting before expiry, the cached path's check, /cache-keeper. For a period the extension keeps warm, from that
+	// period's own facts only (expiryOf: its answer, and when its latest refresh that reported a hit left), with the
+	// period's lifetime; nothing to count from where the branch no longer holds a cached answer (after a compaction,
+	// say). Otherwise (keep-warm off, or a period left to Pi) exactly as with keep-warm off, where a period that was kept
+	// warm before it was left to Pi adds its own confirmed refreshes.
+	const stateOf = (model: Model<Api>, entries: SessionEntry[]): CacheState => {
 		const p = period;
-		return owns(p) ? keptState(model, entries, p.fixed.requested) : cacheState(servedModel(model), entries, warmedAt);
+		if (!owns(p)) return cacheState(servedModel(model), entries, p?.warm.refreshedAt);
+		const state = keptState(model, entries, p.fixed.requested);
+		if (state.refreshedAt === undefined || p.answeredAt === undefined) return { ...state, expiresAt: undefined };
+		const expiresAt = expiryOf(p.warm, p.answeredAt, p.fixed.ms);
+		return { ...state, lifetime: { ms: p.fixed.ms, source: p.fixed.source }, refreshedAt: expiresAt - p.fixed.ms, expiresAt };
 	};
+	// The last moment a refresh for a cache counted from `from` may leave: half the warm lead before its expiry.
+	const lastSafeMoment = (from: number, lifetimeMs: number) => from + lifetimeMs - Math.floor(warmLeadMs(lifetimeMs, EXPIRY_LEAD_MS) / 2);
 	// R9: each model's run of refreshes without a hit, and the models two in a row left to Pi (see WARM_MISSES).
 	const misses = warmMissStore();
 	// What the two refreshes without a hit were: misses, unreported ones, or one of each.
@@ -401,6 +408,12 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (state.lifetime.ms < MIN_OWNED_LIFETIME_MS) return no("lifetime under a minute", `the cache lifetime (${formatDuration(state.lifetime.ms)}) is under a minute`);
 		// The same state the countdown reads: without a cached answer there is no expiry to keep warm.
 		if (!state.cached) return no("last answer used no cache", "the last answer did not use the prompt cache");
+		// R7 at the period's start: the period's own expiry (the answer's time, stamped when it started streaming, plus the
+		// lifetime) leaves no time for a refresh when Pi goes idle: its last safe moment, the one the refresh timer uses,
+		// has passed. A safe re-send can't be proven, so Pi's warming, which may have refreshed during the run, goes on.
+		if (state.answeredAt !== undefined && Date.now() > lastSafeMoment(state.answeredAt, state.lifetime.ms)) {
+			return no("no time to refresh", "the cache counted from the last answer, which started streaming more than one cache lifetime before its end, reached its last safe refresh moment before Pi went idle");
+		}
 		const request = answerRequest;
 		if (!request || request.answeredAt !== state.answeredAt) return no("request not seen", "the request of the last answer was not captured");
 		if (!request.payload) return no("no request to re-send", `${request.model.api} requests cannot be re-sent`);
@@ -572,7 +585,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		captured = answerRequest = undefined;
 		// Nothing to keep warm until the next real answer.
 		if (period) period.request = undefined;
-		warmedAt = undefined;
 		abortWarm();
 		stopTimer(ctx);
 	};
@@ -986,13 +998,13 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const p = period;
 		if (!owns(p)) return state;
 		const { fixed } = p;
-		const expiresAt = state.refreshedAt === undefined ? undefined : state.refreshedAt + fixed.ms;
+		const expiresAt = state.expiresAt;
 		const drift = p.ended ? undefined : readDrift(ctx, p);
 		if (drift) {
 			const timer = { model: fixed.model, lifetimeSeconds: fixed.ms / 1000, lifetimeSource: fixed.source };
 			trace(ctx, { ...warmBase(ctx, p, expiresAt ?? Date.now(), timer), action: "skip", ...endWarm(p, "unable", drift), budget: budgetRecord(p) });
 		}
-		return { ...state, lifetime: { ms: fixed.ms, source: fixed.source }, expiresAt };
+		return state;
 	};
 
 	// The time limit takes effect: the cache already lasts to `idleSince + keepWarmMinutes` or beyond (the answer's own
@@ -1065,7 +1077,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		// Only while waiting: with one of the period's refreshes out, or warming ended, nothing leaves.
 		if (!owns(p) || !mayLeave(p.warm) || running || p.doneFor === expiresAt || !wantsWarm(expiresAt, p.idleSince, warmMinutes())) return;
 		const base = warmBase(ctx, p, expiresAt, timer);
-		const lastSafe = expiresAt - Math.floor(warmLead / 2);
+		const lastSafe = expiresAt - Math.floor(warmLead / 2); // as lastSafeMoment
 		if (Date.now() > lastSafe) {
 			p.doneFor = expiresAt;
 			trace(ctx, { ...base, action: "skip", reason: "too late: less than half the warm lead is left before the cache expires, so a refresh would likely arrive after it" });
@@ -1076,8 +1088,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			p.busyFor = expiresAt;
 			return;
 		}
-		// Pi's own refresh from the run just ended may still be in flight; its usage entry moves the expiry when it lands.
-		if (piWarmAt !== undefined && Date.now() - piWarmAt < 60_000) return;
 		// An earlier refresh of this model, from any session of this process, is still on its way: held (the last gate
 		// checks it again just before sending).
 		if (unsettled(p.fixed.model)) {
@@ -1155,7 +1165,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 							}
 							// It goes out: reserved at the larger of its expected cost and what the last refresh really cost.
 							out = true;
-							p.warm = leave(p.warm, refreshId, started);
+							// The moment it leaves is the one its hit, if it reports one, counts the period's expiry from.
+							p.warm = leave(p.warm, refreshId, Date.now());
 							open.set(refreshId, Date.now());
 							misses.inFlight.set(p.fixed.model, open);
 							reserved = reserveFor(budget, spending);
@@ -1222,8 +1233,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			else if (failed) ended = endWarm(p, "failed", failure);
 			// Tried again for the same expiry only when it never left; a refresh that left is never sent again.
 			if (!out && (aborted || held || settling || waitingOut) && p.doneFor === expiresAt) p.doneFor = undefined;
-			// Either way the provider refreshed (or wrote) the entry when it received the request; a reported hit shows it did.
-			if (out && ((!aborted && !failed) || verdict === "hit")) warmedAt = started;
 			const fallback = fellBack ? { leftToPi: fallbackLine(p.fixed.model, started) } : {};
 			// What is said and shown, only while the session is alive.
 			ifSessionAlive(() => {
@@ -1322,7 +1331,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			} else {
 				if (remaining <= warmLead) keepWarm(ctx, expiresAt, warmLead, timer);
 				if (!warming && !out && remaining <= EXPIRY_LEAD_MS && !attempted) {
-					if (piWarmAt !== undefined && Date.now() - piWarmAt < 30_000) return;
 					attempted = true;
 					compactBeforeExpiry(ctx, remaining, timer);
 				}
