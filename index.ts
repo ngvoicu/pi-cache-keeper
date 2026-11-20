@@ -603,9 +603,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// and what keep-warm says now, fitted to the terminal's width. Pi is told only when the text changes.
 	let countdown: Countdown | undefined;
 	let modelView: Omit<FooterView, "countdown" | "keepWarm"> | undefined;
-	// The regime of the countdown's reading when it started, and a way to make it read again at once.
+	// The regime of the countdown's reading when it started.
 	let timerRegime: CacheView["regime"] | undefined;
-	let rereadNow: (() => void) | undefined;
 	// The lifetime the footer's values were read with: in a taken period they are read again when the clock's changes.
 	let shownLifetimeMs: number | undefined;
 	let footerText: string | undefined;
@@ -645,7 +644,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const stopTimer = (ctx: ExtensionContext, render = true) => {
 		clearInterval(ticker);
 		ticker = undefined;
-		rereadNow = undefined;
 		countdown = undefined;
 		if (render) renderFooter(ctx);
 	};
@@ -1478,9 +1476,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			} else expiresAt = view.sendBy ?? expiresAt;
 			return true;
 		};
-		const tick = (now_: boolean = false) => {
+		const tick = () => {
 			const near = (at: number | undefined) => at !== undefined && at - Date.now() <= Math.max(EXPIRY_LEAD_MS, warmLead);
-			if ((now_ || ++ticks % 15 === 0 || near(expiresAt) || near(shown(Date.now()))) && !read()) return;
+			if ((++ticks % 15 === 0 || near(expiresAt) || near(shown(Date.now()))) && !read()) return;
 			const now = Date.now();
 			const remaining = expiresAt === undefined ? 0 : expiresAt - now;
 			const showing = shown(now);
@@ -1497,7 +1495,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				if (view.regime !== "period") {
 					clearInterval(ticker);
 					ticker = undefined;
-					rereadNow = undefined;
 				}
 			} else if (warming) {
 				// Wait for the refresh; it restarts the countdown when it lands.
@@ -1533,10 +1530,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		}, 1000);
 		ticker = own;
 		own.unref();
-		// A report of what served the period's model changes the reading: it is read again at once.
-		rereadNow = () => {
-			if (ticker === own) tick(true);
-		};
 		tick();
 	};
 
@@ -1697,12 +1690,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		// a report about another model never touches it.
 		const p = period;
 		if (p?.clock && p.taken && p.fixed?.model === key) p.clock.served(report.identity);
-		if (ctx)
-			ifSessionAlive(() => {
-				showData(ctx);
-				// The countdown reads the cache again at once.
-				if (p?.fixed?.model === key) rereadNow?.();
-			});
+		if (ctx) ifSessionAlive(() => showData(ctx));
 	});
 	pi.on("model_select", (_event, ctx) => {
 		answered = undefined;

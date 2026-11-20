@@ -664,24 +664,51 @@ test("a model switch away and back keeps the route's report: no false route chan
 	assert.doesNotMatch(shown, /the route changed/);
 });
 
-test("a report that changes the reading is read at once: the API key's five-minute route at 400 s, the countdown cold without waiting for its next read", { skip }, async (t) => {
-	const N = 600_000;
+// Keep-warm off throughout: a report changes nothing until the countdown's next ordinary read, every 15 s, exactly as on
+// 0.5.3. A 1,000,000-token Chat Completions prompt on the private account's hour; the public route's cache lasts 150 s.
+// Pi goes idle at 1 s, so the countdown reads at 15 s, 30 s, … as 0.5.3's does in the reviewer's runs.
+const offPeriod = async (t: { after: (fn: () => void) => void }) => {
+	const N = 1_000_000;
+	const expiry: Record<string, number> = { A: 3600, B: 0 };
+	let current = "A";
 	const s = await session({
-		model: claudeGateway(keyValues),
-		store: loginOverKey(),
-		settings: { keepWarmMinutes: 120, compactBeforeExpiry: false },
+		model: deepseek("switchable-gateway", { short: 3600, long: 3600 }),
+		store: chatStore(150),
+		settings: { keepWarmMinutes: 0, compactBeforeExpiry: true },
 		prompt: N,
-		answered: { read: 0, write: N, oneHour: N },
-		serve: () => ({ read: N, write: 0, oneHour: 0 }),
-		afterAnswer: ({ announce }) => announce([LOGIN]),
+		answered: { read: N, write: 0, oneHour: 0 },
+		serve: ({ at }) => {
+			const read = at < expiry[current] ? N : 0;
+			expiry[current] = at + (current === "A" ? 3600 : 150);
+			return { read, write: N - read, oneHour: 0 };
+		},
+		afterAnswer: ({ until }) => until(1),
 	});
 	t.after(() => s.done());
+	const to = (account: "A" | "B") => {
+		current = account;
+		s.announce(account === "A" ? [{ provider: "private-account", model: DEEPSEEK_ID, subscription: false }] : FALLBACK);
+	};
+	return { s, N, to };
+};
+
+test("keep-warm off: the 150-second route reported at 143 s sends nothing, as on 0.5.3 (no cold summary at 144 s)", { skip }, async (t) => {
+	const { s, to } = await offPeriod(t);
+	await s.until(143);
+	to("B");
 	await s.until(400);
-	assert.match(s.statuses.at(-1) ?? "", /^cache warm · 53m left/);
-	s.announce([KEY]);
-	await flush();
-	assert.match(s.statuses.at(-1) ?? "", /^cache cold · /, "at once, with the lifetime in use");
-	assert.match(s.statuses.at(-1) ?? "", /short 5m \(in use\)/);
+	assert.deepEqual(s.wires, [], "no summary (a cold million-token one cost $0.96)");
+	assert.deepEqual(s.compactions, []);
+});
+
+test("keep-warm off: route B reported at 600 s and A again at 602 s: the summary at 3,580 s reads the cache, as on 0.5.3", { skip }, async (t) => {
+	const { s, N, to } = await offPeriod(t);
+	await s.until(600);
+	to("B");
+	await s.until(602);
+	to("A");
+	await s.until(3600);
+	assert.deepEqual(s.wires.map((w) => [w.kind, w.at, w.read]), [["summary", 3580, N]]);
 });
 
 // ------------------------------------------------------------------------------- keep-warm switched off mid-period
