@@ -219,6 +219,11 @@ interface WarmPeriod {
 	notOwnedLabel?: string;
 	/** The session's model when the period started, as `provider/id`: the footer says nothing of the period for another. */
 	model?: string;
+	/**
+	 * The period was the extension's until its facts stopped holding or its request was let go (see `letGo`): it is Pi's
+	 * from then on, and its countdown never counts longer than the period's lifetime, or than what is read now.
+	 */
+	handedOver?: true;
 	/** The request of the period's answer; forgotten with the cached request (model switch, compaction, branch move). */
 	request?: CapturedRequest;
 	budget?: WarmBudget;
@@ -249,6 +254,8 @@ interface CachedPath {
 
 /** The extension's one status in Pi's footer: the countdown, what went wrong, and the values in use (see footer.ts). */
 const STATUS_KEY = "cache-keeper";
+/** Why a period is Pi's once the extension let go of its request (a model switch, a branch move, a compaction). */
+const REQUEST_LET_GO = "the extension no longer holds the period's request (the model, the branch or the conversation changed), so it can't refresh it";
 /**
  * The request forms whose cache markers `requestCache` reads: Anthropic Messages (`cache_control`) and OpenAI's Chat
  * Completions and Responses (Codex's and Azure's too). Pi's other adapters write theirs in forms it does not read
@@ -360,7 +367,19 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (!owns(p)) {
 			// A period kept warm before it was left to Pi (or keep-warm switched off) adds its confirmed hits, on its branch only.
 			const hit = periodsBranch ? p.warm.refreshedAt : undefined;
-			return hit === undefined ? plain : cacheState(servedModel(model), entries, hit);
+			const left = hit === undefined ? plain : cacheState(servedModel(model), entries, hit);
+			// A period handed over to Pi when its facts stopped holding (keep-warm on): counted as one left to Pi, Pi's
+			// refreshes included, but never with a longer lifetime than the period's, than what its request's tier lasts on
+			// the route now, or than a write reported since (Pi's refresh on another route).
+			if (!p?.handedOver || !p.fixed || !periodsBranch || p.fixed.model !== `${model.provider}/${model.id}` || warmMinutes() <= 0) return left;
+			if (!left.lifetime || left.refreshedAt === undefined) return left;
+			const kept = keptState(model, entries, p.fixed.requested);
+			const route = lifetimeFor(servedModel(model), p.fixed.requested);
+			const read = [route?.ms, kept.lifetime?.ms, ...(kept.laterWrites ?? []).filter((w): w is number => typeof w === "number")].filter((ms): ms is number => ms !== undefined);
+			const ms = Math.min(p.fixed.ms, ...read);
+			if (ms >= left.lifetime.ms) return left;
+			const source = ms === route?.ms ? route.source : ms === kept.lifetime?.ms ? kept.lifetime.source : ms === p.fixed.ms ? p.fixed.source : "reported by the provider";
+			return { ...left, lifetime: { ms, source }, expiresAt: left.refreshedAt + ms };
 		}
 		if (!periodsBranch || `${model.provider}/${model.id}` !== p.fixed.model) return plain;
 		const state = keptState(model, entries, p.fixed.requested);
@@ -465,31 +484,45 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		return undefined;
 	};
 	// The period's lifetime, and whether the evidence proves it. A request asks for a tier; how long a tier lasts is the
-	// route's (its data); a write bucket an answer reports (5 minutes, 1 hour) is evidence of a lifetime, never a tier's
-	// name. The period's lifetime is the request's: the one a marker states (where the route's data gives the tier asked
-	// another, the request and the data disagree), else the route's data for the tier asked, else, for a marker that
-	// states none, the lifetime its format documents for it. Where an answer of this model on the branch reports a bucket,
-	// the period is the extension's only where that bucket's lifetime is the period's; where none reports one, a marker
-	// that states no lifetime relying on a route lifetime other than its documented one is not proven. Formats without
-	// buckets go by the data. `state` is read with the evidence (keptState): its lifetime is the bucket's, else the data's.
-	// Undefined when the lifetime is proven.
-	const whyNotOneLifetime = (state: CacheState, request: CapturedRequest, cache: ReturnType<typeof requestCache>): { reason: string; label?: string } | undefined => {
+	// route's (its data); a write an answer or a refresh of Pi's reports (5 minutes, 1 hour) is evidence of a lifetime,
+	// never a tier's name, and only where all of it went to one cache. The period's lifetime is the request's: the one a
+	// marker states (where the route's data gives the tier asked another, the request and the data disagree), else the
+	// route's data for the tier asked, read now, else, for a marker that states none, the lifetime its format documents
+	// for it. Every write reported against it binds: the model's latest (a mixed one included, until a write in one cache
+	// only), and Pi's refreshes after the answer. A marker that states no lifetime and relies on a route lifetime other
+	// than its documented one needs the period's own answer to confirm it: a write, all of it in the cache of that
+	// lifetime; an earlier answer's write, or an answer that only read, does not. Formats without buckets go by the data.
+	// `state` is read with the evidence (keptState). `fixedMs`, at the last gate and on each read in the period: the
+	// lifetime the period started with, which the route read now must still give. Undefined when the lifetime is proven.
+	const whyNotOneLifetime = (state: CacheState, request: CapturedRequest, cache: ReturnType<typeof requestCache>, fixedMs?: number): { reason: string; label?: string } | undefined => {
 		const no = (label: string, reason: string) => ({ reason, label });
 		const data = lifetimeFor(servedModel(request.model), cache.tier)?.ms;
 		const stated = cache.markers.find((m) => m.ms !== undefined && !m.implied)?.ms;
 		const unstated = cache.markers.find((m) => m.implied);
 		if (stated !== undefined && data !== undefined && stated !== data) return no("lifetime differs from the data", "the request's cache lifetime does not match the model data");
-		const periodMs = stated ?? data ?? unstated?.ms ?? state.lifetime?.ms;
-		const bucket = state.writeBucketMs;
-		if (periodMs !== undefined && bucket !== undefined && bucket !== periodMs) {
-			const by = stated !== undefined ? "as it states" : data !== undefined ? "by the route's data" : "by its marker's default";
-			return no("the answer's write lasts otherwise", `an answer of this model reports a ${formatDuration(bucket)} cache write; the request's cache lasts ${formatDuration(periodMs)} ${by}`);
+		const latest = state.latestWrite;
+		const periodMs = stated ?? data ?? unstated?.ms ?? (typeof latest === "number" ? latest : undefined);
+		const by = stated !== undefined ? "as it states" : data !== undefined ? "by the route's data" : "by its marker's default";
+		if (fixedMs !== undefined && periodMs !== fixedMs) {
+			return no(
+				"the route's lifetime changed",
+				`the request's cache now lasts ${periodMs === undefined ? "an unknown time" : `${formatDuration(periodMs)} ${by}`}, the cached request was written with ${formatDuration(fixedMs)}`,
+			);
+		}
+		if (latest === "mixed") return no("mixed cache write", "an answer of this model reports a cache write partly in the 5-minute and partly in the 1-hour cache: two lifetimes, until an answer reports a write in one of them only");
+		if (periodMs !== undefined && latest !== undefined && latest !== periodMs) {
+			return no("the answer's write lasts otherwise", `an answer of this model reports a ${formatDuration(latest)} cache write; the request's cache lasts ${formatDuration(periodMs)} ${by}`);
+		}
+		const against = periodMs === undefined ? undefined : state.laterWrites?.find((w) => w !== periodMs);
+		if (periodMs !== undefined && against !== undefined) {
+			const write = against === "mixed" ? "a cache write partly in the 5-minute and partly in the 1-hour cache" : `a ${formatDuration(against)} cache write`;
+			return no("Pi's refresh wrote otherwise", `a refresh of Pi's after the answer reports ${write}; the request's cache lasts ${formatDuration(periodMs)} ${by}`);
 		}
 		if (periodMs === undefined || periodMs !== state.lifetime?.ms) return no("lifetime differs from the data", "the request's cache lifetime does not match the model data");
-		if (stated === undefined && unstated?.ms !== undefined && periodMs !== unstated.ms && bucket === undefined) {
+		if (stated === undefined && unstated?.ms !== undefined && periodMs !== unstated.ms && state.answerWrite !== periodMs) {
 			return no(
 				"route's lifetime unconfirmed",
-				`the request states no cache lifetime (${unstated.at}), and the route's lifetime for its tier (${formatDuration(periodMs)}) is not the ${formatDuration(unstated.ms)} that marker defaults to; no answer of this model reported a cache write that confirms it`,
+				`the request states no cache lifetime (${unstated.at}), and the route's lifetime for its tier (${formatDuration(periodMs)}) is not the ${formatDuration(unstated.ms)} that marker defaults to; the answer did not report a cache write, all of it in that cache, that confirms it`,
 			);
 		}
 		return undefined;
@@ -639,8 +672,14 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const forget = (ctx: ExtensionContext) => {
 		pendingTranscript = undefined;
 		captured = answerRequest = undefined;
-		// Nothing to keep warm until the next real answer.
-		if (period) period.request = undefined;
+		// Nothing to keep warm until the next real answer: a period the extension kept warm is Pi's from now (R7), also
+		// when its model comes back (a switch away and back without a message), where the request is not known again.
+		const p = period;
+		if (p && owns(p) && !p.ended) {
+			const timer = { model: p.fixed.model, lifetimeSeconds: p.fixed.ms / 1000, lifetimeSource: p.fixed.source };
+			trace(ctx, { ...warmBase(ctx, p, Date.now(), timer), action: "skip", ...handOver(p, { reason: REQUEST_LET_GO, label: "request let go" }), budget: budgetRecord(p) });
+		}
+		if (p) p.request = undefined;
 		abortWarm();
 		stopTimer(ctx);
 	};
@@ -1049,11 +1088,33 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// started with, and each read is compared with what the period started with (model, lifetime, tier): on any
 	// difference warming ends for the period, without another refresh. Otherwise (keep-warm off included) as before.
 	// A fresh read of what an owned period fixed, against the fixed values: what differs, if anything.
-	const readDrift = (ctx: ExtensionContext, p: WarmPeriod & { fixed: NonNullable<WarmPeriod["fixed"]> }): string | undefined => {
+	const readDrift = (ctx: ExtensionContext, p: WarmPeriod & { fixed: NonNullable<WarmPeriod["fixed"]> }): { reason: string; label: string } | undefined => {
 		const model = ctx.model;
-		if (!model) return `there is no model now, the cached request was written with ${p.fixed.model}`;
+		if (!model) return { reason: `there is no model now, the cached request was written with ${p.fixed.model}`, label: "the model changed" };
 		const entries = ctx.sessionManager.getBranch();
-		return driftReason(p.fixed, model, keptState(model, entries, p.fixed.requested));
+		const state = keptState(model, entries, p.fixed.requested);
+		const drift = driftReason(p.fixed, model, state);
+		if (drift) return { reason: drift, label: `${model.provider}/${model.id}` === p.fixed.model ? "the lifetime reads otherwise" : "the model changed" };
+		// The evidence read now, as at the period's start: Pi's refreshes since, and the route the request goes to now.
+		const request = p.request;
+		if (!request?.payload) return { reason: REQUEST_LET_GO, label: "request let go" };
+		const why = whyNotOneLifetime(state, request, request.cache ?? requestCache(request.payload), p.fixed.ms);
+		return why && { reason: why.reason, label: why.label ?? "the lifetime reads otherwise" };
+	};
+	// A period whose facts no longer hold (`readDrift`), or whose request the extension no longer holds, is not the
+	// extension's from then on, and Pi's own warming decides alone (R7: the decision handler never answers "stop" where
+	// the extension knows it will not send). Warming ends for it where the caller says so (`handOver`).
+	const letGo = (p: WarmPeriod, reason: string, label: string) => {
+		if (p.notOwned !== undefined) return;
+		p.notOwned = reason;
+		p.notOwnedLabel = label;
+		p.handedOver = true;
+	};
+	// The same, ending warming for the period: the fields of the record that says so, once.
+	const handOver = (p: WarmPeriod, drift: { reason: string; label: string }): { stop: WarmStop; reason: string } | Record<string, never> => {
+		const ended = endWarm(p, "unable", drift.reason);
+		letGo(p, drift.reason, drift.label);
+		return ended;
 	};
 	const timerState = (ctx: ExtensionContext): CacheState | undefined => {
 		const model = ctx.model;
@@ -1067,7 +1128,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const drift = p.ended ? undefined : readDrift(ctx, p);
 		if (drift) {
 			const timer = { model: fixed.model, lifetimeSeconds: fixed.ms / 1000, lifetimeSource: fixed.source };
-			trace(ctx, { ...warmBase(ctx, p, expiresAt ?? Date.now(), timer), action: "skip", ...endWarm(p, "unable", drift), budget: budgetRecord(p) });
+			trace(ctx, { ...warmBase(ctx, p, expiresAt ?? Date.now(), timer), action: "skip", ...handOver(p, drift), budget: budgetRecord(p) });
 		}
 		return state;
 	};
@@ -1113,7 +1174,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		// An earlier refresh of this model from another period or session has not settled: it may be the second miss.
 		if (unsettled(p.fixed.model)) return { hold: "settling", reason: SETTLING_REASON };
 		const drift = readDrift(ctx, p);
-		if (drift) return { refuse: drift };
+		if (drift) {
+			// Refused, and warming ends where the refresh settles; the period is Pi's from now.
+			letGo(p, drift.reason, drift.label);
+			return { refuse: drift.reason };
+		}
 		if (running || !ctx.isIdle() || ctx.hasPendingMessages()) return { hold: "busy", reason: "Pi is busy or has queued messages" };
 		if (Date.now() > lastSafe) return { hold: "late", reason: "the cache was about to expire before the refresh went out" };
 		if (!payload) return { refuse: unbuilt ?? "the refresh payload could not be built" };
@@ -1368,7 +1433,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		let attempted = !compactAtExpiry;
 		let warmChecked = false;
 		const tick = () => {
+			// A period that this read hands over to Pi (its facts no longer hold) is still counted as the period was on this
+			// tick: compacting before expiry is not left one tick late.
+			const ownedBefore = owns(period);
 			if (++ticks % 15 === 0 || expiresAt - Date.now() <= Math.max(EXPIRY_LEAD_MS, warmLead)) expiresAt = readState()?.expiresAt ?? expiresAt;
+			const handedOver = ownedBefore && !owns(period);
 			const remaining = expiresAt - Date.now();
 			const keepWarmOn = warmMinutes() > 0;
 			if (keepWarmOn && remaining > 0 && !warming) noteLimit(ctx, expiresAt, timer);
@@ -1383,7 +1452,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				ticker = undefined;
 			} else if (warming) {
 				// Wait for the refresh; it restarts the countdown when it lands.
-			} else if (!keepWarmOn || !owns(period)) {
+			} else if (!keepWarmOn || (!owns(period) && !handedOver)) {
 				// Keep-warm off, or a period left to Pi: as with keep-warm off.
 				if (remaining <= warmLead && !warmChecked) {
 					warmChecked = true;
@@ -1394,7 +1463,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					compactBeforeExpiry(ctx, remaining);
 				}
 			} else {
-				if (remaining <= warmLead) keepWarm(ctx, expiresAt, warmLead, timer);
+				if (!handedOver && remaining <= warmLead) keepWarm(ctx, expiresAt, warmLead, timer);
 				if (!warming && !out && remaining <= EXPIRY_LEAD_MS && !attempted) {
 					attempted = true;
 					compactBeforeExpiry(ctx, remaining, timer);
@@ -1477,6 +1546,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const p = period;
 		// A fresh read of the saved setting: a switch-off in any window holds from this decision on.
 		keepWarmSetting(true);
+		// The period's facts read afresh first (Pi's refreshes since it started, the route now): where they no longer hold,
+		// the period is Pi's, and its decision stands (R7).
+		if (owns(p) && !running && ctx.isIdle() && !p.ended) timerState(ctx);
 		if (owns(p) && !running && ctx.isIdle()) {
 			const state = ctx.model ? stateOf(ctx.model, ctx.sessionManager.getBranch()) : undefined;
 			const expiresAt = state?.expiresAt ?? Date.now();

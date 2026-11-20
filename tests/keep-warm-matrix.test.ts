@@ -458,7 +458,7 @@ const SHORT: [RegExp, string][] = [
 	[/^at this model's prices a refresh costs as much as a miss$/, "refresh costs a miss"],
 	[/^the request carries a cache marker the extension does not read/, "unread marker"],
 	[/^the request's cache lifetime does not match the model data$/, "stated lifetime ≠ data"],
-	[/^the request states no cache lifetime .* no answer of this model reported a cache write that confirms it$/, "route's lifetime unconfirmed"],
+	[/^the request states no cache lifetime .* the answer did not report a cache write, all of it in that cache, that confirms it$/, "route's lifetime unconfirmed"],
 	[/^an answer of this model reports a .* cache write; the request's cache lasts /, "write ≠ request's lifetime"],
 	[/^the answer reports cache writes in both tiers/, "both buckets written"],
 	[/^the request carries more than one cache lifetime$/, "two lifetimes"],
