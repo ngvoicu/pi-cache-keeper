@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **The keep-warm goal in the footer** — With keep-warm on, the footer says so and for how long. While the extension keeps an idle period's cache warm it reads `keep-warm 2h until 16:40, $0.36 spent of $2.07`: the limit in force, the clock time it runs out (counted from Pi going idle), and what the period's refreshes have spent of the one cache miss they may cost (`3 of 10 refreshes` for a model without prices). A clock time, so it is not taken for the cache's `59m left`. Where nothing is being kept warm right now (a request runs, the cache is cold, no answer yet, after a model switch) it reads `keep-warm 2h`, the setting only. Ended, left to Pi and the other keep-warm texts read as before, and with keep-warm off nothing is shown. In a narrow terminal it shortens to `keep-warm until 16:40` and drops after the other lifetime, before the price; errors outlast it. Display only.
+
 ## [0.5.2] - 2026-11-20
 
 ### Changed
