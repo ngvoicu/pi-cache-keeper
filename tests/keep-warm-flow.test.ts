@@ -3722,6 +3722,26 @@ test("footer: a route whose short tier lasts an hour, the request asking for the
 	assert.equal(lastFooter(h), "cache warm · 60m left · short 1h (in use) · long 1h · sub, no per-token price");
 });
 
+// The third review's footer: a route whose short tier lasts an hour, kept warm by the extension; its refresh at 3,421 s
+// reads 95% and writes the rest into the five-minute cache (the gateway fell back to an API key), so the period is Pi's
+// and its cache counts five minutes from that refresh. The countdown, the lifetime in use and "sent" say the same five
+// minutes (it said "short 1h (in use)" beside "4m left").
+test("footer: after a hand-over to a five-minute write, the countdown, the lifetime in use, what was sent and /cache-keeper say five minutes", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	online(t);
+	shortRetention(t);
+	fresh({ compactBeforeExpiry: false, modelData: false, keepWarmMinutes: 240 });
+	const h = harness({ lifetime: 3600, cost: WITH_WRITE, ui: true, sent: plainMarker, answer: CONFIRMING_HOUR, respond: () => ({ usage: { cacheRead: 570_000, cacheWrite: 30_000, cacheWrite1h: 0 } }) });
+	h.emit("agent_settled");
+	await h.idle(3_430_000);
+	await flush();
+	assert.deepEqual(refreshesOf(h).map((w) => w.at), [3_421_000]);
+	const left = formatRemaining(3_721_000 - Date.now());
+	assert.equal(lastFooter(h), `cache warm · ${left} left · keep-warm: Pi's (the refresh wrote otherwise) · short 5m (in use) · long 1h · ⚠ sent short · api $3/$15 per M`);
+	assert.match(await h.command("cache-keeper"), new RegExp(`\ncache: ${left} left \\(lifetime 5 min, the shortest lifetime read since\\)\n`));
+});
+
 test("footer, sent: Anthropic's API, retention short (the short tier, 5 minutes on the route) and long (the stated hour)", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
