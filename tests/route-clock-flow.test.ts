@@ -604,7 +604,9 @@ test("a reported switch from a subscription to an API key of one upstream is a c
 	s.announce([key]);
 	await s.until(615);
 	assert.equal(s.decide(), undefined, "the period is Pi's");
-	assert.match(await s.command(), /; nothing is sent on it: the route changed\n/);
+	// Nothing is known of the key's cache: cold, whatever Pi sent (it read "49m left by Pi's own warming").
+	assert.match(s.statuses.at(-1) ?? "", /^cache cold · /);
+	assert.match(await s.command(), /\ncache: expired \(lifetime 60 min, [^)]*\), counted as expired: the route changed\n/);
 	await s.until(3700);
 	assert.deepEqual(s.wires, [], "no refresh (on the third review one wrote 600,000 into the key's cache for $3.60)");
 });
@@ -640,7 +642,39 @@ for (const [label, reports] of [
 	});
 }
 
-test("a model switch away and back keeps the route's report: no false route change, the hour cache counted on", { skip }, async (t) => {
+test("a model switch away and back keeps the route's report: 58 min on return, Pi's 26 min at 3,601 s", { skip: noWarmer }, async (t) => {
+	const N = 600_000;
+	const s = await session({
+		model: claudeGateway(keyValues),
+		store: loginOverKey(),
+		settings: { keepWarmMinutes: 120, compactBeforeExpiry: false },
+		prompt: N,
+		answered: { read: 0, write: N, oneHour: N },
+		serve: () => ({ read: N, write: 0, oneHour: 0 }),
+		piWarmer: true,
+		afterAnswer: ({ announce }) => announce([LOGIN]),
+	});
+	t.after(() => s.done());
+	await s.until(60);
+	const own = s.ctx.model;
+	s.ctx.model = { ...own, provider: "google", id: "gemini-3.8-pro", api: "google-generative-ai" };
+	s.emit("model_select");
+	await s.until(61);
+	s.ctx.model = own;
+	s.emit("model_select");
+	const shown = await s.command();
+	assert.match(shown, /\ncache: 58m left \(lifetime 60 min, /, "the hour cache, as on 0.5.3");
+	assert.doesNotMatch(shown, /the route changed/);
+	// Pi's warming keeps it (its six refreshes, the last at 1,620 s); the answer's own hour has passed.
+	await s.until(3601);
+	assert.deepEqual(s.wires.filter((w) => w.kind === "pi").map((w) => Math.round(w.at)), [270, 540, 810, 1080, 1350, 1620]);
+	assert.match(await s.command(), /\ncache: 26m left by Pi's own warming \(lifetime 60 min, /);
+});
+
+// The second look's old-account receipt: the period was let go (a model switch away and back); Pi's refresh at 270 s
+// hit the login's hour cache; at 400 s the proxy reports the API key. Nothing is known of the key's cache: the footer and
+// /cache-keeper say none is warm (they claimed 57 minutes, and the next message wrote 600,000).
+test("after a reported change of route, neither the footer nor /cache-keeper claims a warm cache, whatever Pi refreshed before it", { skip }, async (t) => {
 	const N = 600_000;
 	const s = await session({
 		model: claudeGateway(keyValues),
@@ -656,12 +690,16 @@ test("a model switch away and back keeps the route's report: no false route chan
 	const own = s.ctx.model;
 	s.ctx.model = { ...own, provider: "google", id: "gemini-3.8-pro", api: "google-generative-ai" };
 	s.emit("model_select");
-	await s.until(61);
 	s.ctx.model = own;
 	s.emit("model_select");
-	const shown = await s.command();
-	assert.match(shown, /\ncache: 58m left \(lifetime 60 min, /, "the hour cache, as on 0.5.3");
-	assert.doesNotMatch(shown, /the route changed/);
+	await s.until(270);
+	s.ctx.sessionManager.appendUsage("cache_warm", own.provider, own.id, { input: 2, output: 1, cacheRead: N, cacheWrite: 0, cacheWrite1h: 0, totalTokens: N + 3, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
+	await s.until(400);
+	s.announce([KEY]);
+	await s.until(415);
+	assert.doesNotMatch(s.statuses.at(-1) ?? "", /cache warm/, "the footer claims no warm cache");
+	assert.match(await s.command(), /\ncache: expired \(lifetime 5 min, [^)]*\), counted as expired: the route changed\n/);
+	assert.deepEqual(s.wires, []);
 });
 
 // Keep-warm off throughout: a report changes nothing until the countdown's next ordinary read, every 15 s, exactly as on

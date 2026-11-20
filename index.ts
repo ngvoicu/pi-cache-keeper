@@ -1453,12 +1453,12 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		let ticks = 0;
 		let attempted = !compactAtExpiry;
 		let warmChecked = false;
-		// What the countdown shows: the expiry anything may be sent on, or, where Pi warms the period and that has passed or
-		// is unknown, the moment nothing seen says the cache is alive any more.
+		// What the countdown shows: the expiry anything may be sent on, or, where Pi warms the period on a route that has not
+		// been seen to change and that has passed, the moment nothing seen says the cache is alive any more.
 		const shown = (now: number): number | undefined => {
 			const who = warmerOf(period);
 			const pis = who === "Pi" || who === "Pi, handed over";
-			if (view.regime === "period" && pis && (expiresAt === undefined || expiresAt <= now) && view.goneBy !== undefined && view.goneBy > now) return view.goneBy;
+			if (view.regime === "period" && pis && view.unknown !== "the route changed" && (expiresAt === undefined || expiresAt <= now) && view.goneBy !== undefined && view.goneBy > now) return view.goneBy;
 			return expiresAt;
 		};
 		// Read the cache again; false where the regime changed and the countdown started again.
@@ -2133,9 +2133,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				let left = state.replied ? "the last request did not use the prompt cache" : "no request since the session started or compacted";
 				const now = Date.now();
 				const who = warmerOf(period);
-				// Where Pi warms a taken period whose expiry has passed or is unknown, its cache lasts as long as anything seen
-				// (Pi's own refreshes included) says; nothing is sent on that.
-				const piKeeps = state.regime === "period" && (who === "Pi" || who === "Pi, handed over") && (state.sendBy === undefined || state.sendBy <= now) && state.goneBy !== undefined && state.goneBy > now;
+				// Where Pi warms a taken period whose route has not been seen to change and whose expiry has passed, its cache lasts
+				// as long as anything seen (Pi's own refreshes included) says; nothing is sent on that.
+				const piKeeps = state.regime === "period" && (who === "Pi" || who === "Pi, handed over") && state.unknown !== "the route changed" && (state.sendBy === undefined || state.sendBy <= now) && state.goneBy !== undefined && state.goneBy > now;
 				if (piKeeps && state.goneBy !== undefined) left = `${formatRemaining(state.goneBy - now)} left by Pi's own warming`;
 				else if (state.sendBy !== undefined) left = state.sendBy > now ? `${formatRemaining(state.sendBy - now)} left` : "expired";
 				// Where the expiry is unknown, the cache counts as expired, and why.

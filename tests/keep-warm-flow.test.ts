@@ -2244,11 +2244,8 @@ test("the owned period never counts a longer lifetime than the one read now: a r
 	keyRoute(h);
 	await flush();
 	await h.idle(15_000);
-	// The period is Pi's; its own refresh, recorded at 548 s, keeps the key's 150-second cache until 698 s: the countdown
-	// shows that, and nothing is sent on it.
-	assert.match(lastFooter(h) ?? "", /^cache warm · 2m left · /);
-	await h.idle(HOUR);
 	assert.match(lastFooter(h) ?? "", /^cache cold/);
+	await h.idle(HOUR);
 	assert.equal(h.state.compacts, 0, "no summary after the shorter lifetime passed");
 	assert.deepEqual(h.warms, []);
 	assert.equal(traces().find((r) => r.stop)?.stop, "unable");
@@ -3074,10 +3071,11 @@ test("one clock: in every state of the warmer, after every kind of later evidenc
 			const now = Date.now();
 			const footer = lastFooter(r.h) ?? "";
 			const shown = (await r.h.command("cache-keeper")).match(/\ncache: .*/)?.[0] ?? "";
-			// Where Pi warms the period (handed over, or two misses on the model) and its expiry has passed or is unknown, the
-			// footer and /cache-keeper count down to the moment nothing seen says the cache is alive any more: the period's
+			// Where Pi warms the period (handed over, or two misses on the model) on a route that has not changed and its expiry
+			// has passed, the footer and /cache-keeper count down to the moment nothing seen says the cache is alive any more: the period's
 			// last sure fact or Pi's latest refresh, plus the shortest lifetime. Nothing is sent on that (below).
-			const pis = !reached.plain && PI_WARMS.has(s.state);
+			// Not once the route was seen to change: then cold, whatever Pi sent.
+			const pis = !reached.plain && PI_WARMS.has(s.state) && e.unknown !== "the route changed";
 			const piAt = Math.max(reached.pi ?? 0, e.evidence.startsWith("Pi's") ? at : 0);
 			const goneBy = pis && lifetime !== undefined ? Math.max(anchor, piAt) + lifetime : undefined;
 			const byPi = goneBy !== undefined && goneBy > now && (expiry === undefined || expiry <= now);
