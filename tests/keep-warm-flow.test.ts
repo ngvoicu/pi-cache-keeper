@@ -843,13 +843,16 @@ test("R4: each end reason is recorded once, with the amounts, in the log, the fo
 	r = await ended({ lifetime: 300, cost: WITH_WRITE }, async (h) => {
 		await h.idle(200_000);
 		h.emit("session_tree");
+		// Let go at 201 s, the five-minute cache alive until 301 s: Pi's warming is not stopped.
+		assert.equal(h.decide(), undefined, "Pi's warming decides while the cache can be alive");
 	});
 	assert.deepEqual([r.stop.action, r.stop.stop, r.h.warms.length], ["skip", "unable", 0]);
 	assert.match(r.stop.reason, /^the extension no longer holds the period's request \(the model, the branch or the conversation changed\), so it can't refresh it$/);
 	assert.equal(r.footer, undefined, "no 'keep-warm ended': the period is Pi's");
 	// The branch move forgot the request, so the footer no longer says what was sent.
 	assert.equal(lastFooter(r.h), "cache cold · next message full price · keep-warm: Pi's (request let go) · short 5m (in use) · long 5m · api $3/$15 per M");
-	assert.equal(r.h.decide(), undefined);
+	// Three hours on, nothing seen says the period's cache is alive (Pi's refreshes included): Pi's refresh would write it.
+	assert.deepEqual(r.h.decide(), { action: "stop" });
 });
 
 test("R4: an abort by a real request ends nothing; the new answer starts a new period", async (t) => {
@@ -973,6 +976,11 @@ test("R7/2: a lifetime that reads differently during a period ends warming (unab
 		h.emit("agent_settled");
 		await h.idle(60_000);
 		change(h);
+		if (label === "model data changed") {
+			// Handed over at once, its five minutes counted from the answer at 1 s: until 301 s Pi's warming is not stopped.
+			await h.idle(15_000);
+			assert.equal(h.decide(), undefined, `${label}: Pi's warming decides while the cache can be alive`);
+		}
 		await h.idle(2 * HOUR);
 		assert.equal(h.state.attempts, 0, `${label}: no refresh`);
 		const stops = traces().filter((r) => r.stop);
@@ -980,8 +988,9 @@ test("R7/2: a lifetime that reads differently during a period ends warming (unab
 		assert.equal(stops[0].stop, "unable");
 		assert.match(stops[0].reason, reason);
 		assert.equal(stops[0].lifetimeSeconds, 300, "logged with the period's lifetime");
-		// The extension knows it will not send: Pi's decision stands (R7), for the rest of the period.
-		assert.equal(h.decide(), undefined, "Pi's warming decides from then on");
+		// The extension knows it will not send: Pi's warming decides, and is stopped only once nothing seen says the cache is
+		// alive (two hours on, past the shortest lifetime read); where no lifetime can be read, never.
+		assert.deepEqual(h.decide(), label === "lifetime unknown" ? undefined : { action: "stop" }, "Pi's warming decides from then on");
 	}
 });
 
@@ -1407,7 +1416,8 @@ test("R7b/3: the last gate is the only path: with each single condition broken, 
 		if (label !== "the refresh was cancelled") {
 			const drift = ["the model changed", "the lifetime changed", "a write of another lifetime", "Pi's refresh wrote otherwise"].includes(label);
 			assert.match((await h.command("cache-keeper")).match(/keep warm: .*/)?.[0] ?? "", drift ? /left to Pi's own warming: / : /^keep warm: (off|.*\$0 spent.*)$/, `${label}: nothing counted`);
-			if (drift) assert.equal(h.decide(), undefined, `${label}: Pi's decision stands`);
+			// Pi's decision stands while anything seen says the cache can be alive; the 60-second lifetime read last has passed.
+			if (drift) assert.deepEqual(h.decide(), label === "the lifetime changed" ? { action: "stop" } : undefined, `${label}: Pi's decision stands`);
 		}
 	}
 });
@@ -2150,41 +2160,6 @@ test("the owned period's expiry: Pi's refresh entries, or when they were recorde
 	assert.deepEqual(h.warms.map((w) => w.at / 1000).slice(0, 2), [1711, 3421], "90 s before 3,511 s (counted from Pi's entry: 3,560 s, after the cache expired)");
 });
 
-test("the owned period's expiry is the one value the footer, /cache-keeper, the refresh timer, the last safe moment and compaction before expiry read", async (t) => {
-	t.after(() => mock.timers.reset());
-	clock();
-	fresh({ minContextTokens: 0 });
-	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
-	h.emit("agent_settled");
-	await h.idle(276_000);
-	// The refresh at 276 s reported a hit: the expiry is 576 s. Pi's entry recorded at 300 s would say 600 s.
-	assert.deepEqual(h.warms.map((w) => w.at / 1000), [276]);
-	mock.timers.tick(23_000);
-	h.ctx.sessionManager.appendUsage("cache_warm", h.model.provider, h.model.id, h.usage());
-	await h.idle(100_000);
-	const expiry = 576_000;
-	const left = `${formatRemaining(expiry - Date.now())} left`;
-	assert.ok(lastFooter(h)?.startsWith(`cache warm · ${left} · `), `the footer: ${lastFooter(h)}`);
-	assert.match(await h.command("cache-keeper"), new RegExp(`cache: ${left} \\(lifetime 5 min`), "/cache-keeper");
-	// A message stays queued: the refresh timer, the last safe moment and compaction before expiry each log what they
-	// counted with.
-	h.state.pending = true;
-	await h.idle(200_000);
-	const records = traces().filter((r) => (r.event === "warm" || r.event === "expiry") && r.secondsLeft !== undefined && Date.parse(r.at) > 400_000);
-	const seen = records.map((r) => [r.event, r.reason.slice(0, 20), Date.parse(r.at) / 1000, r.secondsLeft]);
-	assert.deepEqual(
-		seen,
-		[
-			["warm", "Pi is busy or has qu", 551, 25],
-			["expiry", "Pi is busy or has qu", 556, 20],
-			["warm", "too late: less than ", 564, 12],
-		],
-		"the refresh due at 551 s, compaction at 556 s, the last safe moment passed at 563.5 s",
-	);
-	for (const r of records) assert.equal(Date.parse(r.at) + r.secondsLeft * 1000, expiry, `${r.event} ${r.action}`);
-	assert.equal(h.warms.length, 1);
-});
-
 // A gateway (the harness's cliproxyapi/sub/claude) whose model comes from a Claude login, with the API key's facts
 // beside it: the key route's short cache lasts `keyShort` seconds.
 const gateway = (t: { after: (fn: () => void) => void }, keyShort: number) => {
@@ -2405,7 +2380,8 @@ test("evidence since the start: Pi's refresh reporting a write of another lifeti
 		if (evidence !== "the route only") h.ctx.sessionManager.appendUsage("cache_warm", h.model.provider, h.model.id, receipt);
 		if (evidence !== "the receipt only") keyRoute(h);
 		await h.idle(270_000);
-		assert.equal(h.decide(), undefined, `${evidence}: Pi's refresh at 543 s goes out`);
+		// Without Pi's receipt nothing seen says the cache outlived the five minutes read since: Pi is stopped.
+		assert.deepEqual(h.decide(), evidence === "the route only" ? { action: "stop" } : undefined, `${evidence}: Pi's refresh at 543 s goes out, or is stopped`);
 		await h.idle(2 * HOUR);
 		await flush();
 		assert.deepEqual(refreshesOf(h), [], `${evidence}: the extension sends nothing`);
@@ -2617,7 +2593,7 @@ test("a period whose warming ended on its time limit is still asked: evidence ag
 		if (evidence !== "the route only") h.ctx.sessionManager.appendUsage("cache_warm", h.model.provider, h.model.id, receipt);
 		if (evidence !== "the receipt only") keyRoute(h);
 		await h.idle(270_000);
-		assert.equal(h.decide(), undefined, `${evidence}: Pi's proposal at 543 s goes out`);
+		assert.deepEqual(h.decide(), evidence === "the route only" ? { action: "stop" } : undefined, `${evidence}: Pi's proposal at 543 s goes out, or is stopped`);
 		assert.match(await h.command("cache-keeper"), /this session is left to Pi's own warming: /, evidence);
 		assert.deepEqual(refreshesOf(h), []);
 	}
@@ -2917,10 +2893,11 @@ test("compaction before expiry, keep-warm off: a credential lookup that outlasts
 	}
 });
 
-// The reviewer's sequence: an owned period on the login's hour; at 294 s the gateway shows the API key's 5-minute route,
-// so the cache expires at 301 s and compaction before expiry starts at once; a 2.1-s credential lookup carries the
-// summary past the expiry.
-test("compaction before expiry, keep-warm on: the gateway shows the 5-minute route at 294 s; a 2.1-s credential lookup leaves nothing and cancels the compaction; a fast one leaves and reads the cache", async (t) => {
+// The reviewer's sequence: an owned period on the login's hour; at 294 s the gateway shows the API key's 5-minute route.
+// The route changed since the period's answer: the cache's expiry is unknown for the rest of the period (the login's
+// cache says nothing about the key's), so compacting before expiry never starts, whatever the credential lookup takes.
+// On 0.5.3 and before this change, a summary started at once and left while the five minutes lasted.
+test("compaction before expiry, keep-warm on: the gateway shows the 5-minute route at 294 s; the route changed, so no compaction starts, with a 2.1-s credential lookup or a fast one", async (t) => {
 	t.after(() => mock.timers.reset());
 	online(t);
 	for (const lookupMs of [2_100, 0]) {
@@ -2932,12 +2909,205 @@ test("compaction before expiry, keep-warm on: the gateway shows the 5-minute rou
 		await run.h.idle(293_000);
 		keyRoute(run.h);
 		await run.h.idle(HOUR);
-		assert.deepEqual(run.h.warms.filter((w) => (w.options as { maxTokens?: number }).maxTokens === 1), [], "no refresh");
-		const started = Date.parse(allTraces().find((r) => r.event === "expiry" && r.action === "compact").at);
-		assert.ok(started > 294_000 && started < 301_000, `started at ${started}`);
-		await checkGate(`lookup ${lookupMs / 1000} s`, lookupMs, run, { startedAt: started });
+		assert.deepEqual(run.h.warms.filter((w) => (w.options as { maxTokens?: number }).maxTokens === 1), [], `lookup ${lookupMs / 1000} s: no refresh`);
+		assert.equal(run.h.state.compacts, 0, `lookup ${lookupMs / 1000} s: no compaction starts`);
+		assert.deepEqual(run.summaries, [], `lookup ${lookupMs / 1000} s: nothing left`);
+		assert.equal(allTraces().find((r) => r.event === "expiry"), undefined, `lookup ${lookupMs / 1000} s: compacting before expiry was not tried`);
 		mock.timers.reset();
 	}
+});
+
+// ------------------------------------------------- one clock: every state of the warmer, every kind of later evidence
+
+// A 30-minute route whose answers report no write breakdown (the period goes by the data), behind a gateway whose API-key
+// route also lasts 30 minutes. Prices where one refresh costs nearly a miss, so the budget ends after one refresh. Each
+// refresh answers as `respond` says (a hit by default); `holdFirst` keeps the first one out until `release`. A summary's
+// credential lookup takes 25 s, longer than compaction before expiry's 20-s lead, so the summary's last check falls after
+// the expiry it was started for.
+const NEAR_MISS = { input: 3, output: 0, cacheRead: 1.4, cacheWrite: 0 };
+const FIVE_RECEIPT = { input: 5, output: 1, cacheRead: 570_000, cacheWrite: 30_000, cacheWrite1h: 0 };
+function everyState(t: { after: (fn: () => void) => void }, o: { respond?: (n: number) => { stopReason?: string; errorMessage?: string; usage?: Fields }; holdFirst?: boolean; params?: unknown }) {
+	const keyRoute = gateway(t, 1800);
+	const sent: { at: number; kind: "refresh" | "summary" }[] = [];
+	let release: (() => void) | undefined;
+	let compaction: Promise<unknown> | undefined;
+	let refreshes = 0;
+	const h = harness({
+		lifetime: 1800,
+		cost: NEAR_MISS,
+		ui: true,
+		model: NO_BREAKDOWN,
+		stream: (s) => ({
+			result: async () => {
+				const summary = (s as { maxTokens?: number }).maxTokens !== 1;
+				if (summary) mock.timers.tick(25_000);
+				const n = summary ? 0 : ++refreshes;
+				try {
+					await s.onPayload(summary ? { ...h.sent, messages: [...h.sent.messages, { role: "user", content: "x" }] } : (o.params ?? { model: "rebuilt", max_tokens: 1, messages: [] }));
+				} catch (error) {
+					return { stopReason: "error", errorMessage: (error as Error).message, content: [], usage: h.usage({ input: 0, output: 0, cacheRead: 0 }) };
+				}
+				sent.push({ at: Date.now(), kind: summary ? "summary" : "refresh" });
+				const answer = summary ? {} : (o.respond?.(n) ?? {});
+				const response = { stopReason: answer.stopReason ?? "stop", errorMessage: answer.errorMessage, content: [{ type: "text", text: summary ? "The summary." : "" }], usage: h.usage(answer.usage) };
+				if (!summary && n === 1 && o.holdFirst) return new Promise((resolve) => (release = () => resolve(response)));
+				return response;
+			},
+		}),
+	});
+	h.ctx.compact = () => {
+		h.state.compacts++;
+		compaction = h.emit("session_before_compact", {
+			reason: "manual",
+			branchEntries: [...h.branch],
+			signal: new AbortController().signal,
+			preparation: { tokensBefore: 600_000, firstKeptEntryId: "u", messagesToSummarize: [], turnPrefixMessages: [], isSplitTurn: false, fileOps: { read: new Set(), written: new Set(), edited: new Set() }, settings: { reserveTokens: 16_384, keepRecentTokens: 20_000 } },
+		}) as Promise<unknown>;
+	};
+	// Pi's refreshes recorded on the branch, as Pi appends them (after its leaf), so the summary's kept messages are found.
+	const append = h.ctx.sessionManager.appendUsage;
+	h.ctx.sessionManager.appendUsage = (...args: Parameters<typeof append>) => {
+		const parentId = (h.branch.at(-1) as { id?: string } | undefined)?.id ?? null;
+		const entry = append(...args);
+		(entry as { parentId: string | null }).parentId = parentId;
+		return entry;
+	};
+	const loginRoute = () => h.signal("model-upstreams:answered", { provider: "cliproxyapi", model: "sub/claude", upstreams: [{ provider: "claude-subscription", model: "claude-sonnet-5-5", subscription: true }] });
+	return { h, sent, keyRoute: () => keyRoute(h), loginRoute, release: () => release?.(), compaction: () => compaction };
+}
+type Run = ReturnType<typeof everyState>;
+// Each state of the warmer, reached from a period whose answer is at 1 s; `anchor`: the period's last sure fact (its
+// answer, or the send of its latest refresh that reported a hit), `out`: a refresh stays out, `plain`: keep-warm read off.
+const STATES: { state: string; options?: Parameters<typeof everyState>[1]; settings?: Record<string, unknown>; reach: (r: Run) => Promise<{ anchor: number; out?: boolean; plain?: boolean; ownEvidence?: boolean }> }[] = [
+	{ state: "waiting", reach: async (r) => (await r.h.idle(99_000), { anchor: 1_000, ownEvidence: true }) },
+	{ state: "out", options: { holdFirst: true }, reach: async (r) => (await r.h.idle(1_719_000), { anchor: 1_000, out: true, ownEvidence: true }) },
+	{ state: "ended on its budget", settings: { keepWarmMinutes: 1440 }, reach: async (r) => (await r.h.idle(3_429_000), { anchor: 1_711_000 }) },
+	{ state: "ended on a miss", options: { respond: () => ({ usage: { cacheRead: 300_000, cacheWrite: 300_000 } }) }, reach: async (r) => (await r.h.idle(1_719_000), { anchor: 1_000 }) },
+	{ state: "ended on an unreported refresh", options: { respond: () => ({ usage: { input: 0, output: 1, cacheRead: 0, cacheWrite: 0 } }) }, reach: async (r) => (await r.h.idle(1_719_000), { anchor: 1_000 }) },
+	{ state: "ended on a failed refresh", options: { respond: () => ({ stopReason: "error", errorMessage: "overloaded", usage: { input: 0, output: 0, cacheRead: 0 } }) }, reach: async (r) => (await r.h.idle(1_719_000), { anchor: 1_000 }) },
+	{ state: "ended on its time limit", settings: { keepWarmMinutes: 10 }, reach: async (r) => (await r.h.idle(99_000), { anchor: 1_000 }) },
+	{ state: "ended as unable", options: { params: { model: "rebuilt", max_tokens: 2, messages: [] } }, reach: async (r) => (await r.h.idle(1_719_000), { anchor: 1_000 }) },
+	{
+		state: "handed over on evidence",
+		reach: async (r) => {
+			await r.h.idle(49_000);
+			// Pi's refresh wrote the hour: another lifetime than the period's 30 minutes, not a shorter one.
+			r.h.ctx.sessionManager.appendUsage("cache_warm", r.h.model.provider, r.h.model.id, { input: 5, output: 1, cacheRead: 570_000, cacheWrite: 30_000, cacheWrite1h: 30_000 });
+			await r.h.idle(50_000);
+			return { anchor: 1_000 };
+		},
+	},
+	{ state: "let go", reach: async (r) => (await r.h.idle(49_000), r.h.emit("session_tree"), await r.h.idle(50_000), { anchor: 1_000 }) },
+	{
+		state: "two misses on the model",
+		options: { respond: () => ({ usage: { cacheRead: 300_000, cacheWrite: 300_000 } }) },
+		reach: async (r) => {
+			await r.h.idle(1_718_000);
+			r.h.run(true);
+			const answer = Date.now();
+			await r.h.idle(1_719_000);
+			return { anchor: answer };
+		},
+	},
+	{ state: "keep-warm switched off", reach: async (r) => (await r.h.idle(49_000), settings({ keepWarmMinutes: 0, minContextTokens: 100_000 }), await r.h.idle(50_000), { anchor: 1_000, plain: true }) },
+];
+const EVIDENCE: { evidence: string; own?: boolean; floor?: number; unknown?: "the route changed" | "no lifetime can be read"; apply: (r: Run) => void }[] = [
+	{ evidence: "Pi's refresh writes into the five-minute cache", floor: 300_000, apply: (r) => r.h.ctx.sessionManager.appendUsage("cache_warm", r.h.model.provider, r.h.model.id, FIVE_RECEIPT) },
+	{ evidence: "the extension's own refresh writes into the five-minute cache", own: true, floor: 300_000, apply: () => {} },
+	{ evidence: "Pi's refresh writes into both caches", floor: 300_000, apply: (r) => r.h.ctx.sessionManager.appendUsage("cache_warm", r.h.model.provider, r.h.model.id, { input: 5, output: 1, cacheRead: 0, cacheWrite: 180_000, cacheWrite1h: 4_096 }) },
+	{ evidence: "the route's data gives the tier five minutes", floor: 300_000, apply: (r) => (r.h.model.promptCache = { short: 300, long: 300 }) },
+	{ evidence: "the route's data gives the tier nothing", unknown: "no lifetime can be read", apply: (r) => delete (r.h.model as { promptCache?: unknown }).promptCache },
+	{ evidence: "another route is announced", unknown: "the route changed", apply: (r) => r.keyRoute() },
+	{ evidence: "another route is announced, then the first one again", unknown: "the route changed", apply: (r) => (r.keyRoute(), r.loginRoute()) },
+];
+const minutesLabel = (ms: number) => `${Math.round(ms / 60_000)}m`;
+
+test("one clock: in every state of the warmer, after every kind of later evidence, the footer, its lifetime in use, /cache-keeper, compacting before expiry and the summary's last check read the same expiry, and nothing leaves at or after it or while it is unknown", async (t) => {
+	t.after(() => mock.timers.reset());
+	online(t);
+	withRetention(t, undefined);
+	let rows = 0;
+	for (const s of STATES) {
+		for (const e of EVIDENCE) {
+			// The extension's own refresh reports only where one goes out after the evidence's moment: waiting, or out.
+			if (e.own && s.state !== "waiting" && s.state !== "out") continue;
+			const label = `${s.state}; ${e.evidence}`;
+			clock();
+			fresh({ minContextTokens: 100_000, ...s.settings });
+			const own = e.own ? { respond: () => ({ usage: { cacheRead: 570_000, cacheWrite: 30_000, cacheWrite1h: 0 } }) } : {};
+			const r = everyState(t, { ...s.options, ...own });
+			r.h.emit("agent_settled");
+			const reached = await s.reach(r);
+			let anchor = reached.anchor;
+			const at = Date.now();
+			e.apply(r);
+			if (e.own && reached.out) {
+				r.release();
+				await flush();
+				anchor = 1_711_000;
+			}
+			if (e.own && !reached.out) {
+				// The first refresh, 90 s before the 30-minute expiry, reports the five-minute write.
+				await r.h.idle(1_711_000 - Date.now());
+				await flush();
+				anchor = 1_711_000;
+			}
+			const evidenceAt = Date.now();
+			await r.h.idle(16_000);
+			await flush();
+			// What keep-warm off counts (as on main): Pi's refreshes move it, the data now gives the lifetime.
+			const plain = reached.plain
+				? e.unknown === "no lifetime can be read"
+					? undefined
+					: { expiry: (e.evidence.startsWith("Pi's") ? at : 1_000) + (e.floor === 300_000 && !e.evidence.startsWith("Pi's") ? 300_000 : 1_800_000), lifetime: e.floor === 300_000 && !e.evidence.startsWith("Pi's") ? 300_000 : 1_800_000 }
+				: undefined;
+			const unknown = reached.plain ? undefined : e.unknown;
+			const lifetime = reached.plain ? plain?.lifetime : e.unknown === "no lifetime can be read" ? undefined : (e.floor ?? 1_800_000);
+			const expiry = reached.plain ? plain?.expiry : unknown ? undefined : anchor + (e.floor ?? 1_800_000);
+			const now = Date.now();
+			const footer = lastFooter(r.h) ?? "";
+			const shown = (await r.h.command("cache-keeper")).match(/\ncache: .*/)?.[0] ?? "";
+			// The footer's countdown and /cache-keeper's line.
+			if (lifetime === undefined) assert.match(shown, /cache: lifetime unknown, so no countdown/, `${label}: /cache-keeper`);
+			if (expiry === undefined) {
+				if (lifetime !== undefined) assert.match(shown, new RegExp(`cache: expired \\(lifetime ${formatRemaining(lifetime).replace(" left", "")}|cache: expired \\(lifetime \\d+ min.*counted as expired: ${unknown}`), `${label}: /cache-keeper`);
+				if (unknown) assert.match(footer, /^cache cold/, `${label}: the footer`);
+			} else if (expiry > now) {
+				const left = `${formatRemaining(expiry - now)} left`;
+				if (!reached.out || e.own) assert.ok(footer.startsWith(`cache warm · ${left} · `), `${label}: the footer ${footer}, expected ${left}`);
+				assert.ok(shown.startsWith(`\ncache: ${left} (lifetime ${lifetime! / 60_000} min`), `${label}: /cache-keeper ${shown}, expected ${left}`);
+			} else {
+				if (!reached.out || e.own) assert.match(footer, /^cache cold/, `${label}: the footer`);
+				assert.ok(shown.startsWith(`\ncache: expired (lifetime ${lifetime! / 60_000} min`), `${label}: /cache-keeper ${shown}`);
+			}
+			// The lifetime the footer marks in use is the countdown's. With keep-warm read off the footer's values are main's,
+			// read again only when Pi's events say so; that is left as it is.
+			if (lifetime !== undefined && !reached.plain) assert.match(footer, new RegExp(`short ${minutesLabel(lifetime)} \\(in use\\)`), `${label}: the lifetime in use, ${footer}`);
+			// Then the rest of the idle time: compacting before expiry starts 20 s before that same expiry, and its summary's last
+			// check, after a 25-s credential lookup, falls after it: nothing leaves. Nothing leaves at or after the expiry, nor at
+			// all once it is unknown.
+			await r.h.idle(3 * HOUR);
+			await r.compaction();
+			await flush();
+			const after = r.sent.filter((x) => x.at >= evidenceAt);
+			if (expiry === undefined) assert.deepEqual(after, [], `${label}: nothing leaves on an unknown expiry`);
+			else assert.ok(after.every((x) => x.at < expiry), `${label}: nothing at or after ${expiry / 1000} s: ${JSON.stringify(after)}`);
+			const started = allTraces().filter((x) => x.event === "expiry" && Date.parse(x.at) >= evidenceAt);
+			// With keep-warm off, as on main, the countdown keeps the expiry it had when the lifetime can't be read any more;
+			// the summary's last check then finds none, and nothing leaves.
+			const countedTo = reached.plain && lifetime === undefined ? 1_801_000 : expiry;
+			if (countedTo === undefined || countedTo - 20_000 <= now || (reached.out && !e.own)) assert.deepEqual(started, [], `${label}: compacting before expiry not tried`);
+			else {
+				assert.equal(started.length, 1, `${label}: compacting before expiry tried once`);
+				assert.equal(Date.parse(started[0].at) + started[0].secondsLeft * 1000, countedTo, `${label}: from the same expiry`);
+				const summary = allTraces().find((x) => x.event === "compact");
+				if (started[0].action === "compact") assert.deepEqual([summary?.outcome, summary?.reason], ["cancelled", "the prompt cache expired before the summary request left"], `${label}: the summary's last check`);
+			}
+			rows++;
+			mock.timers.reset();
+		}
+	}
+	assert.equal(rows, 12 * 6 + 2);
 });
 
 // /tree to another branch: the countdown belongs to the branch in front of the user. A period's facts apply only while
@@ -3381,11 +3551,11 @@ test("footer: after a model switch, the new model's lifetimes and price, and not
 	h.emit("model_select");
 	assert.equal(lastFooter(h), "keep-warm 2h · short 5m · long 1h · api $1.25/$10 per M");
 	// Back on Claude, which has answered in this session: the request was forgotten with the switch, so the extension
-	// can't refresh the period any more: it is Pi's, and the tier in use is read as for a period left to Pi
-	// (no request: the retention in force, short, which lasts an hour here too).
+	// can't refresh the period any more: it is Pi's, and the tier in use is still the one the period's request asked for
+	// (the stated hour), with the lifetime its clock counts.
 	h.ctx.model = h.model as never;
 	h.emit("model_select");
-	assert.equal(lastFooter(h), "keep-warm: Pi's (request let go) · short 1h (in use) · long 1h · api $3/$15 per M");
+	assert.equal(lastFooter(h), "keep-warm: Pi's (request let go) · long 1h (in use) · short 1h · api $3/$15 per M");
 	assert.equal(h.decide(), undefined, "Pi's warming decides");
 
 	// A period left to Pi is said for its own model only.
