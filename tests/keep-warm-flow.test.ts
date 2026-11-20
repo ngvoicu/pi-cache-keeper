@@ -63,10 +63,12 @@ function harness(options: Options = {}) {
 	const respond = options.respond;
 	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 	const commands = new Map<string, (args: string, ctx: unknown) => unknown>();
+	// Events between extensions (a proxy saying what served a request): `signal` delivers one.
+	const bus = new Map<string, (payload: unknown) => void>();
 	const pi = {
 		on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(event, handler),
 		registerEntryRenderer: () => {},
-		events: { on: () => () => {}, emit: () => {} },
+		events: { on: (name: string, handler: (payload: unknown) => void) => (bus.set(name, handler), () => {}), emit: () => {} },
 		registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => unknown }) => commands.set(name, command.handler),
 		appendEntry: () => {},
 		getThinkingLevel: () => thinkingLevel.value,
@@ -224,7 +226,8 @@ function harness(options: Options = {}) {
 		await commands.get(name)?.("", ctx);
 		return notes.join("\n");
 	};
-	return { emit, idle, warms, state, sent, model, branch, statuses, notes, command, decide, run, usage: refreshUsage, ctx, thinkingLevel, release: () => pending?.() };
+	const signal = (name: string, payload: unknown) => bus.get(name)?.(payload);
+	return { emit, idle, warms, state, sent, model, branch, statuses, notes, command, decide, run, usage: refreshUsage, ctx, thinkingLevel, release: () => pending?.(), signal };
 }
 
 const allTraces = () =>
@@ -2160,6 +2163,140 @@ test("the owned period's expiry is the one value the footer, /cache-keeper, the 
 	);
 	for (const r of records) assert.equal(Date.parse(r.at) + r.secondsLeft * 1000, expiry, `${r.event} ${r.action}`);
 	assert.equal(h.warms.length, 1);
+});
+
+// A gateway (the harness's cliproxyapi/sub/claude) whose model comes from a Claude login, with the API key's facts
+// beside it: the key route's short cache lasts `keyShort` seconds.
+const gateway = (t: { after: (fn: () => void) => void }, keyShort: number) => {
+	const path = join(dir, "cache-keeper-models.json");
+	writeFileSync(
+		path,
+		JSON.stringify({
+			version: 1,
+			providers: { "claude-subscription": { "claude-sonnet-5-5": { short: 3600, long: 3600 } }, anthropic: { "claude-sonnet-5-5": { short: keyShort, long: 3600 } } },
+			upstreams: { cliproxyapi: { "sub/claude": { upstreams: [{ provider: "claude-subscription", model: "claude-sonnet-5-5", subscription: true }] } } },
+			written: {},
+		}),
+	);
+	t.after(() => rmSync(path, { force: true }));
+	// What the proxy says once a request was served by the API key.
+	return (h: ReturnType<typeof harness>) => h.signal("model-upstreams:answered", { provider: "cliproxyapi", model: "sub/claude", upstreams: [{ provider: "anthropic", model: "claude-sonnet-5-5", subscription: false }] });
+};
+
+// The reviewer's first sequence: the period started on the login's hour; at 400 s an answer shows the API key's
+// 5-minute route served the request. The lifetime read now is shorter: warming ends ("unable"), and every reader counts
+// with the 5 minutes from then on, which have passed: the footer reads cold and no summary is sent at 3,580 s.
+test("the owned period never counts a longer lifetime than the one read now: a route change reported by an answer", async (t) => {
+	t.after(() => mock.timers.reset());
+	online(t);
+	clock();
+	fresh();
+	const keyRoute = gateway(t, 300);
+	const h = harness({ lifetime: 3600, cost: WITH_WRITE, ui: true });
+	h.emit("agent_settled");
+	await h.idle(399_000);
+	assert.match(lastFooter(h) ?? "", /^cache warm · 53m left/);
+	keyRoute(h);
+	await h.idle(15_000);
+	assert.match(lastFooter(h) ?? "", /^cache cold/, "cold from then");
+	assert.match(await h.command("cache-keeper"), /cache: expired \(lifetime 5 min/);
+	await h.idle(HOUR);
+	assert.equal(h.state.compacts, 0, "no summary after the shorter lifetime passed");
+	assert.deepEqual(h.warms, []);
+	assert.match(traces().find((r) => r.stop)?.reason ?? "", /^the cache lifetime now reads 5 min, the cached request was written with 60 min/);
+});
+
+// The reviewer's second sequence: Pi's own refresh during a long run comes back after the period started, through the
+// API key's route (2.5 minutes). The period's 10-minute expiry counts with 2.5 minutes from then: long passed.
+test("the owned period never counts a longer lifetime than the one read now: a route change reported by Pi's in-run refresh", { skip: noWarmer }, async (t) => {
+	t.after(() => mock.timers.reset());
+	online(t);
+	clock();
+	fresh();
+	const keyRoute = gateway(t, 150);
+	const h = harness({ lifetime: 600, cost: WITH_WRITE, ui: true });
+	// The answer's request at 1 s; the answer streams until 545 s, and Pi's warmer refreshes the request at 541 s.
+	h.state.idle = false;
+	h.emit("agent_start");
+	const piSent: number[] = [];
+	let landed: (() => void) | undefined;
+	const answer = () => ({ stopReason: "stop", provider: h.model.provider, model: h.model.id, usage: h.usage() });
+	const warmer = new CacheWarmer(
+		{
+			streamSimple: () => {
+				piSent.push(Date.now());
+				return { result: () => new Promise((resolve) => (landed = () => resolve(answer()))) };
+			},
+		},
+		h.ctx.sessionManager,
+		() => "idle",
+		async (event: { action: string }) => (h.emit("cache_warming_decision", event) as { action?: string } | undefined)?.action ?? event.action,
+	);
+	t.after(() => warmer.cancel());
+	warmer.start({ model: h.model, context: { messages: [] }, options: {} }, () => true);
+	for (let s = 0; s < 544; s++) {
+		mock.timers.tick(1000);
+		await flush();
+	}
+	assert.deepEqual(piSent, [541_000]);
+	h.state.idle = true;
+	h.emit("agent_settled");
+	warmer.onAgentSettled();
+	assert.match(lastFooter(h) ?? "", /^cache warm · 0:56 left/, "owned, on the login's 10 minutes");
+	await h.idle(3_000);
+	// Pi's refresh lands; the proxy says the API key served it.
+	landed?.();
+	keyRoute(h);
+	await flush();
+	await h.idle(15_000);
+	assert.match(lastFooter(h) ?? "", /^cache cold/);
+	await h.idle(HOUR);
+	assert.equal(h.state.compacts, 0, "no summary after the shorter lifetime passed");
+	assert.deepEqual(h.warms, []);
+	assert.equal(traces().find((r) => r.stop)?.stop, "unable");
+});
+
+test("the owned period never counts a longer lifetime than the one read now: where none can be read any more, it counts as expired (no automatic summary)", async (t) => {
+	t.after(() => mock.timers.reset());
+	clock();
+	fresh();
+	const h = harness({ lifetime: 3600, cost: WITH_WRITE, ui: true });
+	h.emit("agent_settled");
+	await h.idle(100_000);
+	// The model's lifetime is gone (its data changed): nothing to count with.
+	delete (h.model as { promptCache?: unknown }).promptCache;
+	await h.idle(HOUR);
+	assert.equal(h.state.compacts, 0);
+	assert.deepEqual(h.warms, []);
+	assert.match(traces().find((r) => r.stop)?.reason ?? "", /^the cache lifetime is now unknown/);
+	assert.match(await h.command("cache-keeper"), /cache: lifetime unknown, so no countdown/);
+	assert.match(lastFooter(h) ?? "", /^cache cold/, "counted as expired");
+});
+
+// /tree to another branch: the countdown belongs to the branch in front of the user. A period's facts apply only while
+// the branch still holds the period's answer.
+test("/tree to an independent branch whose cache is an hour old: the footer and /cache-keeper read that branch, cold", async (t) => {
+	t.after(() => mock.timers.reset());
+	for (const keepWarmMinutes of [0, 120]) {
+		clock();
+		fresh({ keepWarmMinutes, compactBeforeExpiry: false });
+		const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+		// The harness's first branch answered at 1 s; an hour later another branch answers.
+		const old = h.branch.slice();
+		h.emit("agent_settled");
+		await h.idle(HOUR);
+		h.branch.length = 0;
+		h.run(true);
+		mock.timers.tick(2000);
+		assert.match(lastFooter(h) ?? "", /^cache warm · 4m left/, `${keepWarmMinutes}: the fresh answer`);
+		// Select the old branch without a summary.
+		h.branch.splice(0, h.branch.length, ...old);
+		h.emit("session_tree");
+		mock.timers.tick(1000);
+		assert.match(lastFooter(h) ?? "", /^cache cold/, `${keepWarmMinutes}: the selected branch`);
+		assert.match(await h.command("cache-keeper"), /cache: expired/, `${keepWarmMinutes}: /cache-keeper`);
+		mock.timers.reset();
+	}
 });
 
 test("R9: one miss counted, then the command with only a count to clear", async (t) => {

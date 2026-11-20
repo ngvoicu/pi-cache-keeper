@@ -343,17 +343,25 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const keptState = (model: Model<Api>, entries: SessionEntry[], requested: "short" | "long") => cacheState(servedModel(model), entries, undefined, true, requested);
 	// The one expiry everything reads: the countdown and the footer, the refresh timer and its last safe moment,
 	// compacting before expiry, the cached path's check, /cache-keeper. For a period the extension keeps warm, from that
-	// period's own facts only (expiryOf: its answer, and when its latest refresh that reported a hit left), with the
-	// period's lifetime; nothing to count from where the branch no longer holds a cached answer (after a compaction,
-	// say). Otherwise (keep-warm off, or a period left to Pi) exactly as with keep-warm off, where a period that was kept
-	// warm before it was left to Pi adds its own confirmed refreshes.
+	// period's own facts only (expiryOf: its answer, and when its latest refresh that reported a hit left), counted with
+	// the period's lifetime, or with the one read now for its request where that is shorter (a gateway showed another
+	// route since): never a longer one. Where no lifetime can be read any more, it counts as expired: when in doubt, no
+	// automatic paid request. The period's facts hold only for its model and while the branch in front of the user still
+	// holds its answer (after /tree to another branch, that branch's own state); nothing to count from where the branch
+	// no longer holds a cached answer (after a compaction, say). Otherwise (keep-warm off, or a period left to Pi)
+	// exactly as with keep-warm off, where a period that was kept warm before it was left to Pi adds its own confirmed
+	// refreshes.
 	const stateOf = (model: Model<Api>, entries: SessionEntry[]): CacheState => {
 		const p = period;
 		if (!owns(p)) return cacheState(servedModel(model), entries, p?.warm.refreshedAt);
 		const state = keptState(model, entries, p.fixed.requested);
+		if (`${model.provider}/${model.id}` !== p.fixed.model || state.answeredAt !== p.answeredAt) return state;
 		if (state.refreshedAt === undefined || p.answeredAt === undefined) return { ...state, expiresAt: undefined };
-		const expiresAt = expiryOf(p.warm, p.answeredAt, p.fixed.ms);
-		return { ...state, lifetime: { ms: p.fixed.ms, source: p.fixed.source }, refreshedAt: expiresAt - p.fixed.ms, expiresAt };
+		const now = state.lifetime;
+		const ms = now === undefined ? 0 : Math.min(p.fixed.ms, now.ms);
+		const expiresAt = expiryOf(p.warm, p.answeredAt, ms);
+		const lifetime = now === undefined ? undefined : ms === p.fixed.ms ? { ms, source: p.fixed.source } : now;
+		return { ...state, lifetime, refreshedAt: expiresAt - ms, expiresAt };
 	};
 	// The last moment a refresh for a cache counted from `from` may leave: half the warm lead before its expiry.
 	const lastSafeMoment = (from: number, lifetimeMs: number) => from + lifetimeMs - Math.floor(warmLeadMs(lifetimeMs, EXPIRY_LEAD_MS) / 2);
