@@ -574,14 +574,23 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// lasts, countdown or not), warming ended for this idle period and why (until your next message), the period is
 	// Pi's and why, or keep-warm was switched on during the period.
 	const keepWarmView = (model: Model<Api>): KeepWarmView | undefined => {
-		if (warmMinutes() <= 0) return undefined;
+		const minutes = warmMinutes();
+		if (minutes <= 0) return undefined;
 		if (fallbackFor(model)) return { fallback: true };
 		const p = period;
-		// A period that started on another model (switched since) says nothing about this one.
-		if (!p || p.model !== `${model.provider}/${model.id}`) return undefined;
-		if (owns(p)) return p.ended && !running ? { ended: { stop: p.ended.stop, limit: keepWarmLabel(warmMinutes()), amounts: spendingText(p.budget, p.spending) } } : undefined;
+		// A period that started on another model (switched since) says nothing about this one; the setting still holds.
+		if (!p || p.model !== `${model.provider}/${model.id}`) return { goal: { minutes } };
+		if (owns(p)) {
+			if (running) return { goal: { minutes } };
+			if (p.ended) return { ended: { stop: p.ended.stop, limit: keepWarmLabel(minutes), amounts: spendingText(p.budget, p.spending) } };
+			// The extension keeps this period warm: until when (the time limit counts from Pi going idle), and its budget.
+			const budget = p.budget.priced
+				? { spent: formatUsd(p.spending.spent), of: formatUsd(p.budget.missCost) }
+				: { spent: String(p.spending.refreshes), of: String(MAX_UNPRICED_REFRESHES), refreshes: true as const };
+			return { goal: { minutes, until: p.idleSince + minutes * 60_000, budget } };
+		}
 		if (!p.onAtStart) return { pending: true };
-		return p.notOwnedLabel ? { leftToPi: p.notOwnedLabel } : undefined;
+		return p.notOwnedLabel ? { leftToPi: p.notOwnedLabel } : { goal: { minutes } };
 	};
 	const renderFooter = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;

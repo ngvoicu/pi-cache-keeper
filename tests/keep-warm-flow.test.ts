@@ -12,6 +12,7 @@ const settings = (cacheKeeper: Record<string, unknown>) => writeFileSync(join(di
 const readSettings = () => JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
 settings({ keepWarmMinutes: 120, minContextTokens: 100_000 });
 const { default: cacheKeeper } = await import("../index.ts");
+const { clockText } = await import("../footer.ts");
 const { formatRemaining } = await import("../trace.ts");
 
 const HOUR = 3_600_000;
@@ -2788,20 +2789,22 @@ test("footer: after a model switch, the new model's lifetimes and price, and not
 	const h = harness({ ui: true, cost: WITH_WRITE, sent });
 	h.emit("agent_settled");
 	// The retention in force is Pi's short default, so the request's hour is said against it.
-	assert.equal(lastFooter(h), "cache warm · 60m left · long 1h (in use) · short 1h · sent 1h (retention short) · api $3/$15 per M");
+	// Kept warm by the extension (keep-warm 2 h): the goal, until when, and its budget.
+	assert.equal(lastFooter(h), `cache warm · 60m left · keep-warm 2h until ${clockText(Date.now() + 2 * HOUR)}, $0 spent of $2.07 · long 1h (in use) · short 1h · sent 1h (retention short) · api $3/$15 per M`);
 	const gemini = { provider: "google", id: "gemini-3.8-pro", api: "google-generative-ai", contextWindow: 1_000_000, maxTokens: 64_000, cost: { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 } };
 	h.ctx.model = gemini as never;
 	h.emit("model_select");
 	// It said "long 1h (in use) · short unknown · api $1.25/$10 per M" before.
-	assert.equal(lastFooter(h), "cache lifetime unknown · api $1.25/$10 per M");
+	// Keep-warm is still on and set to 2 h: said as the setting, nothing about a period this model has not started.
+	assert.equal(lastFooter(h), "keep-warm 2h · cache lifetime unknown · api $1.25/$10 per M");
 	// A model with lifetimes of its own: both shown, neither in use.
 	h.ctx.model = { ...gemini, id: "gemini-3.8-cached", promptCache: { short: 300, long: 3600 } } as never;
 	h.emit("model_select");
-	assert.equal(lastFooter(h), "short 5m · long 1h · api $1.25/$10 per M");
+	assert.equal(lastFooter(h), "keep-warm 2h · short 5m · long 1h · api $1.25/$10 per M");
 	// Back on Claude, which has answered in this session: its tier is in use again; the request was forgotten with the switch.
 	h.ctx.model = h.model as never;
 	h.emit("model_select");
-	assert.equal(lastFooter(h), "long 1h (in use) · short 1h · api $3/$15 per M");
+	assert.equal(lastFooter(h), "keep-warm 2h · long 1h (in use) · short 1h · api $3/$15 per M");
 
 	// A period left to Pi is said for its own model only.
 	fresh();
@@ -2810,7 +2813,7 @@ test("footer: after a model switch, the new model's lifetimes and price, and not
 	assert.match(lastFooter(left)!, /^cache warm · 60m left · keep-warm: Pi's \(thinking on\) · /);
 	left.ctx.model = gemini as never;
 	left.emit("model_select");
-	assert.equal(lastFooter(left), "cache lifetime unknown · api $1.25/$10 per M");
+	assert.equal(lastFooter(left), "keep-warm 2h · cache lifetime unknown · api $1.25/$10 per M");
 });
 
 test("footer: a countdown counted from another model's answer is said to be so, also where the current model has made no request yet, after a switch and after /reload; not for the same model, nor during a run", async (t) => {
@@ -3025,4 +3028,58 @@ test("footer: a subscription login shows the prices the extension counts with; w
 	Object.assign(free.ctx.modelRegistry, login);
 	free.emit("agent_settled");
 	assert.equal(lastFooter(free), "cache warm · 60m left · long 1h (in use) · short 5m · sent 1h · sub, no per-token price");
+});
+
+// ------------------------------------------------------------------------------- the footer: the keep-warm goal
+
+test("footer: keep-warm's goal, with the time it runs to and the budget, while the extension keeps the period warm; nothing with keep-warm off", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	online(t);
+	shortRetention(t);
+	const values = " · short 5m (in use) · long 5m · sent default cache · api $3/$15 per M";
+	// Keep-warm off: nothing about it.
+	fresh({ keepWarmMinutes: 0, modelData: false });
+	const off = harness({ ui: true, lifetime: 300, cost: WITH_WRITE });
+	off.emit("agent_settled");
+	assert.equal(lastFooter(off), `cache warm · 5m left${values}`);
+	// On (2 h), waiting for the first refresh: the goal, until when (Pi went idle at the answer), nothing spent yet.
+	clock();
+	fresh({ modelData: false });
+	const h = harness({ ui: true, lifetime: 300, cost: WITH_WRITE });
+	h.emit("agent_settled");
+	const until = clockText(Date.now() + 2 * HOUR);
+	assert.equal(lastFooter(h), `cache warm · 5m left · keep-warm 2h until ${until}, $0 spent of $2.07${values}`);
+	// After a refresh: what it cost, and the countdown starts again.
+	await h.idle(280_000);
+	await flush();
+	assert.equal(h.warms.length, 1);
+	// The refresh went out 25 s before expiry, 5 s ago: the countdown started again from it.
+	assert.equal(lastFooter(h), `cache warm · 4m left · keep-warm 2h until ${until}, $0.18 spent of $2.07${values}`);
+	// During a run the extension keeps nothing warm: the setting only.
+	h.state.idle = false;
+	h.emit("agent_start");
+	assert.equal(lastFooter(h), `cache in use · keep-warm 2h${values}`);
+});
+
+test("footer: keep-warm's goal on a model without prices counts refreshes; a period left to Pi still says so, without the goal", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	online(t);
+	shortRetention(t);
+	fresh({ modelData: false });
+	const h = harness({ ui: true, lifetime: 300, cost: NO_PRICES });
+	h.emit("agent_settled");
+	const until = clockText(Date.now() + 2 * HOUR);
+	const values = " · short 5m (in use) · long 5m · sent default cache · api, price unknown";
+	assert.equal(lastFooter(h), `cache warm · 5m left · keep-warm 2h until ${until}, 0 of 10 refreshes${values}`);
+	await h.idle(280_000);
+	await flush();
+	assert.equal(lastFooter(h), `cache warm · 4m left · keep-warm 2h until ${until}, 1 of 10 refreshes${values}`);
+	// Left to Pi (a request with thinking on): the existing text, no goal.
+	clock();
+	fresh({ modelData: false });
+	const left = harness({ ui: true, lifetime: 300, cost: WITH_WRITE, thinking: { type: "enabled", budget_tokens: 1024 } });
+	left.emit("agent_settled");
+	assert.equal(lastFooter(left), "cache warm · 5m left · keep-warm: Pi's (thinking on) · short 5m (in use) · long 5m · sent default cache · api $3/$15 per M");
 });

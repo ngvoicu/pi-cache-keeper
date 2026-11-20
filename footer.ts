@@ -51,6 +51,7 @@ const PRIORITY = {
 	dataAlert: 80,
 	sentConflict: 75,
 	warmNote: 60,
+	warmGoal: 42,
 	inUse: 55,
 	price: 50,
 	offline: 45,
@@ -96,7 +97,23 @@ export type Countdown = { state: "warm"; ms: number } | { state: "cold" } | { st
  * /cache-keeper-warm), warming ended for this idle period and why (with the amounts), the period is left to Pi's own
  * warming and why, or keep-warm was switched on during a period and starts with the next message.
  */
-export type KeepWarmView = { fallback: true } | { ended: { stop: WarmStop; limit: string; amounts: string } } | { leftToPi: string } | { pending: true };
+export type KeepWarmView =
+	| { fallback: true }
+	| { ended: { stop: WarmStop; limit: string; amounts: string } }
+	| { leftToPi: string }
+	| { pending: true }
+	| { goal: WarmGoal };
+
+/**
+ * Keep-warm is on and nothing above applies: the goal (`minutes`, the setting in force). While the extension keeps this
+ * idle period warm, also when the time limit runs out (`until`, the period's idle start plus the limit) and what the
+ * period has spent of its budget (dollars against one cache miss, or refreshes against the most without prices).
+ */
+export interface WarmGoal {
+	minutes: number;
+	until?: number;
+	budget?: { spent: string; of: string; refreshes?: true };
+}
 
 /** A cache lifetime in use: seconds when known; a guess (the smaller of values that differ, ⚠) or only partly found (?, not used). */
 export interface LifetimeValue {
@@ -280,7 +297,31 @@ function keepWarmPart(view: KeepWarmView): Part {
 		return tiny ? plainPart(PRIORITY.warmAlert, [`⚠ ${wide}`, `⚠ ${mid}`, `⚠ ${tiny}`, ALERT], "warning") : plainPart(PRIORITY.warmNote, [wide, mid], "muted");
 	}
 	if ("leftToPi" in view) return plainPart(PRIORITY.warmNote, [`keep-warm: Pi's (${view.leftToPi})`, "keep-warm: Pi's"], "muted");
+	if ("goal" in view) return goalPart(view.goal, true);
 	return plainPart(PRIORITY.warmNote, ["keep-warm: from your next message", "keep-warm: next message"], "muted");
+}
+
+/** The keep-warm limit as the line writes times: "30m", "2h", "1h30m". */
+const goalText = (minutes: number) => (minutes < 60 ? `${minutes}m` : minutes % 60 === 0 ? `${minutes / 60}h` : `${Math.floor(minutes / 60)}h${minutes % 60}m`);
+/** A clock time, "16:40", or "tomorrow 09:10": never a duration, so it is not read as the cache's time left. */
+export const clockText = (ms: number) => {
+	const at = new Date(ms);
+	const time = at.toTimeString().slice(0, 5);
+	return at.toDateString() === new Date(Date.now()).toDateString() ? time : `tomorrow ${time}`;
+};
+
+/**
+ * The goal. Where the period is kept warm (`active`: a warm cache, not run out), until when and the budget spent;
+ * otherwise only the setting, so it never reads as a goal being met.
+ */
+function goalPart(goal: WarmGoal, active: boolean): Part {
+	const setting = `keep-warm ${goalText(goal.minutes)}`;
+	if (!active || goal.until === undefined || goal.until <= Date.now()) return plainPart(PRIORITY.warmGoal, [setting], "muted");
+	const until = `until ${clockText(goal.until)}`;
+	const budget = goal.budget;
+	const wide = budget ? (budget.refreshes ? `${budget.spent} of ${budget.of} refreshes` : `${budget.spent} spent of ${budget.of}`) : undefined;
+	const mid = budget ? `${budget.spent}/${budget.of}` : undefined;
+	return plainPart(PRIORITY.warmGoal, [`${setting} ${until}${wide ? `, ${wide}` : ""}`, `keep-warm ${until}${mid ? `, ${mid}` : ""}`, `keep-warm ${until}`], "muted");
 }
 
 function lifetimeParts(view: LifetimesView): Part[] {
@@ -365,7 +406,10 @@ export function footerParts(view: FooterView): Part[] {
 	if (data?.staleMs !== undefined) {
 		parts.push(plainPart(PRIORITY.dataAlert, [`⚠ providers.dev refresh failed: data ${ageText(data.staleMs)} old`, `⚠ data ${ageText(data.staleMs)} old`, ALERT], "warning"));
 	}
-	if (warm && warm.priority !== PRIORITY.warmAlert) parts.push(warm);
+	// The goal says how far the period stands only beside a warm cache: not while a request runs or once it is cold.
+	const kept = view.countdown?.state === "warm" || view.countdown?.state === "refreshing";
+	if (view.keepWarm && "goal" in view.keepWarm && !kept) parts.push(goalPart(view.keepWarm.goal, false));
+	else if (warm && warm.priority !== PRIORITY.warmAlert) parts.push(warm);
 	if (view.lifetimes) parts.push(...lifetimeParts(view.lifetimes));
 	if (view.sent) parts.push(sentPart(view.sent));
 	if (view.price) parts.push(pricePart(view.price));
