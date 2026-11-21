@@ -6,6 +6,8 @@ The ask: one command, typed in any Pi window, that stops the idle spending on ca
 
 A second ask is designed here with it, since both are about what a window says of its warming (section 5, "Notices"): the extension says in the transcript everything it meets while keeping a cache warm, each refresh it sends and every issue, and when a stop takes effect in a window.
 
+One fix is in 0.7.0 too, beside the two asks: compacting before the cache expires is tried again where a try was only postponed (Pi busy, a message queued) while the cache lives, and once for each expiry the countdown reads, so an expiry Pi's own refresh moves gets its own try, also where that refresh lands while a compaction that then fails was running. It changes nothing in the stop: a stopped window still compacts before its cache expires, and the summary starts no warming (section 2).
+
 ## 1. The rule
 
 **A stop ends warming, in every window that is open when it is given, for the idle period the window is in or the one its run ends in, and for every idle period that starts there after it, until the user sends that window a message: the first real answer after that message starts an idle period that is warmed as usual.**
@@ -598,6 +600,7 @@ All of the list below was decided as written, with these exceptions and addition
 - **11: B**, built as section 5 says under "Built: B".
 - **The request let go, in words a user understands.** The footer says `keep-warm: Pi's (you switched model or branch, or compacted)`, and the reason (in `/cache-keeper`, the log and the notice) is "you switched the model or the branch, or the conversation was compacted, so the extension no longer has the request to re-send".
 - **An unnamed route.** A proxy's `model-upstreams:answered` with `upstreams: []` means "this answer's route is unknown": it is kept as a report that names no route, which differs from every other report (an empty one included), so a period that sees one is treated as on a change of route, and one whose answer had one is Pi's from its start (`keep-warm: Pi's (the route is unknown)`).
+- **Compacting before expiry, tried again.** A try postponed by a passing reason (Pi busy, a message queued) is made again each second while the cache lives; a lasting reason spends the try for that expiry only, and each reason is logged once per countdown. A failed compaction starts the countdown again with the expiry it was made for spent, so an expiry Pi's refresh moved in the meantime gets its own try.
 - Where the build differed in detail: `pi-stopped` records carry a budget only for a period the extension took (a period Pi warms with keep-warm on has a budget computed but unused); a period a reloaded instance starts is never taken (it has not seen the request), so its stop writes no `skip` record, while Pi is told to stop all the same; the notice of a model left to Pi after two in a row comes after the refresh's own line; a `left` record carries the seconds left the plain reading gives.
 
 ## 13a. The list as it was put to the maintainer

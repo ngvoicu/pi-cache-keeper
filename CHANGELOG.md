@@ -13,6 +13,9 @@
 - **The second miss in a row shows its own line** before the notice that the model is left to Pi; a failed refresh's and a miss's lines name what was read and spent.
 - **A period handed to Pi because its request was let go says why in plain words** — `keep-warm: Pi's (you switched model or branch, or compacted)` in the footer, and in `/cache-keeper` and the log "you switched the model or the branch, or the conversation was compacted, so the extension no longer has the request to re-send", instead of "request let go".
 
+### Fixed
+- **Compacting before expiry is tried again when the first try was only postponed or the expiry moved** — Each countdown made one try, 20 s before expiry, whatever came of it. A try skipped because Pi was busy or a message was queued was not made again when the queue cleared, and when Pi's own cache warming then moved the expiry, the new one got no try either, so a large context could go cold uncompacted. Now a try postponed for a passing reason (Pi busy, a message queued, Pi's own refresh still in flight) is made again each second until the cache expires, and each expiry gets its own try. A lasting reason (compacting before expiry or Pi's auto-compaction off, Pi's settings unreadable, the context size unknown or under `minContextTokens`, the cached path unavailable) still spends the try for that expiry; it is checked again at a moved expiry, and each reason is written to the log once per countdown. A compaction that fails spends the try for the expiry it was made for, not for one Pi's refresh moved to while it ran. A `/cache-keeper-stop` does not change this: a stopped window still compacts before its cache expires, and the summary starts no warming.
+
 ## [0.6.1] - 2026-11-20
 
 ### Changed

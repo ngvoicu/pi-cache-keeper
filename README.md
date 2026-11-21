@@ -234,7 +234,7 @@ If you step away, the cache expires and your next message pays to write the whol
 - the context holds at least 140k tokens (`minContextTokens`; it applies only here, not to keeping the cache warm),
 - and the cached path is available.
 
-Otherwise it does nothing and the cache cools. Models without a [countdown](#the-footer) never compact before expiry. A [`/cache-keeper-stop`](#stopping-it-in-every-window) does not hold it back, and the summary starts no warming again.
+While Pi is busy or a message is queued, it tries again each second until the cache expires; otherwise it does nothing and the cache cools. When the expiry moves (Pi's own cache warming refreshed it), the new expiry gets its own try. Models without a [countdown](#the-footer) never compact before expiry. A [`/cache-keeper-stop`](#stopping-it-in-every-window) does not hold it back, and the summary starts no warming again.
 
 The summary is only worth sending while the cache is warm, so it has a last check, as a refresh does: when its request is about to leave, after Pi has looked up the credentials and built it, the expiry is read again, and if the cache has expired by then (a slow credential lookup, say, or a proxy that just showed a shorter lifetime) nothing leaves and the compaction is cancelled, with that reason in the log (`the prompt cache expired before the summary request left`). Through pi-claude-bridge, which has no such hook, that check is made just before the request is handed to the bridge, so time the bridge takes after that isn't covered. Compacting when the context is full and `/compact` don't have this check: there a summary is wanted either way.
 
