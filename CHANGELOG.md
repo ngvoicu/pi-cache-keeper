@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-22
+
+### Added
+- **`/cache-keeper-stop`: stop keeping idle caches warm in every Pi window, until each one's next message** — Typed in any window, it ends warming for the idle period every window is in (for a window in a run, the period that run ends in) and for the ones that follow there: the extension sends no further refresh, and Pi's own idle warming is told to stop the next time it asks, also with `keepWarmMinutes: 0`. No setting changes, and it undoes itself: the answer to the next message you send a window (typed, over RPC, or sent in your name by another extension) starts an idle period that is warmed as usual. Nothing Pi or the extension sends by itself ends it. A stop is one more way a period's warming ends (`keep-warm ended (stopped by /cache-keeper-stop)` in the log, a `stopped:` line in `/cache-keeper`), and the footer says `warming stopped until your next message`. It is recorded in `cache-keeper-stop.json` beside the settings, which every window reads before it sends anything; a window obeys a record only if it is not the one it saw when your last message reached it, so no clock is compared and an old record stops nothing later. A refresh already on its way is not called back; a stop can't be taken back, since Pi's own warming, once stopped, starts again only with the next request; and compacting before the cache expires still runs where it is on, after which the window stays quiet: a summary starts no warming, the extension's or Pi's. Each other window says once that it was stopped.
+- **Keep-warm says what it does** — Every refresh the extension sends and every issue it meets is now said in the transcript at once, whatever Pi's `showCacheMissNotices`. Every refresh keeps its own line: a saved entry in the session (`cache-keeper-refresh`, not sent to the model), drawn again after a reload, so an idle period shows up to 8–11 lines (10 without prices), each with its number, what it read, its cost and the period's sum (`Cache warmed (pi-cache-keeper, refresh 2): 99% of 600k from the cache, $0.18; $0.36 spent, a miss costs $2.07`); a miss, a failure, a refresh that reported no usage and one cancelled on its way say what they read and cost, in the warning colour where something went wrong. Everything else is a notice: a refresh held back or too late, warming ended and why, a period handed to Pi's own warming and why, a session left to Pi from its start (once per reason), Pi's own warming told to stop, a stop. Before, only a failure, a miss and a model left to Pi after two misses were said. Each line is the log's record said aloud: nothing is logged that is not said. The refreshes are still not in Pi's session cost.
+
+### Changed
+- **The second miss in a row shows its own line** before the notice that the model is left to Pi; a failed refresh's and a miss's lines name what was read and spent.
+- **A period handed to Pi because its request was let go says why in plain words** — `keep-warm: Pi's (you switched model or branch, or compacted)` in the footer, and in `/cache-keeper` and the log "you switched the model or the branch, or the conversation was compacted, so the extension no longer has the request to re-send", instead of "request let go".
+
 ## [0.6.1] - 2026-11-20
 
 ### Changed

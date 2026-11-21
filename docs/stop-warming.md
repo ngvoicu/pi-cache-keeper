@@ -1,6 +1,6 @@
 # Stopping warming in every window: `/cache-keeper-stop`
 
-A design, not yet built. It is written against pi-cache-keeper 0.6.1 and Pi 1.6.0, and is meant for version 0.7.0. It says what the software is; the build chooses nothing about that. Where the build finds this document wrong, the document is corrected.
+The design of 0.7.0, built. It was written against pi-cache-keeper 0.6.1 and Pi 1.6.0, and is meant for version 0.7.0. It says what the software is; the build chooses nothing about that. Where the build finds this document wrong, the document is corrected.
 
 The ask: one command, typed in any Pi window, that stops the idle spending on cache warming in every Pi window on the computer, without changing a setting, and that undoes itself: each window warms again as usual after its next message.
 
@@ -316,6 +316,8 @@ A cancelled refresh says nothing of warming having ended: the request that cance
 
 Unchanged, and outside this list: the notices of compacting (`Prompt cache expires in 20s … Compacting now, while the cache is warm.`, the card), of the model data and of a log that can't be written. Why a compaction before expiry did not start is still in the log only; if that is wanted on the screen too, it is the same build for the `expiry` records.
 
+**Built: B.** The maintainer chose B (below): every refresh the extension sent keeps its own line, as a saved entry per refresh. A `warm` record that carries `refresh` (a refresh that left: its `warm`, `missed`, `failed` and `cancelled` records) is said as a custom entry of type `cache-keeper-refresh` with `{ level, text }` (`pi.appendEntry`), which the extension's entry renderer draws dim, or in the warning colour for a warning; every other record, and every issue, is a `ctx.ui.notify` notice at once, as the tables say. Both only where the session has an interface. This is Pi's own mechanism for a saved, drawn entry, and the path Pi's own warmer takes from idle (read in Pi 1.6.0): `appendEntry` → `SessionManager.appendCustomEntry`, which appends after the leaf and writes the session file, then `entry_appended`, which the interactive mode draws at once (`addCustomEntryToChat`) and again on reload (`renderSessionEntries` keeps `custom` entries), and which RPC forwards as a session event; Pi's `CacheWarmer` appends its `cache_warm` usage entry from idle the same way. A custom entry reaches no model (`buildSessionContext` skips it), Pi's warmer compares the agent's messages, not the leaf, and the extension's own path check counts `custom` as context-free, so a line on the branch changes no request and no refresh. As with the compaction card, a line as the session's last entry makes Pi answer a second `/compact` with "Nothing to compact" instead of "Already compacted". The words below are the entries' and the notices' alike; where they say an `info` line "takes the place of the one before", that now holds only for notices.
+
 **Would a line for every refresh flood the screen?** Less than it looks, for three reasons that are the design's own:
 
 - *The budget bounds it.* In one idle period the extension sends at most as many refreshes as one cache miss pays for; at a cached read of a tenth of the input price that is 11 where the write price is 1.25 times the input price, 8 where there is none, and 10 without prices. A 5-minute cache is refreshed every 4 min 35 s for at most 55 minutes, not for hours, whatever `keepWarmMinutes` says; then warming ends, with one line.
@@ -324,12 +326,12 @@ Unchanged, and outside this list: the notices of compacting (`Prompt cache expir
 
 What does pile up: warnings, which each stay; there is at most one end of warming per idle period, so at most one or two per break. And a window that is written to all day has one idle period per answer, so a line wherever a pause was long enough for a refresh; that is the thing asked for.
 
-The choice, which is the maintainer's:
+The choice, which is the maintainer's (B was chosen):
 
 | | What the transcript shows | What it takes |
 | --- | --- | --- |
-| **A. As above (this document)** | each refresh when it settles; the latest stands in place of the one before, with the number and the sum; every issue stays | nothing beyond Pi's own way of drawing an `info` notice. It rests on that way: a Pi that drew them otherwise would show each line |
-| B. Every refresh keeps its line | up to 8 to 11 lines per idle period (10 without prices), each with its own cost | a saved entry per refresh (`pi.appendEntry` with a renderer, as the compaction card is): written into the session file from an idle window, drawn again after a reload, and a card as the session's last entry already changes what Pi answers to `/compact` |
+| A. One replacing `info` line | each refresh when it settles; the latest stands in place of the one before, with the number and the sum; every issue stays | nothing beyond Pi's own way of drawing an `info` notice. It rests on that way: a Pi that drew them otherwise would show each line |
+| **B. Every refresh keeps its line (built)** | up to 8 to 11 lines per idle period (10 without prices), each with its own cost | a saved entry per refresh (`pi.appendEntry` with a renderer, as the compaction card is): written into the session file from an idle window, drawn again after a reload, and a card as the session's last entry already changes what Pi answers to `/compact` |
 | C. One line per idle period | a summary when warming ends or the next message comes (`Kept the cache warm 7 times: $1.26 spent, a miss costs $2.07`); issues at once | less on the screen than was asked: a refresh is not said when it happens |
 
 ### The log
@@ -465,7 +467,7 @@ export function warmer(p: { stopped: boolean; taken: boolean; on: boolean; fellB
 | `/cache-keeper-warm` | `obeyStop(ctx, true)` first; the sentence of section 5 |
 | `/cache-keeper-stop` (new) | notes the window's state (a run going on, already stopped, the period's warmer); `writeStop(Date.now())`; on failure the error notice and nothing else; else `firstSaid(session id, its id)` (so `obeyStop` says nothing of it here), `obeyStop(ctx, true)` and the command's text of section 5 |
 | `say(ctx, notice)` (new) | the one door of the notices of this section: `ctx.ui.notify(notice.text, notice.level)` where the session has an interface; it never throws (a session that is gone says nothing) |
-| `trace` | after a `warm` record is written: `say(ctx, noticeOf(record, keepWarmLabel(warmMinutes())))` where there is a notice. The only call of `noticeOf` |
+| `trace` | (built for B) after a `warm` record is written: its notice, `noticeOf(record, keepWarmLabel(warmMinutes()))`, kept as the refresh's saved line (`keepLine`, a `cache-keeper-refresh` entry) where the record carries `refresh`, else `say`; formerly: `say(ctx, noticeOf(record, keepWarmLabel(warmMinutes())))` where there is a notice. The only call of `noticeOf` |
 | the refresh's settlement in `keepWarm` | its records carry `refresh` (the period's count when it left) and `verdict`; the two notices it shows today, of a failure and of a miss, are taken out, since `trace` now says them; the notice of two refreshes in a row stays where it is, after the record |
 | the `skip` records of a refresh that was due | carry `hold`: `busy` (both wordings), `settling`, `late` (both wordings) |
 | `changeHands`, `handTo` | what `changeHands` returns carries `handedOver` wherever the period changes hands, so every record it reaches has it; where a period changes hands without its warming ending (it had ended before), `handTo` writes the new `skip` record with the reason and `handedOver`, unless the caller takes it |
@@ -589,7 +591,15 @@ After each: `npm run typecheck` and `npm test` pass.
 - "The next message" is the first real answer after the user's next message. A message whose run sends nothing, or whose request fails before it reported any cache use, leaves the window stopped until an answer comes.
 - It can't be taken back before the next message (section 4).
 
-## 13. Decided, and to decide before the build
+## 13. Decided, and what the build changed
+
+All of the list below was decided as written, with these exceptions and additions:
+
+- **11: B**, built as section 5 says under "Built: B".
+- **The request let go, in words a user understands.** The footer says `keep-warm: Pi's (you switched model or branch, or compacted)`, and the reason (in `/cache-keeper`, the log and the notice) is "you switched the model or the branch, or the conversation was compacted, so the extension no longer has the request to re-send".
+- Where the build differed in detail: `pi-stopped` records carry a budget only for a period the extension took (a period Pi warms with keep-warm on has a budget computed but unused); a period a reloaded instance starts is never taken (it has not seen the request), so its stop writes no `skip` record, while Pi is told to stop all the same; the notice of a model left to Pi after two in a row comes after the refresh's own line; a `left` record carries the seconds left the plain reading gives.
+
+## 13a. The list as it was put to the maintainer
 
 Decided by the maintainer: compacting before the cache expires is not held back by a stop, and neither it nor anything else Pi or the extension sends by itself ends one; only the user's message does (sections 1 and 2). Pi offers all of that; nothing had to be given up.
 
