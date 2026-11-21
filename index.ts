@@ -121,7 +121,7 @@ import {
 	type Fetch,
 	type Found,
 } from "./model-data.ts";
-import { covers, noteMessage, readStop, rememberLoad, seenFor, type StopRead } from "./stop-record.ts";
+import { agentDirLabel, covers, firstSaid, noteMessage, readStop, rememberLoad, seenFor, stopPathLabel, writeStop, type StopRead } from "./stop-record.ts";
 import { answerToPi, end, leave, mayLeave, onAgainst, settle, WAITING, warmer, type Warmer, type WarmPhase } from "./warm-period.ts";
 import { formatFooter, lifetimesView, priceAt, sentView, tierInUse, type Countdown, type DataView, type FooterView, type KeepWarmView, type PriceView } from "./footer.ts";
 
@@ -636,6 +636,13 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			traceError = message;
 		}
 		return record;
+	};
+
+	// The one door of the extension's notices about keeping warm and a stop: said where the session has an interface, and
+	// never thrown out of (a session that is gone says nothing).
+	const say = (ctx: ExtensionContext, notice: { level: "info" | "warning" | "error"; text: string }) => {
+		if (!ctx.hasUI) return;
+		ifSessionAlive(() => ctx.ui.notify(notice.text, notice.level));
 	};
 
 	const renderCard: Parameters<typeof pi.registerEntryRenderer<{ records: TraceRecord[] }>>[1] = (entry, { expanded }, theme) => {
@@ -1189,14 +1196,21 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const record = stopRecord(fresh);
 		if (!record || "unreadable" in record || !covers(record, p.seen)) return;
 		p.stopped = { id: record.id, at: record.at };
+		let amounts: string | undefined;
 		if (p.taken && p.budget) {
 			const ended = endWarm(p, "stopped", `given at ${hhmm(record.at)}`);
 			if ("stop" in ended) {
 				const sendBy = look(ctx).sendBy;
 				trace(ctx, { ...warmBase(ctx, p, sendBy ?? Date.now(), p.fixed ? { model: p.fixed.model } : {}), action: "skip", ...ended, budget: budgetRecord({ ...p, budget: p.budget }) });
 			}
+			amounts = spendingText(p.budget, p.spending);
 		}
 		renderFooter(ctx);
+		// Said once per stop and session, when the window learns of it: not again after /reload, nor for a later period that
+		// starts stopped. The window that gave the command has said it already.
+		if (ctx.hasUI && firstSaid(ctx.sessionManager.getSessionId(), record.id)) {
+			say(ctx, { level: "info", text: `Warming is stopped in this window until your next message: /cache-keeper-stop was given at ${hhmm(record.at)}.${amounts ? ` This idle period's refreshes: ${amounts}.` : ""}` });
+		}
 	};
 
 	// The time limit takes effect: the expiry the cache's clock gives already lasts to `idleSince + keepWarmMinutes` or
@@ -2025,11 +2039,28 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (!p || running) return rule;
 		const fellBack = fallbackFor(model);
 		const line = fellBack && fallbackLine(fellBack.key, fellBack.at);
+		// While a stop holds, the rule alone (the `stopped:` line says the rest), unless warming had ended for another reason
+		// before it, which is still true.
+		if (p.stopped && (!p.ended || p.ended.stop === "stopped")) return line ? `${rule}; ${line}` : rule;
 		if (p.notOwned !== undefined) return `${rule}; ${line && p.notOwned === line ? line : `this session is left to Pi's own warming: ${p.notOwned}`}`;
 		if (!owns(p)) return line ? `${rule}; ${line}` : rule;
 		const window = line ? `; ${line}` : "";
 		if (p.ended) return `${rule}; ${endedStatus(p)}, until your next message (${p.ended.reason})${window}`;
 		return `${rule}; so far ${spendingText(p.budget, p.spending)}`;
+	};
+
+	// What /cache-keeper says of a stop, only where there is something to say: the stop this window obeys, or a record that
+	// can't be read.
+	const stopNote = (): string | undefined => {
+		const read = stopRecord(true);
+		if (read && "unreadable" in read) {
+			return `the stop record (${stopPathLabel()}) can't be read: ${read.unreadable}; the extension sends no refresh while that lasts, and /cache-keeper-stop writes it again`;
+		}
+		const p = period;
+		if (!p?.stopped || running) return undefined;
+		const expiry = config.compactBeforeExpiry ? "; compacting before expiry still runs" : "";
+		const amounts = p.taken && p.budget ? `; this idle period's refreshes: ${spendingText(p.budget, p.spending)}` : "";
+		return `by /cache-keeper-stop at ${hhmm(p.stopped.at)}, until your next message: nothing is sent to keep this window's cache warm, and Pi's own warming is told to stop when it asks${expiry}${amounts}`;
 	};
 
 	const dataNote = (ctx: ExtensionContext): string => {
@@ -2207,9 +2238,48 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("cache-keeper-stop", {
+		description: "Stop keeping idle caches warm in every Pi window, until each one's next message",
+		handler: async (_args, ctx) => {
+			// The window as it was before the command.
+			const p = period;
+			const busy = running;
+			const already = p?.stopped;
+			const keeping = p !== undefined && warmerOf(p) === "the extension";
+			let record: ReturnType<typeof writeStop>;
+			try {
+				record = writeStop(Date.now());
+			} catch (error) {
+				say(ctx, { level: "error", text: `pi-cache-keeper could not write ${stopPathLabel()}: ${error instanceof Error ? error.message : String(error)}. Nothing was stopped.` });
+				return;
+			}
+			// This window says the command's text, not the notice of a stop.
+			firstSaid(ctx.sessionManager.getSessionId(), record.id);
+			obeyStop(ctx, true);
+			const here = busy
+				? "This window: a run is going on; the idle period it ends in is stopped too, unless you send it a message first."
+				: already
+					? `This window: already stopped, since ${hhmm(already.at)}.`
+					: keeping && p?.budget
+						? `This window: the extension was keeping this idle period warm, and that has ended (${spendingText(p.budget, p.spending)}).`
+						: "This window: the extension was not keeping anything warm; Pi's own warming is told to stop the next time it asks.";
+			say(ctx, {
+				level: "info",
+				text: [
+					`Warming is stopped in every Pi window that uses ${agentDirLabel()}, until each window's next message.`,
+					here,
+					'Other windows: each reads the stop before it sends anything, and its footer says "warming stopped" within a second where it shows a countdown. How many there are can\'t be known from here, and a window that has not loaded this version (no /reload since the update) doesn\'t read it.',
+					"A refresh already on its way is not called back. A stop can't be taken back: a window warms again as usual after the answer to the next message you send it.",
+					...(config.compactBeforeExpiry ? ["Compacting before the cache expires still runs where it is on (compactBeforeExpiry); it starts no warming again."] : []),
+				].join("\n"),
+			});
+		},
+	});
+
 	pi.registerCommand("cache-keeper-warm", {
 		description: "Start keeping the cache warm again for models two refreshes in a row without a hit left to Pi's own warming",
 		handler: async (_args, ctx) => {
+			obeyStop(ctx, true);
 			const fellBack = [...misses.fallback.keys()].sort();
 			const counted = [...misses.counts.entries()].filter(([model, count]) => count > 0 && !misses.fallback.has(model)).map(([model]) => model).sort();
 			misses.fallback.clear();
@@ -2224,6 +2294,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			} else if (counted.length > 0) {
 				text = `No model was left to Pi's own warming. The count of refreshes without a hit of ${counted.join(", ")} is cleared.${off}`;
 			} else text = `Nothing to clear: no model was left to Pi's own warming, and no refresh was counted without a hit.${off}`;
+			if (period?.stopped && !running) text += " A /cache-keeper-stop holds in this window until your next message; this command does not lift it.";
 			ctx.ui.notify(text, "info");
 			renderFooter(ctx);
 		},
@@ -2232,6 +2303,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	pi.registerCommand("cache-keeper", {
 		description: "Show the prompt cache state, the model data in use and this session's compaction log",
 		handler: async (_args, ctx) => {
+			obeyStop(ctx, true);
 			const entries = ctx.sessionManager.getBranch();
 			const model = ctx.model;
 			const state = model && look(ctx, { model, entries });
@@ -2254,6 +2326,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			const next = "reason" in check
 				? `Pi's compaction, because ${check.reason}`
 				: `cached path; last request ${formatDuration(Date.now() - check.request.at)} ago with ${check.request.transcript.length} messages, ${check.trailing.length} since. The request prefix is checked when it runs.`;
+			const stopped = stopNote();
 			let log: string[];
 			try {
 				const records = readTraces(ctx.sessionManager.getSessionId(), 12);
@@ -2272,6 +2345,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					`next compaction: ${next}`,
 					`when full: ${fullNote(model)}`,
 					`keep warm: ${keepWarmNote(model)}`,
+					...(stopped ? [`stopped: ${stopped}`] : []),
 					`before expiry: ${expiryNote()} · retention ${model?.api === BRIDGE_API ? "set by Claude Code" : (process.env.PI_CACHE_RETENTION ?? "short")}`,
 					`model data: ${dataNote(ctx)}`,
 					"settings: /cache-keeper-settings",

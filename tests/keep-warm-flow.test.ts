@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { mock } from "node:test";
 import { calculateCost } from "@earendil-works/pi-ai";
@@ -4287,4 +4287,185 @@ test("stop: two sessions in one process: a message in one does not lift the stop
 	await b.idle(280_000);
 	assert.equal(a.warms.length, 1, "the session written to: warmed");
 	assert.equal(b.warms.length, 0, "the other: still stopped");
+});
+
+const commandText = async (h: ReturnType<typeof harness>) => h.command("cache-keeper-stop");
+const THEN = [
+	'Other windows: each reads the stop before it sends anything, and its footer says "warming stopped" within a second where it shows a countdown. How many there are can\'t be known from here, and a window that has not loaded this version (no /reload since the update) doesn\'t read it.',
+	"A refresh already on its way is not called back. A stop can't be taken back: a window warms again as usual after the answer to the next message you send it.",
+];
+const EXPIRY_LINE = "Compacting before the cache expires still runs where it is on (compactBeforeExpiry); it starts no warming again.";
+
+test("stop, the command: the record on disk, the same effects at once, the second line by the window's state, the last line only with compactBeforeExpiry on", async (t) => {
+	const label = dir.startsWith(homedir()) ? `~${dir.slice(homedir().length)}` : dir;
+	const first = `Warming is stopped in every Pi window that uses ${label}, until each window's next message.`;
+	// Idle, the extension keeping the period warm, after one refresh.
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	h.emit("agent_settled");
+	await h.idle(300_000);
+	assert.equal(h.warms.length, 1);
+	const text = await commandText(h);
+	const saidSoFar = h.said.length;
+	assert.ok(existsSync(STOP_FILE), "the record");
+	assert.equal(text, [first, "This window: the extension was keeping this idle period warm, and that has ended ($0.18 spent, a miss costs $2.07).", ...THEN].join("\n"));
+	assert.equal(h.said.at(-1)?.level, "info");
+	assert.equal(stopRecords().length, 1, "ended at once");
+	await h.idle(HOUR);
+	assert.equal(h.warms.length, 1, "nothing more leaves");
+	assert.equal(h.said.length, saidSoFar, "this window says nothing more of the stop: the command said it");
+	// Given again: already stopped, since the first.
+	const firstAt = Date.now() - HOUR;
+	assert.equal((await commandText(h)).split("\n")[1], `This window: already stopped, since ${hhmm(firstAt)}.`);
+
+	// Idle, Pi's own warming (keep-warm off), with compactBeforeExpiry on.
+	clock();
+	fresh({ keepWarmMinutes: 0, compactBeforeExpiry: true });
+	const off = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	off.emit("agent_settled");
+	assert.equal(await commandText(off), [first, "This window: the extension was not keeping anything warm; Pi's own warming is told to stop the next time it asks.", ...THEN, EXPIRY_LINE].join("\n"));
+	assert.deepEqual(off.decide(), { action: "stop" });
+
+	// In a run: the period it ends in is stopped.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const busy = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	busy.emit("agent_settled");
+	mock.timers.tick(1000);
+	let during = "";
+	busy.run(true, () => {
+		void commandText(busy).then((said) => (during = said));
+	});
+	await flush();
+	assert.equal(during.split("\n")[1], "This window: a run is going on; the idle period it ends in is stopped too, unless you send it a message first.");
+	await busy.idle(HOUR);
+	assert.equal(busy.warms.length, 0, "the period the run ended in is stopped");
+
+	// The directory can't be written: nothing is stopped, this window included.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const failing = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	failing.emit("agent_settled");
+	const saved = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = join(dir, "settings.json", "agent");
+	let failed: string;
+	try {
+		failed = await commandText(failing);
+	} finally {
+		process.env.PI_CODING_AGENT_DIR = saved;
+	}
+	assert.match(failed, /^pi-cache-keeper could not write .*cache-keeper-stop\.json: .+\. Nothing was stopped\.$/);
+	assert.equal(failing.said.at(-1)?.level, "error");
+	await failing.idle(280_000);
+	assert.equal(failing.warms.length, 1, "this window keeps warming");
+});
+
+test("stop, /cache-keeper-warm in a stopped window: the counts are cleared, its text says it does not lift the stop, and the window stays stopped, also for a model left to Pi", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true, respond: () => HALF_MISS });
+	await nextPeriod(h, true);
+	await nextPeriod(h);
+	assert.ok(misses()?.fallback.has(MODEL_KEY), "left to Pi after two misses");
+	mock.timers.tick(1000);
+	h.run(true);
+	writeStop(Date.now());
+	const [learnt, text] = (await h.command("cache-keeper-warm")).split("\n");
+	assert.match(learnt, /^Warming is stopped in this window until your next message/, "the window learns of the stop here, and says it first");
+	assert.match(text, /^pi-cache-keeper keeps cliproxyapi\/sub\/claude warm again/);
+	assert.ok(text.endsWith(" A /cache-keeper-stop holds in this window until your next message; this command does not lift it."), text);
+	assert.equal(misses()?.fallback.size, 0, "cleared");
+	const before = h.warms.length;
+	await h.idle(HOUR);
+	assert.equal(h.warms.length, before, "still stopped: nothing sent");
+	assert.deepEqual(h.decide(), { action: "stop" });
+});
+
+test("stop, after warming ended on a miss: /cache-keeper keeps its keep warm line, and says the stop below it", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true, respond: () => HALF_MISS });
+	h.emit("agent_settled");
+	await h.idle(300_000);
+	const before = await keepWarmLineOf(h);
+	assert.match(before ?? "", /keep-warm ended \(a refresh missed the cache\)/);
+	const given = writeStop(Date.now());
+	const shown = await h.command("cache-keeper");
+	assert.equal(shown.split("\n").find((l) => l.startsWith("keep warm:")), before, "unchanged");
+	assert.equal(
+		shown.split("\n").find((l) => l.startsWith("stopped:")),
+		`stopped: by /cache-keeper-stop at ${hhmm(given.at)}, until your next message: nothing is sent to keep this window's cache warm, and Pi's own warming is told to stop when it asks; this idle period's refreshes: $1.22 spent, a miss costs $2.07`,
+	);
+	// A period warming as usual: the rule alone, and the stopped line with compacting before expiry.
+	clock();
+	fresh({ compactBeforeExpiry: true });
+	const ok = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	ok.emit("agent_settled");
+	const at = writeStop(Date.now());
+	const lines = (await ok.command("cache-keeper")).split("\n");
+	assert.equal(lines.find((l) => l.startsWith("keep warm:")), RULE);
+	assert.equal(
+		lines.find((l) => l.startsWith("stopped:")),
+		`stopped: by /cache-keeper-stop at ${hhmm(at.at)}, until your next message: nothing is sent to keep this window's cache warm, and Pi's own warming is told to stop when it asks; compacting before expiry still runs; this idle period's refreshes: $0 spent, a miss costs $2.07`,
+	);
+});
+
+test("stop, an unreadable record: /cache-keeper says it, and the command writes a good one", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	h.emit("agent_settled");
+	writeFileSync(STOP_FILE, "{");
+	assert.match(await h.command("cache-keeper"), /\nstopped: the stop record \(.*cache-keeper-stop\.json\) can't be read: it is not JSON; the extension sends no refresh while that lasts, and \/cache-keeper-stop writes it again\n/);
+	await commandText(h);
+	assert.match(await h.command("cache-keeper"), /\nstopped: by \/cache-keeper-stop at /);
+});
+
+test("stop, its notice: said once in a window another stopped, with the period's amounts where the extension had taken it; not again after /reload nor for a later period; again for a second stop after a message; nothing without an interface", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	h.emit("agent_settled");
+	await h.idle(300_000);
+	const given = writeStop(Date.now());
+	await h.idle(2000);
+	const notice = (at: number, amounts?: string) => `Warming is stopped in this window until your next message: /cache-keeper-stop was given at ${hhmm(at)}.${amounts ? ` This idle period's refreshes: ${amounts}.` : ""}`;
+	const stopsSaid = () => h.said.filter((n) => n.text.startsWith("Warming is stopped in this window"));
+	assert.deepEqual(stopsSaid(), [{ text: notice(given.at, "$0.18 spent, a miss costs $2.07"), level: "info" }]);
+	// A later period that starts stopped (a run without a message), and /reload: nothing more.
+	mock.timers.tick(1000);
+	h.run(true);
+	reloadStopped(h, t);
+	await h.idle(10_000);
+	assert.equal(stopsSaid().length, 1);
+	// A message, then a second stop: said again.
+	h.input();
+	mock.timers.tick(1000);
+	h.run(true);
+	const second = writeStop(Date.now());
+	await h.idle(5000);
+	assert.equal(stopsSaid().length, 2);
+	// A period the extension did not take: without the amounts.
+	clock();
+	fresh({ keepWarmMinutes: 0, compactBeforeExpiry: false });
+	const pis = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	pis.emit("agent_settled");
+	const third = writeStop(Date.now());
+	pis.decide();
+	assert.deepEqual(pis.said.map((n) => n.text), [notice(third.at)]);
+	void second;
+	// No interface: nothing.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const quiet = harness({ lifetime: 300, cost: WITH_WRITE });
+	quiet.emit("agent_settled");
+	writeStop(Date.now());
+	await quiet.idle(5000);
+	assert.equal(quiet.said.length, 0);
 });
