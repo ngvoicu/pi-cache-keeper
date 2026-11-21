@@ -583,6 +583,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		p === undefined
 			? "Pi"
 			: warmer({
+					stopped: false,
 					taken: p.taken,
 					on: warmMinutes() > 0,
 					// Two misses in a row on the period's model, also one reported after the period started.

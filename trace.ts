@@ -83,9 +83,9 @@ export interface FullTrace {
 /**
  * Why keeping warm ended for the rest of an idle period: the budget (refreshing has cost as much as one cache miss, or
  * 10 refreshes without prices), the time limit (the cache lasts to the end of the window), a refresh that missed the
- * cache, a refresh that failed, or a request that can no longer be re-sent.
+ * cache, a refresh that failed, a request that can no longer be re-sent, or a /cache-keeper-stop.
  */
-export type WarmStop = "budget" | "limit" | "missed" | "failed" | "unable" | "unknown";
+export type WarmStop = "budget" | "limit" | "missed" | "failed" | "unable" | "unknown" | "stopped";
 
 export interface WarmTrace extends TimerContext {
 	event: "warm";
@@ -195,6 +195,8 @@ export function stopLabel(stop: WarmStop, limit?: string): string {
 			return "the request can't be re-sent";
 		case "unknown":
 			return "a refresh reported no usage";
+		case "stopped":
+			return "stopped by /cache-keeper-stop";
 	}
 }
 

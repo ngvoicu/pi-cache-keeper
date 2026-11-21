@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { comparison, describeTrace, type TraceRecord, formatCacheStatus, formatRemaining, type CompactTrace, type TraceUsage } from "../trace.ts";
+import { comparison, describeTrace, stopLabel, type TraceRecord, formatCacheStatus, formatRemaining, type CompactTrace, type TraceUsage } from "../trace.ts";
 
 const cached = (usage: Partial<TraceUsage>, piEstimate: CompactTrace["piEstimate"]): CompactTrace => ({
 	event: "compact",
@@ -95,4 +95,17 @@ test("the log says what keeping warm has spent and why it ended; records from be
 	assert.equal(describeTrace(old), `${time} cache expires in 20s: compacting 600k tokens`);
 	const oldMissed = JSON.parse('{"event":"warm","action":"missed","secondsLeft":180,"idleMinutes":57,"usage":{"input":0,"cacheRead":0,"cacheWrite":692000,"output":1,"cost":2.6},"at":"2026-11-19T10:00:00.000Z","session":"s"}');
 	assert.equal(describeTrace(oldMissed), `${time} keeping the cache warm missed the cache, idle 57 min: 0% of 692k from cache, 1 out, $2.6; stopped until your next message`);
+});
+
+test("a /cache-keeper-stop in the log: its label, the end of a period's warming, and Pi's warming told to stop, with a budget only where the period has one", () => {
+	assert.equal(stopLabel("stopped"), "stopped by /cache-keeper-stop");
+	const at = "2026-11-22T14:02:10.000Z";
+	const time = new Date(at).toLocaleTimeString([], { hourCycle: "h23", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+	const base = { event: "warm" as const, secondsLeft: 2400, at, session: "s", model: "anthropic/claude-sonnet-4-6" };
+	assert.equal(
+		describeTrace({ ...base, action: "skip", stop: "stopped", reason: "given at 14:02", budget: { unit: "usd", spent: 0.36, limit: 2.07 } } as TraceRecord),
+		`${time} cache expires in 2400s: keep-warm ended (stopped by /cache-keeper-stop), given at 14:02; $0.36 of $2.07 (one cache miss) spent`,
+	);
+	const reason = "/cache-keeper-stop (given at 14:02) holds until your next message (Pi would have refreshed)";
+	assert.equal(describeTrace({ ...base, secondsLeft: 0, action: "pi-stopped", reason } as TraceRecord), `${time} told Pi's own idle warming to stop: ${reason}`);
 });

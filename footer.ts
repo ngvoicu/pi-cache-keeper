@@ -281,6 +281,8 @@ const ENDED_SHORT: Record<WarmStop, (limit: string) => string> = {
 	failed: () => "a refresh failed",
 	unable: () => "can't re-send",
 	unknown: () => "cost unknown",
+	// Never shown: a stopped period's footer says the stop in its own part, in this one's place.
+	stopped: () => "stopped",
 };
 const ENDED_TINY: Partial<Record<WarmStop, string>> = { missed: "keep-warm missed", failed: "keep-warm failed", unable: "keep-warm stopped", unknown: "keep-warm stopped" };
 

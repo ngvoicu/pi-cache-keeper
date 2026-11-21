@@ -68,14 +68,17 @@ export function end(state: WarmPhase, stop: WarmStop, reason: string): WarmPhase
 
 /**
  * Who warms a period:
+ * - nobody, stopped: the period obeys a /cache-keeper-stop (`stopped`), whatever else holds: taken or not, keep-warm on
+ *   or off, left to Pi after two misses, handed over. Pi's own warming is told to stop;
  * - Pi: the extension did not take it at its start (`taken`: nothing kept it from it, keep-warm read on then), or
  *   keep-warm reads off now, or two refreshes in a row without a hit left the model to Pi (`fellBack`);
  * - Pi, handed over: taken, and handed over since, on evidence against its lifetime or because its request was let go;
  * - nobody: taken, warming ended and not handed over: Pi's own warming stays stopped;
  * - the extension: otherwise (waiting, or a refresh out).
  */
-export type Warmer = "the extension" | "nobody" | "Pi" | "Pi, handed over";
-export function warmer(p: { taken: boolean; on: boolean; fellBack: boolean; handedOver: boolean; warm: WarmPhase }): Warmer {
+export type Warmer = "the extension" | "nobody" | "nobody, stopped" | "Pi" | "Pi, handed over";
+export function warmer(p: { stopped: boolean; taken: boolean; on: boolean; fellBack: boolean; handedOver: boolean; warm: WarmPhase }): Warmer {
+	if (p.stopped) return "nobody, stopped";
 	if (!p.taken || !p.on || p.fellBack) return "Pi";
 	if (p.handedOver) return "Pi, handed over";
 	return p.warm.phase === "ended" ? "nobody" : "the extension";
@@ -85,7 +88,7 @@ export function warmer(p: { taken: boolean; on: boolean; fellBack: boolean; hand
  * What evidence against a period's lifetime, or its request let go, does to it. The extension's period (waiting, out)
  * ends its warming ("unable") and is handed over; a period whose warming ended on its time limit or as "unable" is handed
  * over; one ended on its budget, a miss, an unreported or a failed refresh stays as it is (Pi's warming stays stopped),
- * and so does a period already Pi's.
+ * and so do a period already Pi's and a stopped one.
  */
 export function onAgainst(w: Warmer, state: WarmPhase): "end and hand over" | "hand over" | "stays" {
 	if (w === "the extension") return "end and hand over";
@@ -95,7 +98,7 @@ export function onAgainst(w: Warmer, state: WarmPhase): "end and hand over" | "h
 
 /**
  * What Pi's own warming is told when it asks while Pi is idle (`idle`): "stop" while the extension warms the period or
- * nobody does; for a period handed over to Pi, "stop" only at or after `goneBy`, when nothing seen (Pi's own refreshes
+ * nobody does (a stopped period included, whoever warmed it); for a period handed over to Pi, "stop" only at or after `goneBy`, when nothing seen (Pi's own refreshes
  * included) says the cache can be alive; nothing where no lifetime can be read (`goneBy` undefined), and nothing for a
  * period that is Pi's. The only place "stop" is written.
  */
