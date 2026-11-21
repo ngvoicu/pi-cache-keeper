@@ -1243,10 +1243,12 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// window had seen when it started (stop-record.ts). Nothing while there is no period, a run is going on, or it is
 	// already stopped; an unreadable record stops nothing here (the last gate refuses on it). A period the extension took
 	// ends its warming, logged once; then the footer.
-	const obeyStop = (ctx: ExtensionContext, fresh = false) => {
+	// `reading`: a reading the caller has just made (the last gate), so one reading decides both whether the record can be
+	// read and whether it stops the period.
+	const obeyStop = (ctx: ExtensionContext, fresh = false, reading?: StopRead) => {
 		const p = period;
 		if (!p || running || p.stopped) return;
-		const record = stopRecord(fresh);
+		const record = reading !== undefined ? reading : stopRecord(fresh);
 		if (!record || "unreadable" in record || !covers(record, p.seen)) return;
 		p.stopped = { id: record.id, at: record.at };
 		let amounts: string | undefined;
@@ -1316,10 +1318,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (!setting) return { refuse: "the settings could not be read" };
 		if (setting.minutes <= 0) return { refuse: "keep-warm was turned off" };
 		if (period !== p) return { refuse: "a new idle period started" };
-		// A /cache-keeper-stop, read afresh: a period it stops is refused by the next line.
+		// A /cache-keeper-stop, read afresh once: that one reading decides both conditions. Unreadable never lets a refresh
+		// out; a stop it shows stops the period, which the next line refuses.
 		const stop = stopRecord(true);
 		if (stop && "unreadable" in stop) return { refuse: "the stop record could not be read" };
-		obeyStop(ctx, true);
+		obeyStop(ctx, false, stop);
 		if (p.ended) return { refuse: `keep-warm ended: ${p.ended.reason}` };
 		// One of this period's refreshes is out: nothing else leaves for the period until it settles.
 		if (!mayLeave(p.warm)) return { hold: "out", reason: OUT_REASON };

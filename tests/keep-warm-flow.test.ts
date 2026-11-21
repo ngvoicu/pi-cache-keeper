@@ -4711,3 +4711,38 @@ test("a session left to Pi from its start is said once: not after every answer; 
 	cold.emit("session_start", { reason: "startup" });
 	assert.equal(leftSaid(cold).length, 0, "the footer has no label either");
 });
+
+// The review's probe: the stop is written while the refresh is being prepared; the last gate's reading sees it, and any
+// further read of the record fails (EIO). One reading decides at the gate, so nothing leaves either way.
+test("stop, the last gate: the one reading that sees a new stop decides; a failing read after it lets nothing out", async (t) => {
+	const fs = (await import("node:fs")).default;
+	const { syncBuiltinESMExports } = await import("node:module");
+	for (const failLater of [false, true]) {
+		clock();
+		t.after(() => mock.timers.reset());
+		fresh({ compactBeforeExpiry: false });
+		const h = harness({ lifetime: 300, cost: WITH_WRITE });
+		h.emit("agent_settled");
+		let armed = false;
+		let reads = 0;
+		const realRead = fs.readFileSync;
+		const recording = mock.method(fs, "readFileSync", function (this: unknown, path: unknown, ...args: unknown[]) {
+			if (armed && path === STOP_FILE && failLater && ++reads >= 2) throw Object.assign(new Error("fixture: intermittent read error"), { code: "EIO" });
+			return (realRead as (...a: unknown[]) => unknown).call(fs, path, ...args);
+		});
+		syncBuiltinESMExports();
+		try {
+			h.state.beforePayload = () => {
+				h.state.beforePayload = undefined;
+				writeStop(Date.now());
+				armed = true;
+			};
+			await h.idle(280_000);
+			assert.equal(h.warms.length, 0, `${failLater ? "a failing read after the gate's" : "readable"}: nothing left`);
+			assert.equal(stopRecords().length, 1, "the period obeyed the stop the gate read");
+		} finally {
+			recording.mock.restore();
+			syncBuiltinESMExports();
+		}
+	}
+});
