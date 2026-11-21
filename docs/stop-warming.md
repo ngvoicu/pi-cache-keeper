@@ -540,10 +540,10 @@ After each: `npm run typecheck` and `npm test` pass.
 1. **`stop-record.ts` and its test**, with `writeAtomic` exported from `model-data.ts`. Nothing uses it yet: the extension behaves as 0.6.1.
 2. **The one more value**: `WarmStop`, `stopLabel`, `Warmer`, `warmer`'s `stopped` input (every caller passes `false`), `ENDED_SHORT`; the tests of `warm-period`, `trace`. Still 0.6.1's behaviour, and every existing test passes untouched except where it lists all values.
 3. **The window obeys a record**: the period's `seen` and `stopped`, `rememberLoad`, the `input` handler, `stopRecord`, `obeyStop` and its calls, `owns`, the decision handler, the last gate, `shown`. There is no command yet: flow tests 1, 3 to 14, 16 and 17 and the two session tests pass with the record written by the test (their footer and `/cache-keeper` assertions come with steps 4 and 5). With no record on disk, every existing test passes untouched.
-4. **The command and what is said**: `/cache-keeper-stop`, the `stopped:` line, `/cache-keeper-warm`'s sentence, `keepWarmNote`, the notice of a stop (`firstSaid`). Flow tests 2, 15, 18 and 19.
+4. **The command and what is said**: `/cache-keeper-stop`, the `stopped:` line, `/cache-keeper-warm`'s sentence, `keepWarmNote`, the notice of a stop (`firstSaid`, said through `say`, which comes in here). Flow tests 2, 15, 18 and 19.
 5. **The footer**: `FooterView.stopped`, the part, `renderFooter`. The footer tests, and the footer assertions of the flow tests.
 6. **The structure test** in `tests/one-clock.test.ts`.
-7. **What is logged is said**: the new fields and the `left` action, `noticeOf`, `say`, the call in `trace`, the two notices taken out of the settlement, the records of a hand-over without an end and of a session left to Pi. Flow tests 20 and 21 and the `trace` test. It depends on steps 1 to 6 only for the stop's rows, and can be built first and released apart from them without those rows.
+7. **What is logged is said**: the new fields and the `left` action, `noticeOf`, the call in `trace`, the two notices taken out of the settlement, the records of a hand-over without an end and of a session left to Pi. Flow tests 20 and 21 and the `trace` test. It depends on steps 1 to 6 only for the stop's rows, and can be built first and released apart from them without those rows.
 8. **The words**: the README, the changelog, the line in `docs/live-tests.md`, the version (section 10); this document corrected wherever the build differed from it.
 
 ## 10. The README, the changelog, the version
