@@ -522,6 +522,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		// While it lasts the footer says it on its own; after /cache-keeper-warm the period stays Pi's until the next answer.
 		if (fellBack) return no("until your next message", fallbackLine(fellBack.key, fellBack.at));
 		if (state?.answeredAt === undefined) return no(undefined, "no answer has read or written the prompt cache yet");
+		// Before the lifetime: an unnamed route has no data of its own, and that is not why the period is Pi's.
+		if (route.changed === "unnamed") return no("the route is unknown", "the proxy did not name the route that served the last answer, so which route's cache it wrote is not known");
 		if (!state.lifetime) return no("no cache lifetime", "the cache lifetime is unknown");
 		if (state.lifetime.ms < MIN_OWNED_LIFETIME_MS) return no("lifetime under a minute", `the cache lifetime (${formatDuration(state.lifetime.ms)}) is under a minute`);
 		// The same state the countdown reads: without a cached answer there is no expiry to keep warm.
@@ -552,7 +554,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (request.sharedPrefix || cache.mixed) return no("several cache lifetimes", "the request carries more than one cache lifetime");
 		// The proxy reported different routes for the model during the answer's run (also between the answer and Pi going
 		// idle): which cache the answer wrote is not known.
-		if (route.changed === "unnamed") return no("the route is unknown", "the proxy did not name the route that served the last answer, so which route's cache it wrote is not known");
 		if (route.changed === "while out") return no("the route changed", "the proxy reported different routes for this model while the last answer's request was out, so which route's cache it wrote is not known");
 		if (route.changed === "after the answer") {
 			return no("the route changed", "the proxy reported a route for this model after the last answer ended that is not the answer's own (or none for the answer itself), so which route's cache the answer wrote is not known");

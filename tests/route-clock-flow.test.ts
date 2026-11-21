@@ -1079,3 +1079,31 @@ test("an answer whose own report names no route: the period is Pi's from its sta
 	await s.until(3500);
 	assert.deepEqual(s.wires.filter((w) => w.kind === "refresh"), []);
 });
+
+// The review's probe: DeepSeek on Chat Completions through a gateway, otherwise kept warm by the extension. An answer
+// whose report names no route is Pi's for that reason, said as such, not as a missing lifetime.
+for (const unnamed of [false, true]) {
+	test(`an otherwise replayable openai-completions gateway period: ${unnamed ? "an unnamed answer is Pi's, the route is unknown" : "unreported, it is kept warm"}`, { skip }, async (t) => {
+		const N = 600_000;
+		const routed = deepseek("gateway-fixture", { short: 300, long: 3600 }, DEEPSEEK_PRICES);
+		const s = await session({
+			model: routed,
+			store: { providers: { deepseek: { [routed.id]: { short: 300, long: 3600 } } }, upstreams: { "gateway-fixture": { [routed.id]: { upstreams: [{ provider: "deepseek", model: routed.id }] } } } },
+			settings: { keepWarmMinutes: 120, compactBeforeExpiry: false },
+			prompt: N,
+			answered: { read: N, write: 0, oneHour: 0 },
+			serve: () => ({ read: N, write: 0, oneHour: 0 }),
+			...(unnamed ? { whileOut: (announce: (upstreams: readonly unknown[]) => void) => announce([]) } : {}),
+		});
+		t.after(() => s.done());
+		await s.until(280);
+		const refreshes = s.wires.filter((w) => w.kind === "refresh").length;
+		if (!unnamed) {
+			assert.equal(refreshes, 1);
+			return;
+		}
+		assert.equal(refreshes, 0);
+		assert.match(s.statuses.at(-1) ?? "", /keep-warm: Pi's \(the route is unknown\)/);
+		assert.match(await s.command(), /this session is left to Pi's own warming: the proxy did not name the route that served the last answer/);
+	});
+}
