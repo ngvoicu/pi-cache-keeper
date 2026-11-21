@@ -245,3 +245,24 @@ test.after(() => {
 	delete process.env.PI_CODING_AGENT_DIR;
 	rmSync(dir, { recursive: true });
 });
+
+// The review's sequence: the compaction fails with 20 s left; a run then starts and settles without sending a request;
+// agent_settled starts the countdown again. The expiry it reads is the one already tried: no second compaction on it.
+test("a run that sends nothing after a failed compaction does not give the same expiry a second try", (t) => {
+	const h = start(t);
+	h.state.fail = true;
+	h.to(EXPIRES - 20_000);
+	assert.equal(h.state.compacts, 1);
+	h.to(EXPIRES - 19_000);
+	h.state.idle = false;
+	h.emit("agent_start");
+	h.state.idle = true;
+	h.emit("agent_settled", { aborted: true });
+	h.to(EXPIRES - 15_000);
+	assert.equal(h.state.compacts, 1, "one try for this expiry");
+	assert.deepEqual(traces().filter((r) => r.action === "compact").map((r) => r.secondsLeft), [20]);
+	// The expiry Pi's refresh moves gets its own try.
+	h.piWarms();
+	h.to(EXPIRES + HOUR - 20_000);
+	assert.equal(h.state.compacts, 2);
+});

@@ -420,6 +420,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	let running = false;
 	let warming: AbortController | undefined;
 	let piWarmAt: number | undefined;
+	// The expiry whose try to compact before it was spent: one try per expiry, across every start of the countdown.
+	let spentExpiry: number | undefined;
 	// The one read of the cache everything reads (cache-clock.ts): the countdown and the footer, the refresh and its last
 	// gate, compacting before expiry and its last check, the cached path's check, /cache-keeper and what Pi's warming is
 	// told. For a period the extension took at its start, on its model and while the branch in front of the user still
@@ -1610,8 +1612,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// seen: the countdown then starts again from that reading. Where Pi warms such a period and nothing seen says its
 	// cache is gone yet (`goneBy`), the countdown shows that, for display only: nothing is sent on it.
 	// `triedFor`: the expiry whose try to compact before it is already spent (a failed compaction's); any other expiry the
-	// countdown reads gets its own try.
+	// countdown reads gets its own try. The spent expiry is the window's (`spentExpiry`), so every start of the countdown
+	// carries it, whatever starts it (a run that sent nothing, a refresh landing, a change of regime): one try per expiry.
 	const startTimer = (ctx: ExtensionContext, triedFor?: number) => {
+		if (triedFor !== undefined) spentExpiry = triedFor;
 		stopTimer(ctx, false);
 		const first = look(ctx);
 		timerRegime = first.regime;
@@ -1631,7 +1635,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		let ticks = 0;
 		// One try per expiry, from the expiry read now: when it moves (Pi's own refresh, the period's facts), the new one
 		// gets its own. A try postponed by a passing reason is made again on the next tick, while the cache lives.
-		let spent = triedFor;
 		const skipsTraced = new Set<string>();
 		let warmChecked = false;
 		// What the countdown shows: the expiry anything may be sent on, or, where Pi warms the period on a route that has not
@@ -1648,7 +1651,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const read = (): boolean => {
 			view = look(ctx);
 			if (view.regime !== timerRegime) {
-				startTimer(ctx, spent);
+				startTimer(ctx);
 				return false;
 			}
 			if (view.regime === "period") {
@@ -1686,17 +1689,17 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				// Keep-warm off, or a period the extension did not take: as with keep-warm off.
 				if (remaining <= warmLead && !warmChecked) {
 					warmChecked = true;
-				} else if (expiresAt !== undefined && remaining <= EXPIRY_LEAD_MS && spent !== expiresAt) {
+				} else if (expiresAt !== undefined && remaining <= EXPIRY_LEAD_MS && spentExpiry !== expiresAt) {
 					// Pi's own refresh may still be in flight; its usage entry moves the expiry when it lands.
 					if (piWarmAt !== undefined && Date.now() - piWarmAt < 30_000) return;
-					if (compactBeforeExpiry(ctx, remaining, expiresAt, skipsTraced) !== "postponed") spent = expiresAt;
+					if (compactBeforeExpiry(ctx, remaining, expiresAt, skipsTraced) !== "postponed") spentExpiry = expiresAt;
 				}
 			} else {
 				// A taken period, whoever warms it: its refresh where the extension warms it, and compacting before the expiry
 				// its own facts give (Pi's refreshes do not move it, so nothing waits for them).
 				if (remaining <= warmLead) keepWarm(ctx, timer);
-				if (!warming && !out && expiresAt !== undefined && remaining <= EXPIRY_LEAD_MS && spent !== expiresAt) {
-					if (compactBeforeExpiry(ctx, remaining, expiresAt, skipsTraced, timer) !== "postponed") spent = expiresAt;
+				if (!warming && !out && expiresAt !== undefined && remaining <= EXPIRY_LEAD_MS && spentExpiry !== expiresAt) {
+					if (compactBeforeExpiry(ctx, remaining, expiresAt, skipsTraced, timer) !== "postponed") spentExpiry = expiresAt;
 				}
 			}
 		};
