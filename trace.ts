@@ -257,7 +257,7 @@ export function noticeOf(record: WarmTrace, limit?: string): Notice | undefined 
 			if (record.refresh === undefined) return warning(`pi-cache-keeper could not keep the cache warm: ${reason} (nothing was sent)${tail}. ${UNTIL_NEXT}`);
 			return warning(`pi-cache-keeper could not keep the cache warm: ${reason}${tail}. ${UNTIL_NEXT}${record.verdict === "miss" && read ? ` It had ${readOnly()}.` : ""}`);
 		case "cancelled":
-			if (record.verdict === "hit") return info(`${warmed()}. It was then cancelled by a new request.`);
+			if (record.verdict === "hit") return info(`${warmed()}. It was then cancelled by a new request or a change of session.`);
 			if (record.verdict === "miss" && read) return warning(`The cache refresh on its way${n} was cancelled by a new request; it had ${readOnly()}${tail}`);
 			return info(`The cache refresh on its way${n} was cancelled by a new request or a change of session; it stays counted${amounts ? `: ${amounts}` : ""}`);
 		case "skip":

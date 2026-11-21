@@ -536,3 +536,58 @@ for (const when of ["while Pi reloads", "after an input another extension handle
 		assert.match(seen.afterReload ?? "", /warming stopped until your next message/, "still stopped after the reload");
 	});
 }
+
+// The review's probe: in an interactive session saved to a file, a refresh goes out at 276 s and settles before or after
+// a real /reload. Its line is saved in the session file once either way: a refresh that settles after the reload made its
+// context stale is written through the instance that runs the session now.
+for (const reloadFirst of [false, true]) {
+	test(`a refresh that settles ${reloadFirst ? "after" : "before"} a real /reload keeps its one line in the session file`, { skip }, async () => {
+		delete (globalThis as Record<symbol, unknown>)[STOP_SEEN];
+		rmSync(join(dir, "cache-keeper-stop.json"), { force: true });
+		let release: (() => void) | undefined;
+		let sent: AbortSignal | undefined;
+		let seen: Any;
+		const result = await inRuntime(
+			(_n, signal) => {
+				sent = signal;
+				return sse(
+					new ReadableStream({
+						start(controller) {
+							controller.enqueue(packet(messageStart(120_000, 0)));
+							release = () => {
+								if (signal.aborted) controller.error(new Error("cancelled"));
+								else {
+									for (const e of end) controller.enqueue(packet(e));
+									controller.close();
+								}
+							};
+						},
+					}),
+				);
+			},
+			async (s) => {
+				await s.answer();
+				const manager = s.runtime.session.sessionManager;
+				await s.ticks(276);
+				assert.equal(typeof release, "function", "the refresh is out");
+				if (reloadFirst) await s.runtime.session.reload();
+				release?.();
+				await s.ticks(2);
+				if (!reloadFirst) await s.runtime.session.reload();
+				const file = readFileSync(manager.getSessionFile(), "utf8").split("\n").filter(Boolean).map((line: string) => JSON.parse(line));
+				seen = {
+					onBranch: manager.getBranch().filter((e: Any) => e.type === "custom" && e.customType === "cache-keeper-refresh").length,
+					inFile: file.filter((e: Any) => e.customType === "cache-keeper-refresh"),
+					aborted: sent?.aborted,
+				};
+			},
+			{ ui: true, persisted: true },
+		);
+		assert.deepEqual(result.thrown, []);
+		assert.equal(result.refreshes, 1);
+		assert.equal(seen.aborted, reloadFirst, "the reload cancels a refresh still on its way");
+		assert.equal(seen.inFile.length, 1, "one line in the session file");
+		assert.equal(seen.onBranch, 1);
+		assert.match(seen.inFile[0].data.text, reloadFirst ? /^Cache warmed \(pi-cache-keeper, refresh 1\): .*\. It was then cancelled by a new request or a change of session\.$/ : /^Cache warmed \(pi-cache-keeper, refresh 1\): /);
+	});
+}

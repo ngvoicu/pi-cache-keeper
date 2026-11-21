@@ -360,6 +360,22 @@ function applyRetention(preferLong: boolean, interactive: boolean): void {
 	}
 }
 
+/**
+ * Per session id, how a refresh's line is saved in that session now: through the instance that runs it. Pi loads the
+ * extension again on /reload, so a refresh sent by one instance can settle after the next took over the same session;
+ * its line is saved through this, whichever instance sent it. Kept on `globalThis` for the process.
+ */
+const LINE_WRITERS = Symbol.for("pi-cache-keeper.line-writers");
+interface LineWriter {
+	hasUI: boolean;
+	append: (line: { level: "info" | "warning"; text: string }) => void;
+}
+function lineWriters(): Map<string, LineWriter> {
+	const host = globalThis as Record<symbol, unknown>;
+	if (!(host[LINE_WRITERS] instanceof Map)) host[LINE_WRITERS] = new Map<string, LineWriter>();
+	return host[LINE_WRITERS] as Map<string, LineWriter>;
+}
+
 /** A period changing hands: why, the end of its warming where it ended then, and the reason. */
 type Handed = { stop?: WarmStop; reason: string; handedOver: "evidence" | "let go" };
 
@@ -420,6 +436,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	let running = false;
 	let warming: AbortController | undefined;
 	let piWarmAt: number | undefined;
+	// The session this instance runs (from its session_start), for what settles after its context went stale.
+	let sessionId: string | undefined;
 	// The expiry whose try to compact before it was spent: one try per expiry, across every start of the countdown.
 	let spentExpiry: number | undefined;
 	// The one read of the cache everything reads (cache-clock.ts): the countdown and the footer, the refresh and its last
@@ -647,29 +665,56 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// Every record goes to the log; each `warm` record is said too (what is logged is said): the line of a refresh that was
 	// sent is kept in the session as a saved entry, so every refresh keeps its own line, also after a reload; every
 	// other one is a notice.
+	// It never throws: where the context is stale (a refresh settling after /reload), the record is for the session this
+	// instance last ran, and a refresh's line is saved through the instance that runs that session now.
 	const trace = <E extends TraceEvent>(ctx: ExtensionContext, event: E) => {
-		const record = { ...event, at: new Date().toISOString(), session: ctx.sessionManager.getSessionId() };
+		let session: string;
+		let live = true;
+		try {
+			session = ctx.sessionManager.getSessionId();
+		} catch {
+			live = false;
+			session = sessionId ?? "";
+		}
+		const record = { ...event, at: new Date().toISOString(), session };
 		try {
 			appendTrace(record);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			if (ctx.hasUI && message !== traceError) ctx.ui.notify(`pi-cache-keeper could not write ${TRACE_PATH_LABEL}: ${message}`, "warning");
+			ifSessionAlive(() => {
+				if (ctx.hasUI && message !== traceError) ctx.ui.notify(`pi-cache-keeper could not write ${TRACE_PATH_LABEL}: ${message}`, "warning");
+			});
 			traceError = message;
 		}
 		if (record.event === "warm") {
 			const warm = record as WarmTrace;
 			const notice = noticeOf(warm, keepWarmLabel(warmMinutes()));
-			if (notice && warm.refresh !== undefined) keepLine(ctx, notice);
+			if (notice && warm.refresh !== undefined) {
+				// A live context writes through this instance, which runs the session; a stale one through the instance that
+				// runs it now.
+				if (live) {
+					ownWriter.hasUI = ctx.hasUI;
+					lineWriters().set(session, ownWriter);
+				}
+				keepLine(session, notice);
+			}
 			else if (notice) say(ctx, notice);
 		}
 		return record;
 	};
-	// A refresh's line, saved in the session (Pi's custom entry, drawn by the renderer below and again on reload). Only
-	// where the session has an interface; never thrown out of.
-	const keepLine = (ctx: ExtensionContext, notice: { level: "info" | "warning"; text: string }) => {
-		if (!ctx.hasUI) return;
-		ifSessionAlive(() => pi.appendEntry<{ level: "info" | "warning"; text: string }>(REFRESH_LINE_TYPE, { level: notice.level, text: notice.text }));
+	// A refresh's line, saved in the session (Pi's custom entry, drawn by the renderer below and again on reload), through
+	// whichever instance runs that session now. Only where the session has an interface; never thrown out of.
+	const keepLine = (session: string, notice: { level: "info" | "warning"; text: string }) => {
+		const writer = lineWriters().get(session);
+		if (!writer?.hasUI) return;
+		try {
+			writer.append({ level: notice.level, text: notice.text });
+		} catch {
+			// The session is gone: nothing to save it in.
+		}
 	};
+	// This instance's writer, while it runs its session.
+	const ownWriter: LineWriter = { hasUI: false, append: (line) => pi.appendEntry<{ level: "info" | "warning"; text: string }>(REFRESH_LINE_TYPE, line) };
 	pi.registerEntryRenderer<{ level?: string; text?: string }>(REFRESH_LINE_TYPE, (entry, _options, theme) => {
 		const text = entry.data?.text;
 		if (typeof text !== "string" || !text) return undefined;
@@ -1761,6 +1806,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	});
 	pi.on("session_start", (_event, ctx) => {
 		sessionCtx = ctx;
+		sessionId = ctx.sessionManager.getSessionId();
+		ownWriter.hasUI = ctx.hasUI;
+		lineWriters().set(sessionId, ownWriter);
 		// A new session, a reload or a restart starts a new idle period (its state is in memory).
 		goIdle(ctx, true);
 		obeyStop(ctx, true);
@@ -1930,6 +1978,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
 		sessionCtx = undefined;
+		if (sessionId !== undefined && lineWriters().get(sessionId) === ownWriter) lineWriters().delete(sessionId);
 		if (onResize) process.stdout.off("resize", onResize);
 		onResize = undefined;
 		abortWarm();

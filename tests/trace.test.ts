@@ -136,7 +136,7 @@ test("what each record says in the transcript: its words and level, with prices 
 		text: `pi-cache-keeper could not keep the cache warm: overloaded; ${A}. Stopped until your next message. It had read only 12% of 600k from the cache: $2.25.`,
 	});
 	assert.deepEqual(say({ action: "failed", refresh: 2, verdict: "hit", usage: hit, budget: usd, reason: "overloaded" }), { level: "info", text: `${warmed}. The request then failed: overloaded` });
-	assert.deepEqual(say({ action: "cancelled", refresh: 2, verdict: "hit", usage: hit, budget: usd }), { level: "info", text: `${warmed}. It was then cancelled by a new request.` });
+	assert.deepEqual(say({ action: "cancelled", refresh: 2, verdict: "hit", usage: hit, budget: usd }), { level: "info", text: `${warmed}. It was then cancelled by a new request or a change of session.` });
 	assert.deepEqual(say({ action: "cancelled", refresh: 2, budget: usd }), { level: "info", text: `The cache refresh on its way (refresh 2) was cancelled by a new request or a change of session; it stays counted: ${A}` });
 	assert.deepEqual(say({ action: "cancelled", refresh: 2, verdict: "miss", usage: miss, budget: { ...usd, spent: 2.43 } }), {
 		level: "warning",
