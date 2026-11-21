@@ -121,6 +121,7 @@ import {
 	type Fetch,
 	type Found,
 } from "./model-data.ts";
+import { covers, noteMessage, readStop, rememberLoad, seenFor, type StopRead } from "./stop-record.ts";
 import { answerToPi, end, leave, mayLeave, onAgainst, settle, WAITING, warmer, type Warmer, type WarmPhase } from "./warm-period.ts";
 import { formatFooter, lifetimesView, priceAt, sentView, tierInUse, type Countdown, type DataView, type FooterView, type KeepWarmView, type PriceView } from "./footer.ts";
 
@@ -279,6 +280,13 @@ interface WarmPeriod {
 	doneFor?: number;
 	/** The expiry for which "Pi is busy" was logged, so a refresh tried on every tick logs it once. */
 	busyFor?: number;
+	/**
+	 * The id of the /cache-keeper-stop record the window had seen at the user's latest message when the period started
+	 * (none: no record), set once (stop-record.ts). The period obeys a record that is not this one.
+	 */
+	seen: string | null;
+	/** The stop the period obeys, set once (`obeyStop`): nothing warms it, the extension or Pi, for the rest of it. */
+	stopped?: { id: string; at: number };
 	/** What a taken period's cached request was written with, fixed at the period's start: the model and the cache tier. */
 	fixed?: {
 		model: string;
@@ -343,7 +351,12 @@ function applyRetention(preferLong: boolean, interactive: boolean): void {
 	}
 }
 
+/** A clock time for what the user reads: "14:02". */
+const hhmm = (at: number) => new Date(at).toTimeString().slice(0, 5);
+
 export default function cacheKeeper(pi: ExtensionAPI) {
+	// The /cache-keeper-stop record in place when the process first loaded the extension stops nothing (stop-record.ts).
+	rememberLoad();
 	let config = loadConfig();
 
 	let pendingTranscript: AgentMessage[] | undefined;
@@ -380,6 +393,15 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		return value;
 	};
 	const warmMinutes = (fresh = false) => keepWarmSetting(fresh)?.minutes ?? 0;
+	// The /cache-keeper-stop record, read as the settings are: once per millisecond, `fresh` reads again.
+	let stopRead: { at: number; value: StopRead } | undefined;
+	const stopRecord = (fresh = false): StopRead => {
+		const now = Date.now();
+		if (!fresh && stopRead?.at === now) return stopRead.value;
+		const value = readStop();
+		stopRead = { at: now, value };
+		return value;
+	};
 	// The request whose answer was the latest to read or write the cache: a later request that failed before using the
 	// cache does not replace it.
 	let answerRequest: CapturedRequest | undefined;
@@ -568,6 +590,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			...(why?.label ? { notOwnedLabel: why.label } : {}),
 			...(model ? { model: `${model.provider}/${model.id}` } : {}),
 			onAtStart,
+			seen: seenFor(ctx.sessionManager.getSessionId()),
 			since: sentSeq,
 			taken: onAtStart && clock !== undefined && budget !== undefined && fixed !== undefined,
 			...(clock ? { clock } : {}),
@@ -583,7 +606,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		p === undefined
 			? "Pi"
 			: warmer({
-					stopped: false,
+					stopped: p.stopped !== undefined,
 					taken: p.taken,
 					on: warmMinutes() > 0,
 					// Two misses in a row on the period's model, also one reported after the period started.
@@ -592,9 +615,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					warm: p.warm,
 				});
 	// The extension keeps this period's cache warm, or kept it until its warming ended (Pi's warming stays stopped).
+	// A stopped period the extension had taken is still its own here: it has the budget, the fixed values and the clock,
+	// and `obeyStop` has ended its warming, so nothing is sent on it.
 	const owns = (p: WarmPeriod | undefined): p is WarmPeriod & { budget: WarmBudget; fixed: NonNullable<WarmPeriod["fixed"]>; clock: PeriodClock } => {
 		const who = warmerOf(p);
-		return who === "the extension" || who === "nobody";
+		return who === "the extension" || who === "nobody" || (who === "nobody, stopped" && p?.taken === true);
 	};
 	const abortWarm = () => {
 		warming?.abort();
@@ -1154,6 +1179,26 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		trace(ctx, { ...warmBase(ctx, p, view?.sendBy ?? Date.now(), p.logged ?? {}), action: "skip", ...handed, budget: budgetRecord(p as WarmPeriod & { budget: WarmBudget }) });
 	};
 
+	// The only place a period becomes stopped: where the /cache-keeper-stop record in place is not the one the period's
+	// window had seen when it started (stop-record.ts). Nothing while there is no period, a run is going on, or it is
+	// already stopped; an unreadable record stops nothing here (the last gate refuses on it). A period the extension took
+	// ends its warming, logged once; then the footer.
+	const obeyStop = (ctx: ExtensionContext, fresh = false) => {
+		const p = period;
+		if (!p || running || p.stopped) return;
+		const record = stopRecord(fresh);
+		if (!record || "unreadable" in record || !covers(record, p.seen)) return;
+		p.stopped = { id: record.id, at: record.at };
+		if (p.taken && p.budget) {
+			const ended = endWarm(p, "stopped", `given at ${hhmm(record.at)}`);
+			if ("stop" in ended) {
+				const sendBy = look(ctx).sendBy;
+				trace(ctx, { ...warmBase(ctx, p, sendBy ?? Date.now(), p.fixed ? { model: p.fixed.model } : {}), action: "skip", ...ended, budget: budgetRecord({ ...p, budget: p.budget }) });
+			}
+		}
+		renderFooter(ctx);
+	};
+
 	// The time limit takes effect: the expiry the cache's clock gives already lasts to `idleSince + keepWarmMinutes` or
 	// beyond (the answer's own lifetime covers the window), so no refresh goes out in this period. Recorded when it
 	// happens, from the expiry just read; without one, no limit is declared. A refresh of the extension's that carries the
@@ -1185,6 +1230,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (!setting) return { refuse: "the settings could not be read" };
 		if (setting.minutes <= 0) return { refuse: "keep-warm was turned off" };
 		if (period !== p) return { refuse: "a new idle period started" };
+		// A /cache-keeper-stop, read afresh: a period it stops is refused by the next line.
+		const stop = stopRecord(true);
+		if (stop && "unreadable" in stop) return { refuse: "the stop record could not be read" };
+		obeyStop(ctx, true);
 		if (p.ended) return { refuse: `keep-warm ended: ${p.ended.reason}` };
 		// One of this period's refreshes is out: nothing else leaves for the period until it settles.
 		if (!mayLeave(p.warm)) return { hold: "out", reason: OUT_REASON };
@@ -1496,7 +1545,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		// been seen to change and that has passed, the moment nothing seen says the cache is alive any more.
 		const shown = (now: number): number | undefined => {
 			const who = warmerOf(period);
-			const pis = who === "Pi" || who === "Pi, handed over";
+			// A stopped period is read as Pi's are: its cache lasts as long as anything seen says, Pi's refreshes before the
+			// stop included.
+			const pis = who === "Pi" || who === "Pi, handed over" || who === "nobody, stopped";
 			if (view.regime === "period" && pis && view.unknown !== "the route changed" && (expiresAt === undefined || expiresAt <= now) && view.goneBy !== undefined && view.goneBy > now) return view.goneBy;
 			return expiresAt;
 		};
@@ -1516,6 +1567,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			return true;
 		};
 		const tick = () => {
+			obeyStop(ctx);
 			const near = (at: number | undefined) => at !== undefined && at - Date.now() <= Math.max(EXPIRY_LEAD_MS, warmLead);
 			if ((++ticks % 15 === 0 || near(expiresAt) || near(shown(Date.now()))) && !read()) return;
 			const now = Date.now();
@@ -1610,6 +1662,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		sessionCtx = ctx;
 		// A new session, a reload or a restart starts a new idle period (its state is in memory).
 		goIdle(ctx, true);
+		obeyStop(ctx, true);
 		applyRetention(config.cacheRetention === "long", ctx.hasUI);
 		startTimer(ctx);
 		// Another Pi window may have refreshed the data since this one loaded it.
@@ -1636,13 +1689,16 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const p = period;
 		// A fresh read of the saved setting: a switch-off in any window holds from this decision on.
 		keepWarmSetting(true);
+		// And of the stop record, before the cache is read, so a stopped period is not handed over at this decision.
+		obeyStop(ctx, true);
 		// The cache's clock read afresh first (Pi's refreshes since the answer, the route now): evidence against the period
 		// changes its hands before Pi is answered.
 		const idle = !running && ctx.isIdle();
 		const view = idle && p?.taken ? look(ctx) : undefined;
 		const who = warmerOf(period);
 		const action = answerToPi({ warmer: who, idle, goneBy: view?.goneBy, now: Date.now() });
-		if (action && p?.budget) {
+		if (action && p) {
+			const given = p.stopped && `/cache-keeper-stop (given at ${hhmm(p.stopped.at)}) holds until your next message`;
 			trace(ctx, {
 				...warmBase(ctx, p, view?.sendBy ?? Date.now(), {
 					model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
@@ -1650,15 +1706,27 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					lifetimeSource: view?.lifetime?.source,
 				}),
 				action: "pi-stopped",
-				reason:
-					who === "Pi, handed over"
-						? `this idle period's cache is gone by everything seen, Pi's own refreshes included, so a refresh would write it again (Pi would have ${event.action === "warm" ? "refreshed" : "stopped"})`
-						: `this extension keeps this idle period's cache warm (Pi would have ${event.action === "warm" ? "refreshed" : "stopped"})`,
-				budget: budgetRecord({ ...p, budget: p.budget }),
+				reason: `${
+					who === "nobody, stopped" && given
+						? given
+						: who === "Pi, handed over"
+							? "this idle period's cache is gone by everything seen, Pi's own refreshes included, so a refresh would write it again"
+							: "this extension keeps this idle period's cache warm"
+				} (Pi would have ${event.action === "warm" ? "refreshed" : "stopped"})`,
+				// A budget only where the extension took the period.
+				...(p.taken && p.budget ? { budget: budgetRecord({ ...p, budget: p.budget }) } : {}),
 			});
 			return { action };
 		}
 		if (event.action === "warm") piWarmAt = Date.now();
+		return undefined;
+	});
+	// The user's message (Pi's `input`: typed, over RPC, or sent in the user's name by another extension; idle, steering or
+	// a follow-up): the stop record in place now is the one this session has seen. An unreadable one samples nothing. The
+	// input goes on unchanged.
+	pi.on("input", (_event, ctx) => {
+		const record = stopRecord(true);
+		if (record === null || !("unreadable" in record)) noteMessage(ctx.sessionManager.getSessionId(), record?.id ?? null);
 		return undefined;
 	});
 	pi.on("agent_start", (_event, ctx) => {
@@ -1674,6 +1742,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	});
 	pi.on("agent_settled", (_event, ctx) => {
 		goIdle(ctx);
+		obeyStop(ctx, true);
 		// The latest answer may say which cache tier it wrote.
 		showData(ctx);
 		if (!compactWhenFull(ctx)) startTimer(ctx);
@@ -2173,7 +2242,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				const who = warmerOf(period);
 				// Where Pi warms a taken period whose route has not been seen to change and whose expiry has passed, its cache lasts
 				// as long as anything seen (Pi's own refreshes included) says; nothing is sent on that.
-				const piKeeps = state.regime === "period" && (who === "Pi" || who === "Pi, handed over") && state.unknown !== "the route changed" && (state.sendBy === undefined || state.sendBy <= now) && state.goneBy !== undefined && state.goneBy > now;
+				const piKeeps = state.regime === "period" && (who === "Pi" || who === "Pi, handed over" || who === "nobody, stopped") && state.unknown !== "the route changed" && (state.sendBy === undefined || state.sendBy <= now) && state.goneBy !== undefined && state.goneBy > now;
 				if (piKeeps && state.goneBy !== undefined) left = `${formatRemaining(state.goneBy - now)} left by Pi's own warming`;
 				else if (state.sendBy !== undefined) left = state.sendBy > now ? `${formatRemaining(state.sendBy - now)} left` : "expired";
 				// Where the expiry is unknown, the cache counts as expired, and why.

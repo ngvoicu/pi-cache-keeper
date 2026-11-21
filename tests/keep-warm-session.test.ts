@@ -3,7 +3,7 @@
 // out of a callback ends Pi. The refresh must settle without a throw, and what it showed (a miss, a hit, nothing) must
 // still be counted. No network: the adapter's transport is in memory, and the global fetch rejects.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mock, test } from "node:test";
@@ -380,3 +380,60 @@ for (const tier of ["short", "long"] as const) {
 		assert.deepEqual(sent, times.map((at) => ({ at, cap: 1 })));
 	});
 }
+
+// ------------------------------------------------------------------------------------------------- /cache-keeper-stop
+
+const { writeStop } = await import("../stop-record.ts");
+const STOP_SEEN = Symbol.for("pi-cache-keeper.stop-seen");
+
+// What the stop relies on in Pi: its `input` event is raised for the user's messages from every source, idle and into a
+// run, reaches the extension's handler and goes on unchanged; a decision of Pi's warming is asked of the extension; a
+// reload keeps what the process remembers. With keep-warm off, so the only warming is Pi's own.
+test("a stop through Pi's real runtime: Pi's warming is told to stop; an input from any source, idle or into a run, reaches the handler, goes on unchanged and lifts it; a real /reload keeps it", { skip }, async () => {
+	delete (globalThis as Record<symbol, unknown>)[STOP_SEEN];
+	rmSync(join(dir, "cache-keeper-stop.json"), { force: true });
+	const result = await inRuntime(
+		() => closed([messageStart(120_000, 0), ...end]),
+		async (s) => {
+			await s.answer();
+			assert.equal(await s.decide(), "warm", "keep-warm off: Pi's proposal stands");
+			for (const [source, streamingBehavior] of [
+				["interactive", undefined],
+				["rpc", undefined],
+				["extension", undefined],
+				["interactive", "steer"],
+				["rpc", "followUp"],
+			] as const) {
+				const what = `${source}${streamingBehavior ? `, ${streamingBehavior}` : ""}`;
+				writeStop(Date.now());
+				await s.ticks(1);
+				await s.answer(); // an answer no message of the user's brought: stopped from its start
+				assert.equal(await s.decide(), "stop", `${what}: stopped`);
+				assert.deepEqual(await s.runner.emitInput("Go on.", undefined, source, streamingBehavior), { action: "continue" }, `${what}: unchanged`);
+				await s.ticks(1);
+				await s.answer();
+				assert.equal(await s.decide(), "warm", `${what}: its answer's period is warmed as usual`);
+			}
+			writeStop(Date.now());
+			await s.ticks(1);
+			await s.answer();
+			assert.equal(await s.decide(), "stop");
+			await s.runtime.session.reload();
+			const runner = s.runtime.session.extensionRunner;
+			assert.equal(await runner.emitCacheWarmingDecision({ type: "cache_warming_decision", action: "warm", timestamp: Date.now() }), "stop", "after /reload: still stopped");
+		},
+		{ keepWarmMinutes: 0 },
+	);
+	assert.deepEqual(result.thrown, []);
+	assert.equal(result.refreshes, 0, "the extension sent nothing");
+});
+
+test("Pi starts its own warming in one place, for a request that carries the session's own id: the extension's refreshes and summaries never start it", (t) => {
+	const sdk = new URL("../node_modules/@earendil-works/pi-coding-agent/dist/core/sdk.js", import.meta.url);
+	if (!existsSync(sdk)) return t.skip("the installed Pi has no dist/core/sdk.js");
+	const text = readFileSync(sdk, "utf8");
+	assert.equal(text.split("cacheWarmer.start(").length - 1, 1, "one call");
+	const at = text.indexOf("cacheWarmer.start(");
+	assert.match(text.slice(Math.max(0, at - 200), at), /if \(options\?\.sessionId === sessionManager\.getSessionId\(\)\) \{\s*$/, "under the session's own id");
+	assert.match(text.slice(text.lastIndexOf("streamFn:", at), at), /streamFn: async \(model, context, options\) => \{/, "inside the session's stream function");
+});
