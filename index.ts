@@ -704,7 +704,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const renderFooter = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
 		const model = ctx.model;
-		const text = model ? formatFooter({ countdown, keepWarm: keepWarmView(model), ...modelView }, footerWidth(), (piece, tone) => ctx.ui.theme.fg(tone, piece)) : undefined;
+		const text = model ? formatFooter({ countdown, keepWarm: keepWarmView(model), stopped: period?.stopped !== undefined && !running, ...modelView }, footerWidth(), (piece, tone) => ctx.ui.theme.fg(tone, piece)) : undefined;
 		if (text === footerText) return;
 		footerText = text;
 		ctx.ui.setStatus(STATUS_KEY, text);

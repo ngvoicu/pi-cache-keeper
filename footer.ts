@@ -176,6 +176,11 @@ export interface FooterView {
 	 */
 	countdownTier?: Tier;
 	keepWarm?: KeepWarmView;
+	/**
+	 * A /cache-keeper-stop holds in this window (not shown while a run is going on): said in the place of keep-warm's own
+	 * muted part, with keep-warm on or off; keep-warm's warnings stay beside it.
+	 */
+	stopped?: boolean;
 	lifetimes?: LifetimesView;
 	sent?: SentView;
 	price?: PriceView;
@@ -410,7 +415,8 @@ export function footerParts(view: FooterView): Part[] {
 	}
 	// The goal says how far the period stands only beside a warm cache: not while a request runs or once it is cold.
 	const kept = view.countdown?.state === "warm" || view.countdown?.state === "refreshing";
-	if (view.keepWarm && "goal" in view.keepWarm && !kept) parts.push(goalPart(view.keepWarm.goal, false));
+	if (view.stopped) parts.push(plainPart(PRIORITY.warmNote, ["warming stopped until your next message", "warming stopped"], "muted"));
+	else if (view.keepWarm && "goal" in view.keepWarm && !kept) parts.push(goalPart(view.keepWarm.goal, false));
 	else if (warm && warm.priority !== PRIORITY.warmAlert) parts.push(warm);
 	if (view.lifetimes) parts.push(...lifetimeParts(view.lifetimes));
 	if (view.sent) parts.push(sentPart(view.sent));

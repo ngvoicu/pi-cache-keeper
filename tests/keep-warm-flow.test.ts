@@ -4469,3 +4469,47 @@ test("stop, its notice: said once in a window another stopped, with the period's
 	await quiet.idle(5000);
 	assert.equal(quiet.said.length, 0);
 });
+
+test("stop, the footer: within a second in a window with a countdown; not during a run; after the summary before expiry it stands first; gone with the next message's answer", async (t) => {
+	online(t);
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: true });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	h.emit("agent_settled");
+	await h.idle(10_000);
+	assert.match(h.statuses.at(-1)?.text ?? "", /keep-warm 2h until/);
+	writeStop(Date.now());
+	await h.idle(1000);
+	const line = h.statuses.at(-1)?.text ?? "";
+	assert.match(line, /^cache warm · 4m left · warming stopped until your next message · /);
+	assert.doesNotMatch(line, /keep-warm/);
+	// Compacting before expiry: the summary, then no countdown, and the stop stands first.
+	await h.idle(HOUR);
+	assert.equal(h.state.compacts, 1);
+	h.branch.push({ type: "compaction", id: "k", parentId: null, timestamp: new Date().toISOString(), summary: "s", firstKeptEntryId: "a", tokensBefore: 600_000 } as never);
+	h.emit("session_compact", { compactionEntry: { id: "k", summary: "s", tokensBefore: 600_000 }, fromExtension: true, reason: "manual" });
+	assert.match(h.statuses.at(-1)?.text ?? "", /^warming stopped until your next message · /);
+	// A run no message started: not during it, and again after it.
+	h.state.compacts = 0;
+	mock.timers.tick(1000);
+	let during = "";
+	h.run(true, () => (during = h.statuses.at(-1)?.text ?? ""));
+	assert.doesNotMatch(during, /warming stopped/);
+	assert.match(h.statuses.at(-1)?.text ?? "", /warming stopped until your next message/);
+	// The user's message and its answer: keep-warm's own note again.
+	mock.timers.tick(1000);
+	h.input();
+	h.run(true);
+	assert.doesNotMatch(h.statuses.at(-1)?.text ?? "", /warming stopped/);
+	assert.match(h.statuses.at(-1)?.text ?? "", /keep-warm 2h until/);
+
+	// Keep-warm off: the only thing the footer says about warming.
+	clock();
+	fresh({ keepWarmMinutes: 0, compactBeforeExpiry: false });
+	const off = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	off.emit("agent_settled");
+	writeStop(Date.now());
+	await off.idle(2000);
+	assert.match(off.statuses.at(-1)?.text ?? "", /^cache warm · 4m left · warming stopped until your next message · /);
+});

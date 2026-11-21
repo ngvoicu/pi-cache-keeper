@@ -367,3 +367,28 @@ test("at every width from 1 to 200 columns, in every state: within the width, an
 		}
 	}
 });
+
+test("a stop in the footer: in the place of keep-warm's own muted part, with keep-warm on or off; keep-warm's warnings stay beside it; narrower, warming stopped", () => {
+	const STOPPED = "warming stopped until your next message";
+	const ended = { ended: { stop: "stopped" as const, limit: "2 h", amounts: "$0.36 spent, a miss costs $2.07" } };
+	assert.equal(formatFooter({ ...warm(41 * MIN), keepWarm: ended, stopped: true }), `cache warm · 41m left · ${STOPPED} · long 1h (in use) · short 5m · sent 1h · api $5/$25 per M`);
+	// It replaces the goal, an end by the rule, a period left to Pi, and keep-warm switched on during the period.
+	for (const keepWarm of [{ goal: { minutes: 120, until: Date.now() + HOUR } }, { ended: { stop: "budget" as const, limit: "2 h", amounts: "$1.98 spent" } }, { leftToPi: "no cache lifetime" }, { pending: true as const }]) {
+		const line = formatFooter({ ...warm(41 * MIN), keepWarm, stopped: true })!;
+		assert.equal(line.split(" · ")[2], STOPPED, JSON.stringify(keepWarm));
+		assert.doesNotMatch(line, /keep-warm/, JSON.stringify(keepWarm));
+	}
+	// The warnings stay, before it.
+	assert.match(formatFooter({ ...warm(41 * MIN), keepWarm: { fallback: true }, stopped: true })!, /^cache warm · 41m left · ⚠ keep-warm: Pi's after 2 refreshes without a hit \(\/cache-keeper-warm\) · warming stopped until your next message · /);
+	assert.match(formatFooter({ ...warm(41 * MIN), keepWarm: { ended: { stop: "missed", limit: "2 h", amounts: "$1.22 spent, a miss costs $2.07" } }, stopped: true })!, /^cache warm · 41m left · ⚠ keep-warm ended \(a refresh missed the cache\): \$1\.22 spent, a miss costs \$2\.07 · warming stopped until your next message · /);
+	// Keep-warm off: it stands alone; a cold cache; no countdown (after a compaction): first.
+	assert.equal(formatFooter({ ...warm(41 * MIN), stopped: true })!.split(" · ")[2], STOPPED);
+	assert.equal(formatFooter({ countdown: { state: "cold" }, ...claude, stopped: true }), `cache cold · next message full price · ${STOPPED} · long 1h (in use) · short 5m · sent 1h · api $5/$25 per M`);
+	assert.equal(formatFooter({ ...claude, stopped: true }), `${STOPPED} · long 1h (in use) · short 5m · sent 1h · api $5/$25 per M`);
+	// Muted.
+	assert.match(formatFooter({ ...warm(41 * MIN), stopped: true }, Number.POSITIVE_INFINITY, paint)!, /<muted>warming stopped until your next message<\/>/);
+	// Narrower: at 60 columns "warming stopped"; at 40, dropped with the other keep-warm notes.
+	assert.equal(formatFooter({ ...warm(41 * MIN), stopped: true }, 140), `cache warm · 41m left · ${STOPPED} · long 1h (in use) · short 5m · sent 1h · api $5/$25 per M`);
+	assert.equal(formatFooter({ ...warm(41 * MIN), stopped: true }, 60), "warm 41m · warming stopped · long 1h · short 5m · api $5/$25");
+	assert.equal(formatFooter({ ...warm(41 * MIN), stopped: true }, 40), "warm 41m · warming stopped · long 1h");
+});
