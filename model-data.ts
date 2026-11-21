@@ -517,7 +517,8 @@ export function loadStore(): DataStore {
 	}
 }
 
-function writeAtomic(path: string, text: string, mode?: number): void {
+/** Writes a file whole: a temporary file beside it, then a rename, so a reader sees the old file or the new one. */
+export function writeAtomic(path: string, text: string, mode?: number): void {
 	mkdirSync(dirname(path), { recursive: true });
 	const temporary = `${path}.${process.pid}.tmp`;
 	writeFileSync(temporary, text, mode === undefined ? undefined : { mode });
