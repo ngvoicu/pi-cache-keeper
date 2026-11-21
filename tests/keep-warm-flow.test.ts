@@ -13,7 +13,7 @@ const readSettings = () => JSON.parse(readFileSync(join(dir, "settings.json"), "
 settings({ keepWarmMinutes: 120, minContextTokens: 100_000 });
 const { default: cacheKeeper } = await import("../index.ts");
 const { clockText } = await import("../footer.ts");
-const { formatRemaining } = await import("../trace.ts");
+const { formatRemaining, noticeOf } = await import("../trace.ts");
 const { writeStop } = await import("../stop-record.ts");
 const STOP_FILE = join(dir, "cache-keeper-stop.json");
 
@@ -79,6 +79,8 @@ function harness(options: Options = {}) {
 	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 	const renderers = new Map<string, unknown>();
 	const entries: { customType: string; data: { level: string; text: string } }[] = [];
+	// What the transcript shows, in order: notices and saved entries.
+	const transcript: { via: "notice" | "entry"; level: string; text: string }[] = [];
 	const commands = new Map<string, (args: string, ctx: unknown) => unknown>();
 	// Events between extensions (a proxy saying what served a request): `signal` delivers one.
 	const bus = new Map<string, (payload: unknown) => void>();
@@ -89,9 +91,12 @@ function harness(options: Options = {}) {
 		registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => unknown }) => commands.set(name, command.handler),
 		// Saved entries: on the branch, as Pi appends them, and in the order they came.
 		appendEntry: (customType: string, data: unknown) => {
-			const entry = { type: "custom", customType, data, id: `c${branch.length}`, parentId: null, timestamp: new Date().toISOString() };
+			// After the leaf, as Pi appends it.
+			const entry = { type: "custom", customType, data, id: `c${branch.length}`, parentId: (branch.at(-1) as { id?: string } | undefined)?.id ?? null, timestamp: new Date().toISOString() };
 			branch.push(entry as never);
 			entries.push({ customType, data: data as never });
+			const line = data as { level: string; text: string };
+			transcript.push({ via: "entry", level: line.level, text: line.text });
 		},
 		getThinkingLevel: () => thinkingLevel.value,
 	};
@@ -141,6 +146,7 @@ function harness(options: Options = {}) {
 			notify: (text: string, level = "info") => {
 				notes.push(text);
 				said.push({ text, level });
+				transcript.push({ via: "notice", level, text });
 			},
 			theme: { fg: (_color: string, text: string) => text },
 		},
@@ -259,7 +265,7 @@ function harness(options: Options = {}) {
 	const signal = (name: string, payload: unknown) => bus.get(name)?.(payload);
 	// The user's message (Pi's `input`), from a source, idle or into a run.
 	const input = (source = "interactive", streamingBehavior?: string) => emit("input", { type: "input", text: "more", source, streamingBehavior });
-	return { emit, idle, warms, state, sent, model, branch, statuses, notes, said, entries, renderers, handlers, commands, command, decide, run, input, usage: refreshUsage, ctx, thinkingLevel, release: () => pending?.(), signal };
+	return { emit, idle, warms, state, sent, model, branch, statuses, notes, said, entries, transcript, renderers, handlers, commands, command, decide, run, input, usage: refreshUsage, ctx, thinkingLevel, release: () => pending?.(), signal };
 }
 
 const allTraces = () =>
@@ -449,7 +455,8 @@ for (const [label, options] of [
 		assert.deepEqual(on.pi, off.pi, "exactly as with keep-warm off");
 		assert.ok(on.answers.every((a) => a === undefined));
 		assert.equal(on.warms, 0);
-		assert.deepEqual(traces().filter((r) => r.event === "warm"), [], "and logs no refresh of its own");
+		// Only that the session is left to Pi, said once, with why.
+		assert.deepEqual(traces().filter((r) => r.event === "warm").map((r) => r.action), ["left"], "and logs no refresh of its own");
 	});
 }
 
@@ -533,7 +540,7 @@ test("R1: an answer that used the cache, then a successful one that used none: t
 	assert.deepEqual(on.pi, off.pi, "Pi refreshes exactly as with keep-warm off");
 	assert.deepEqual(on.decisions.map((d) => [d.at, d.pi]), off.decisions.map((d) => [d.at, d.pi]));
 	assert.equal(on.warms, 0, "the extension sends nothing");
-	assert.deepEqual(on.traces.filter((r) => r.event === "warm"), []);
+	assert.deepEqual(on.traces.filter((r) => r.event === "warm").map((r) => [r.action, r.reason]), [["left", "the last answer did not use the prompt cache"]], "only that it is left to Pi, said once");
 	assert.match(on.shown, /this session is left to Pi's own warming: the last answer did not use the prompt cache/);
 });
 
@@ -874,10 +881,10 @@ test("R4: each end reason is recorded once, with the amounts, in the log, the fo
 		assert.equal(h.decide(), undefined, "Pi's warming decides while the cache can be alive");
 	});
 	assert.deepEqual([r.stop.action, r.stop.stop, r.h.warms.length], ["skip", "unable", 0]);
-	assert.match(r.stop.reason, /^the extension no longer holds the period's request \(the model, the branch or the conversation changed\), so it can't refresh it$/);
+	assert.match(r.stop.reason, /^you switched the model or the branch, or the conversation was compacted, so the extension no longer has the request to re-send$/);
 	assert.equal(r.footer, undefined, "no 'keep-warm ended': the period is Pi's");
 	// The branch move forgot the request, so the footer no longer says what was sent.
-	assert.equal(lastFooter(r.h), "cache cold · next message full price · keep-warm: Pi's (request let go) · short 5m (in use) · long 5m · api $3/$15 per M");
+	assert.equal(lastFooter(r.h), "cache cold · next message full price · keep-warm: Pi's (you switched model or branch, or compacted) · short 5m (in use) · long 5m · api $3/$15 per M");
 	// Three hours on, nothing seen says the period's cache is alive (Pi's refreshes included): Pi's refresh would write it.
 	assert.deepEqual(r.h.decide(), { action: "stop" });
 });
@@ -1854,7 +1861,10 @@ test("a period left to Pi reads its cache as with keep-warm off: GPT-6.1 Sol ask
 			const decided = h.decide();
 			await h.idle(ms);
 			const shown = (await h.command("cache-keeper")).split("\n").find((l) => l.startsWith("cache:"));
-			return { decided, compacts: h.state.compacts, compactedAt: h.state.compactedAt, attempts: h.state.attempts, traces: allTraces(), shown };
+			// The record that the session is left to Pi (keep-warm on only) is the one difference, said once.
+			const all = allTraces();
+			assert.ok(all.filter((r) => r.action === "left").length <= 1);
+			return { decided, compacts: h.state.compacts, compactedAt: h.state.compactedAt, attempts: h.state.attempts, traces: all.filter((r) => r.action !== "left"), shown };
 		};
 		const label = tools.length ? "with tools" : "as the reviewer built it, without tools";
 		const on = await runOnce(120, 35 * 60_000);
@@ -1934,7 +1944,10 @@ test("R9: one miss ends only its period; the next period is owned and refreshes,
 	assert.deepEqual(await nextPeriod(h, true), { decided: { action: "stop" }, refreshed: 1 });
 	assert.deepEqual(traces().filter((r) => r.stop).map((r) => [r.action, r.stop]), [["missed", "missed"]]);
 	assert.equal(countOf(), 1);
-	assert.ok(h.notes.includes("Keeping the cache warm read only 50% from the cache, so it wrote the context again. Stopped until your next message."));
+	// The miss keeps its own line in the transcript, a saved entry, with what it read and cost.
+	assert.deepEqual(h.entries.map((e) => [e.customType, e.data.level, e.data.text]), [
+		["cache-keeper-refresh", "warning", "Keeping the cache warm read only 50% of 600k from the cache, so it wrote the context again: $1.22; $1.22 spent, a miss costs $2.07. Stopped until your next message."],
+	]);
 	assert.deepEqual(await nextPeriod(h), { decided: { action: "stop" }, refreshed: 1 }, "the next period is owned and refreshes");
 	assert.equal(countOf(), 0, "a hit sets it back to zero");
 	assert.ok(!h.notes.includes(WARNING));
@@ -2120,7 +2133,8 @@ test("the period's rule: a refresh that fails before it leaves ends warming (\"f
 	assert.deepEqual(records.map((r) => [r.action, r.stop, r.reason]), [["failed", "failed", "no API key for cliproxyapi"]]);
 	assert.equal(records[0].budget.spent, 0, "nothing spent");
 	assert.equal(countOf(), 0, "nothing counted toward two in a row");
-	assert.deepEqual(h.notes.filter((n) => n.includes("could not keep the cache warm")), ["pi-cache-keeper could not keep the cache warm: no API key for cliproxyapi"]);
+	assert.deepEqual(h.said.filter((n) => n.text.includes("could not keep the cache warm")), [{ level: "warning", text: "pi-cache-keeper could not keep the cache warm: no API key for cliproxyapi (nothing was sent); $0 spent, a miss costs $2.07. Stopped until your next message." }]);
+	assert.deepEqual(h.entries, [], "nothing was sent: a notice, not a refresh's line");
 });
 
 // ------------------------------------------------------------------------------- the owned period's one expiry
@@ -2532,10 +2546,10 @@ test("a model round trip: a model switch away and back without a message: the pe
 		const stops = traces().filter((r) => r.stop);
 		assert.deepEqual(
 			stops.map((r) => [r.stop, r.reason]),
-			[["unable", "the extension no longer holds the period's request (the model, the branch or the conversation changed), so it can't refresh it"]],
+			[["unable", "you switched the model or the branch, or the conversation was compacted, so the extension no longer has the request to re-send"]],
 			label,
 		);
-		assert.match(lastFooter(h) ?? "", /keep-warm: Pi's \(request let go\)/, label);
+		assert.match(lastFooter(h) ?? "", /keep-warm: Pi's \(you switched model or branch, or compacted\)/, label);
 	}
 });
 
@@ -3598,7 +3612,7 @@ test("footer: after a model switch, the new model's lifetimes and price, and not
 	// (the stated hour), with the lifetime its clock counts.
 	h.ctx.model = h.model as never;
 	h.emit("model_select");
-	assert.equal(lastFooter(h), "keep-warm: Pi's (request let go) · long 1h (in use) · short 1h · api $3/$15 per M");
+	assert.equal(lastFooter(h), "keep-warm: Pi's (you switched model or branch, or compacted) · long 1h (in use) · short 1h · api $3/$15 per M");
 	assert.equal(h.decide(), undefined, "Pi's warming decides");
 
 	// A period left to Pi is said for its own model only.
@@ -3925,7 +3939,7 @@ function reloadStopped(h: ReturnType<typeof harness>, t: { after: (fn: () => voi
 		events: { on: () => () => {}, emit: () => {} },
 		registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => unknown }) => h.commands.set(name, command.handler),
 		appendEntry: (customType: string, data: unknown) => {
-			h.branch.push({ type: "custom", customType, data, id: `c${h.branch.length}`, parentId: null, timestamp: new Date().toISOString() } as never);
+			h.branch.push({ type: "custom", customType, data, id: `c${h.branch.length}`, parentId: (h.branch.at(-1) as { id?: string } | undefined)?.id ?? null, timestamp: new Date().toISOString() } as never);
 			h.entries.push({ customType, data: data as never });
 		},
 		getThinkingLevel: () => "high",
@@ -4458,7 +4472,7 @@ test("stop, its notice: said once in a window another stopped, with the period's
 	pis.emit("agent_settled");
 	const third = writeStop(Date.now());
 	pis.decide();
-	assert.deepEqual(pis.said.map((n) => n.text), [notice(third.at)]);
+	assert.deepEqual(pis.said.map((n) => n.text), [notice(third.at), `Told Pi's own idle warming to stop: /cache-keeper-stop (given at ${hhmm(third.at)}) holds until your next message (Pi would have refreshed)`]);
 	void second;
 	// No interface: nothing.
 	clock();
@@ -4512,4 +4526,188 @@ test("stop, the footer: within a second in a window with a countdown; not during
 	writeStop(Date.now());
 	await off.idle(2000);
 	assert.match(off.statuses.at(-1)?.text ?? "", /^cache warm · 4m left · warming stopped until your next message · /);
+});
+
+// ------------------------------------------------------------------------------------------- what is logged is said
+
+/**
+ * Every `warm` record of the log, said: a refresh that was sent as its saved line (an entry kept in the session), every
+ * other one as a notice, in the order of the log; the notices that are no record's (a model left to Pi after two in a
+ * row, a stop's own) left out. Returns what was said.
+ */
+function loggedIsSaid(h: ReturnType<typeof harness>, label: string) {
+	const expected = traces()
+		.filter((r) => r.event === "warm")
+		.flatMap((r) => {
+			const notice = noticeOf(r, "2 h");
+			return notice ? [{ via: r.refresh === undefined ? "notice" : "entry", level: notice.level, text: notice.text }] : [];
+		});
+	const own = (text: string) => !/^Two refreshes in a row without a hit|^Warming is stopped in/.test(text);
+	assert.deepEqual(h.transcript.filter((l) => own(l.text)), expected, label);
+	return expected;
+}
+
+test("what is logged is said: in every flow, each warm record has its line, a refresh's kept as a saved entry, every other one a notice; without an interface nothing", async (t) => {
+	t.after(() => mock.timers.reset());
+	const flows: [string, Options, Record<string, unknown>, ((h: ReturnType<typeof harness>) => Promise<void> | void)?][] = [
+		["hits to the budget", {}, {}],
+		["the time limit", { lifetime: 3600 }, { keepWarmMinutes: 90 }],
+		["a miss", { respond: () => HALF_MISS }, {}],
+		["a refresh without usage", { respond: () => ({ usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 } }) }, {}],
+		["a failure", { respond: () => ({ stopReason: "error", errorMessage: "overloaded", usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 } }) }, {}],
+		["a failure after a hit", { respond: () => ({ stopReason: "error", errorMessage: "overloaded" }) }, {}],
+		[
+			"a cancellation after a hit",
+			{ hold: (n) => n === 1 },
+			{},
+			async (h) => {
+				await h.idle(277_000);
+				h.run(false);
+			},
+		],
+		[
+			"a cancellation before any usage",
+			{ hold: (n) => n === 1 },
+			{},
+			async (h) => {
+				await h.idle(277_000);
+				h.state.abortReports = false;
+				h.run(false);
+			},
+		],
+		[
+			"Pi busy at the refresh",
+			{},
+			{},
+			async (h) => {
+				await h.idle(270_000);
+				h.state.pending = true;
+				await h.idle(10_000);
+				h.state.pending = false;
+			},
+		],
+		[
+			"the request let go",
+			{},
+			{},
+			async (h) => {
+				await h.idle(300_000);
+				h.emit("session_tree");
+			},
+		],
+		[
+			"keep-warm switched off",
+			{},
+			{},
+			async (h) => {
+				await h.idle(300_000);
+				settings({ keepWarmMinutes: 0, minContextTokens: 100_000, compactBeforeExpiry: false });
+			},
+		],
+		[
+			"a stop record that can't be read",
+			{},
+			{},
+			async (h) => {
+				await h.idle(100_000);
+				writeFileSync(STOP_FILE, "{");
+			},
+		],
+		[
+			"Pi told to stop",
+			{},
+			{},
+			(h) => {
+				h.decide();
+			},
+		],
+	];
+	const kinds = new Set<string>();
+	for (const [label, options, keepWarm, act] of flows) {
+		for (const ui of [true, false]) {
+			clock();
+			fresh({ compactBeforeExpiry: false, ...keepWarm });
+			const h = harness({ lifetime: 300, cost: WITH_WRITE, ...options, ui });
+			h.emit("agent_settled");
+			await act?.(h);
+			await h.idle(3 * HOUR);
+			if (!ui) {
+				assert.deepEqual(h.transcript, [], `${label}: nothing without an interface`);
+				continue;
+			}
+			const said = loggedIsSaid(h, label);
+			assert.ok(said.length > 0, `${label}: something was said`);
+			for (const line of said) kinds.add(`${line.via} ${line.level}`);
+		}
+	}
+	assert.deepEqual([...kinds].sort(), ["entry info", "entry warning", "notice info", "notice warning"]);
+	// The words of the commonest line, the first refresh's and the second's, with the period's sum.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	h.emit("agent_settled");
+	await h.idle(560_000);
+	assert.deepEqual(h.entries.map((e) => e.data.text), [
+		"Cache warmed (pi-cache-keeper, refresh 1): 99% of 600k from the cache, $0.18; $0.18 spent, a miss costs $2.07",
+		"Cache warmed (pi-cache-keeper, refresh 2): 99% of 600k from the cache, $0.18; $0.36 spent, a miss costs $2.07",
+	]);
+	assert.deepEqual(h.entries.map((e) => e.customType), ["cache-keeper-refresh", "cache-keeper-refresh"]);
+	// Each line is on the branch as a custom entry after the answer, and Pi draws it with the extension's renderer.
+	assert.deepEqual(h.branch.filter((e) => e.type === "custom").length, 2);
+	const render = h.renderers.get("cache-keeper-refresh") as (entry: unknown, options: unknown, theme: unknown) => { render: (width: number) => string[] } | undefined;
+	const theme = { fg: (color: string, text: string) => `<${color}>${text}</>` };
+	assert.match(render({ data: h.entries[0].data }, { expanded: false }, theme)?.render(200).join("") ?? "", /<dim>Cache warmed \(pi-cache-keeper, refresh 1\)/);
+	assert.match(render({ data: { level: "warning", text: "x" } }, { expanded: false }, theme)?.render(200).join("") ?? "", /<warning>x<\/>/);
+	assert.equal(render({ data: {} }, { expanded: false }, theme), undefined);
+	// The second miss in a row: its own line, then the notice that the model is left to Pi.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const two = harness({ lifetime: 300, cost: WITH_WRITE, ui: true, respond: () => HALF_MISS });
+	await nextPeriod(two, true);
+	await nextPeriod(two);
+	const last = two.transcript.slice(-2);
+	assert.deepEqual(last.map((l) => [l.via, l.level]), [["entry", "warning"], ["notice", "warning"]]);
+	assert.match(last[0].text, /^Keeping the cache warm read only 50% of 600k from the cache/);
+	assert.match(last[1].text, /^Two refreshes in a row without a hit/);
+});
+
+test("a session left to Pi from its start is said once: not after every answer; again after the reason changes and after a period the extension took; nothing with keep-warm off or without a label", async (t) => {
+	t.after(() => mock.timers.reset());
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const leftSaid = (h: ReturnType<typeof harness>) => h.said.filter((n) => n.text.startsWith("Keep-warm: this session is left to Pi's own warming"));
+	const h = harness({ lifetime: 30, cost: WITH_WRITE, ui: true });
+	h.emit("agent_settled");
+	for (let i = 0; i < 3; i++) {
+		mock.timers.tick(1000);
+		h.run(true);
+	}
+	assert.deepEqual(leftSaid(h), [{ level: "info", text: "Keep-warm: this session is left to Pi's own warming: the cache lifetime (30 s) is under a minute" }], "once");
+	// Another reason: said again; back to one the extension takes, then left again: said again.
+	const lifetime = (seconds: number) => ((h.model as unknown as { promptCache: unknown }).promptCache = { short: seconds, long: seconds });
+	lifetime(300);
+	mock.timers.tick(1000);
+	h.run("uncached");
+	assert.equal(leftSaid(h).length, 2);
+	assert.match(leftSaid(h)[1].text, /the last answer did not use the prompt cache$/);
+	mock.timers.tick(1000);
+	h.run(true);
+	assert.deepEqual(h.decide(), { action: "stop" }, "taken");
+	lifetime(30);
+	mock.timers.tick(1000);
+	h.run(true);
+	assert.equal(leftSaid(h).length, 3, "said again after a period the extension took");
+	// Keep-warm off: nothing. No answer that used the cache yet (no label): nothing.
+	clock();
+	fresh({ keepWarmMinutes: 0, compactBeforeExpiry: false });
+	const off = harness({ lifetime: 30, cost: WITH_WRITE, ui: true });
+	off.emit("agent_settled");
+	assert.equal(leftSaid(off).length, 0);
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const cold = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	// No answer on the branch yet (only the user's message).
+	cold.branch.pop();
+	cold.emit("session_start", { reason: "startup" });
+	assert.equal(leftSaid(cold).length, 0, "the footer has no label either");
 });

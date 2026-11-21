@@ -53,7 +53,9 @@ import {
 	formatDuration,
 	formatRemaining,
 	formatTokens,
+	noticeOf,
 	readTraces,
+	SWITCHED_OFF,
 	TRACE_PATH_LABEL,
 	stopLabel,
 	traceDetails,
@@ -305,7 +307,9 @@ interface CachedPath {
 /** The extension's one status in Pi's footer: the countdown, what went wrong, and the values in use (see footer.ts). */
 const STATUS_KEY = "cache-keeper";
 /** Why a period is Pi's once the extension let go of its request (a model switch, a branch move, a compaction). */
-const REQUEST_LET_GO = "the extension no longer holds the period's request (the model, the branch or the conversation changed), so it can't refresh it";
+const REQUEST_LET_GO = "you switched the model or the branch, or the conversation was compacted, so the extension no longer has the request to re-send";
+/** What the footer says of it, in a few words. */
+const REQUEST_LET_GO_LABEL = "you switched model or branch, or compacted";
 /**
  * The request forms whose cache markers `requestCache` reads: Anthropic Messages (`cache_control`) and OpenAI's Chat
  * Completions and Responses (Codex's and Azure's too). Pi's other adapters write theirs in forms it does not read
@@ -314,6 +318,8 @@ const REQUEST_LET_GO = "the extension no longer holds the period's request (the 
 const MARKERS_READ: ReadonlySet<string> = new Set(["anthropic-messages", "openai-completions", "openai-responses", "openai-codex-responses", "azure-openai-responses"]);
 const httpFetch: Fetch = (url, init) => fetch(url, init);
 const CARD_TYPE = "cache-keeper";
+/** The saved entry of one refresh the extension sent: its line in the transcript, kept in the session (`{ level, text }`). */
+const REFRESH_LINE_TYPE = "cache-keeper-refresh";
 /** The card type pi-cached-compaction wrote; still rendered so cards in older sessions show. */
 const LEGACY_CARD_TYPE = "cached-compaction";
 const PREFIX_MISMATCH = "pi-cache-keeper: request prefix differs from the cached request";
@@ -350,6 +356,9 @@ function applyRetention(preferLong: boolean, interactive: boolean): void {
 		host[INTERACTIVE_OWNER] = false;
 	}
 }
+
+/** A period changing hands: why, the end of its warming where it ended then, and the reason. */
+type Handed = { stop?: WarmStop; reason: string; handedOver: "evidence" | "let go" };
 
 /** A clock time for what the user reads: "14:02". */
 const hhmm = (at: number) => new Date(at).toTimeString().slice(0, 5);
@@ -415,7 +424,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// (the route serving the model, the route's lifetime for the request's tier); what it says against the period goes to
 	// who warms it (`changeHands`), recorded as a skip unless the caller takes it (`taken`). Its expiry is `sendBy`: where
 	// it is unknown, nothing is sent.
-	const look = (ctx: ExtensionContext, at: { model?: Model<Api>; entries?: SessionEntry[] } = {}, taken?: (handed: { stop: WarmStop; reason: string }) => void): CacheView => {
+	const look = (ctx: ExtensionContext, at: { model?: Model<Api>; entries?: SessionEntry[] } = {}, taken?: (handed: Handed) => void): CacheView => {
 		const model = at.model ?? ctx.model;
 		if (!model) return { regime: "plain", cached: false, replied: false };
 		const entries = at.entries ?? ctx.sessionManager.getBranch();
@@ -626,6 +635,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		warming = undefined;
 	};
 
+	// Every record goes to the log; each `warm` record is said too (what is logged is said): the line of a refresh that was
+	// sent is kept in the session as a saved entry, so every refresh keeps its own line, also after a reload; every
+	// other one is a notice.
 	const trace = <E extends TraceEvent>(ctx: ExtensionContext, event: E) => {
 		const record = { ...event, at: new Date().toISOString(), session: ctx.sessionManager.getSessionId() };
 		try {
@@ -635,8 +647,25 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			if (ctx.hasUI && message !== traceError) ctx.ui.notify(`pi-cache-keeper could not write ${TRACE_PATH_LABEL}: ${message}`, "warning");
 			traceError = message;
 		}
+		if (record.event === "warm") {
+			const warm = record as WarmTrace;
+			const notice = noticeOf(warm, keepWarmLabel(warmMinutes()));
+			if (notice && warm.refresh !== undefined) keepLine(ctx, notice);
+			else if (notice) say(ctx, notice);
+		}
 		return record;
 	};
+	// A refresh's line, saved in the session (Pi's custom entry, drawn by the renderer below and again on reload). Only
+	// where the session has an interface; never thrown out of.
+	const keepLine = (ctx: ExtensionContext, notice: { level: "info" | "warning"; text: string }) => {
+		if (!ctx.hasUI) return;
+		ifSessionAlive(() => pi.appendEntry<{ level: "info" | "warning"; text: string }>(REFRESH_LINE_TYPE, { level: notice.level, text: notice.text }));
+	};
+	pi.registerEntryRenderer<{ level?: string; text?: string }>(REFRESH_LINE_TYPE, (entry, _options, theme) => {
+		const text = entry.data?.text;
+		if (typeof text !== "string" || !text) return undefined;
+		return new Text(theme.fg(entry.data?.level === "warning" ? "warning" : "dim", text), 1, 0);
+	});
 
 	// The one door of the extension's notices about keeping warm and a stop: said where the session has an interface, and
 	// never thrown out of (a session that is gone says nothing).
@@ -722,7 +751,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		// when its model comes back (a switch away and back without a message), where the request is not known again.
 		// The period's clock stays: its cache is the same cache.
 		const p = period;
-		if (p) handTo(ctx, p, { reason: REQUEST_LET_GO, label: "request let go" }, undefined, undefined, "let go");
+		if (p) handTo(ctx, p, { reason: REQUEST_LET_GO, label: REQUEST_LET_GO_LABEL }, undefined, undefined, "let go");
 		if (p) p.request = undefined;
 		abortWarm();
 		stopTimer(ctx);
@@ -1161,27 +1190,27 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// period ends its warming ("unable") and is Pi's from then on; one whose warming ended on its time limit or as
 	// "unable" is Pi's; one ended for good (budget, a miss, an unreported or failed refresh) stays as it is. Returns the
 	// fields of the record that says warming ended, once.
-	const changeHands = (p: WarmPeriod, against: { reason: string; label: string }, why: "evidence" | "let go"): { stop: WarmStop; reason: string } | Record<string, never> => {
+	const changeHands = (p: WarmPeriod, against: { reason: string; label: string }, why: "evidence" | "let go"): Handed | Record<string, never> => {
 		const what = onAgainst(warmerOf(p), p.warm);
 		if (what === "stays") return {};
 		const ended = what === "end and hand over" ? endWarm(p, "unable", against.reason) : {};
 		p.notOwned = against.reason;
 		p.notOwnedLabel = against.label;
 		p.handedOver = why;
-		return ended;
+		return { ...ended, reason: against.reason, handedOver: why };
 	};
 	// The same, with the record of the end (a skip, at the expiry read), unless the caller takes it (`taken`).
 	const handTo = (
 		ctx: ExtensionContext,
 		p: WarmPeriod,
 		against: { reason: string; label: string },
-		taken?: (handed: { stop: WarmStop; reason: string }) => void,
+		taken?: (handed: Handed) => void,
 		view?: CacheView,
 		why: "evidence" | "let go" = "evidence",
 	) => {
-		const ended = changeHands(p, against, why);
-		if (!("stop" in ended)) return;
-		const handed = ended as { stop: WarmStop; reason: string };
+		const changed = changeHands(p, against, why);
+		if (!("handedOver" in changed)) return;
+		const handed = changed as Handed;
 		if (taken) return taken(handed);
 		trace(ctx, { ...warmBase(ctx, p, view?.sendBy ?? Date.now(), p.logged ?? {}), action: "skip", ...handed, budget: budgetRecord(p as WarmPeriod & { budget: WarmBudget }) });
 	};
@@ -1213,6 +1242,25 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		}
 	};
 
+	// A period left to Pi's own warming from its start, with keep-warm on: said when its reason is not the one this instance
+	// last said for the model, so once for a session that stays as it is; again after a period the extension took. Not
+	// where the footer says nothing either (no label: no answer has used the cache yet), nor for a stopped period.
+	let lastLeft: string | undefined;
+	const noteLeft = (ctx: ExtensionContext) => {
+		const p = period;
+		if (!p) return;
+		if (p.taken) {
+			lastLeft = undefined;
+			return;
+		}
+		if (p.stopped || !p.onAtStart || !p.notOwnedLabel || p.notOwned === undefined) return;
+		const key = `${p.model} ${p.notOwnedLabel}`;
+		if (key === lastLeft) return;
+		lastLeft = key;
+		const sendBy = look(ctx).sendBy;
+		trace(ctx, { event: "warm", action: "left", reason: p.notOwned, secondsLeft: sendBy === undefined ? 0 : Math.ceil((sendBy - Date.now()) / 1000), ...(p.model ? { model: p.model } : {}) });
+	};
+
 	// The time limit takes effect: the expiry the cache's clock gives already lasts to `idleSince + keepWarmMinutes` or
 	// beyond (the answer's own lifetime covers the window), so no refresh goes out in this period. Recorded when it
 	// happens, from the expiry just read; without one, no limit is declared. A refresh of the extension's that carries the
@@ -1230,7 +1278,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// expiry; Pi is idle and nothing is queued; the last safe moment, from that expiry, has not passed; the payload's output limit is within the API's proven refresh limit. "hold": a
 	// passing reason, tried again per R2 (a cancelled refresh, by the run that cancelled it); "refuse": withheld for good,
 	// and warming ends for the period where it has not ended yet.
-	type GateVerdict = { pass: true } | { hold: "cancelled" | "busy" | "late" | "settling" | "out"; reason: string } | { refuse: string; ended?: { stop: WarmStop; reason: string } };
+	type GateVerdict = { pass: true } | { hold: "cancelled" | "busy" | "late" | "settling" | "out"; reason: string } | { refuse: string; ended?: Handed };
 	const lastGate = (
 		ctx: ExtensionContext,
 		p: WarmPeriod & { fixed: NonNullable<WarmPeriod["fixed"]> },
@@ -1259,7 +1307,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (unsettled(p.fixed.model)) return { hold: "settling", reason: SETTLING_REASON };
 		// The model the period's cached request was written with, and the cache's clock read at the door: evidence against
 		// the period refuses it, and the period is Pi's from now (warming ends, said where the refresh settles).
-		let ended: { stop: WarmStop; reason: string } | undefined;
+		let ended: Handed | undefined;
 		const model = ctx.model;
 		const now = model && `${model.provider}/${model.id}`;
 		if (now !== p.fixed.model) {
@@ -1286,7 +1334,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const p = period;
 		if (!p || !p.taken || p.handedOver || !p.budget || p.ended || running) return;
 		const budget = p.budget;
-		const reason = keepWarmSetting() ? "keep-warm was turned off" : "the settings could not be read";
+		const reason = keepWarmSetting() ? SWITCHED_OFF : "the settings could not be read";
 		trace(ctx, { ...warmBase(ctx, p, expiresAt, timer), action: "skip", ...endWarm(p, "unable", reason), budget: budgetRecord({ ...p, budget }) });
 	};
 
@@ -1308,18 +1356,18 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const lastSafe = expiresAt - Math.floor(warmLeadMs(view.lifetime.ms, EXPIRY_LEAD_MS) / 2); // as lastSafeMoment
 		if (Date.now() > lastSafe) {
 			p.doneFor = expiresAt;
-			trace(ctx, { ...base, action: "skip", reason: "too late: less than half the warm lead is left before the cache expires, so a refresh would likely arrive after it" });
+			trace(ctx, { ...base, action: "skip", hold: "late", reason: "too late: less than half the warm lead is left before the cache expires, so a refresh would likely arrive after it" });
 			return;
 		}
 		if (!ctx.isIdle() || ctx.hasPendingMessages()) {
-			if (p.busyFor !== expiresAt) trace(ctx, { ...base, action: "skip", reason: "Pi is busy or has queued messages; tried again until the last safe moment" });
+			if (p.busyFor !== expiresAt) trace(ctx, { ...base, action: "skip", hold: "busy", reason: "Pi is busy or has queued messages; tried again until the last safe moment" });
 			p.busyFor = expiresAt;
 			return;
 		}
 		// An earlier refresh of this model, from any session of this process, is still on its way: held (the last gate
 		// checks it again just before sending).
 		if (unsettled(p.fixed.model)) {
-			if (p.busyFor !== expiresAt) trace(ctx, { ...base, action: "skip", reason: SETTLING_REASON });
+			if (p.busyFor !== expiresAt) trace(ctx, { ...base, action: "skip", hold: "settling", reason: SETTLING_REASON });
 			p.busyFor = expiresAt;
 			return;
 		}
@@ -1345,7 +1393,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		let waitingOut = false;
 		let refused: string | undefined;
 		// Warming ended at the last gate, on evidence against the period: said where the refresh settles.
-		let refusedEnded: { stop: WarmStop; reason: string } | undefined;
+		let refusedEnded: Handed | undefined;
+		// Its number in the period, once it leaves.
+		let refreshNo = 0;
 
 		const controller = new AbortController();
 		warming = controller;
@@ -1400,6 +1450,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 							reserved = reserveFor(budget, spending);
 							spending.spent += reserved;
 							spending.refreshes += 1;
+							refreshNo = spending.refreshes;
 							return payload;
 						},
 					})
@@ -1440,7 +1491,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			// reported any does not.
 			const unreported = out && verdict === undefined && !aborted && !failed;
 			const fellBack = verdict ? recordRefresh(p.fixed.model, verdict, started) : unreported ? recordRefresh(p.fixed.model, "unreported", started) : false;
-			let ended: ReturnType<typeof endWarm> | undefined;
+			let ended: ReturnType<typeof endWarm> | Partial<Handed> | undefined;
 			// The refresh's own report goes to the period's clock first, whatever else follows and whether or not the session
 			// is still there: what it wrote, and, below, the hit it reported, counted from when it left.
 			if (out && used) p.clock.wrote(written(used));
@@ -1475,21 +1526,24 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			// Tried again for the same expiry only when it never left; a refresh that left is never sent again.
 			if (!out && (aborted || held || settling || waitingOut) && p.doneFor === expiresAt) p.doneFor = undefined;
 			const fallback = fellBack ? { leftToPi: fallbackLine(p.fixed.model, started) } : {};
-			// What is said and shown, only while the session is alive.
-			ifSessionAlive(() => {
-				if (fellBack && ctx.hasUI) {
-					ctx.ui.notify(
-						`Two refreshes in a row without a hit for ${p.fixed.model} (${withoutHit(misses.fallbackKinds.get(p.fixed.model))}), so pi-cache-keeper stopped keeping it warm; Pi's own warming takes over. /cache-keeper-warm starts it again.`,
-						"warning",
-					);
+			// What the refresh's records carry of it: its number, and what its usage showed.
+			const sentAs = out ? { refresh: refreshNo, ...(verdict ? { verdict } : {}) } : {};
+			// The model left to Pi after two refreshes in a row without a hit: said after the refresh's own line.
+			const sayFellBack = () => {
+				if (fellBack) {
+					say(ctx, {
+						level: "warning",
+						text: `Two refreshes in a row without a hit for ${p.fixed.model} (${withoutHit(misses.fallbackKinds.get(p.fixed.model))}), so pi-cache-keeper stopped keeping it warm; Pi's own warming takes over. /cache-keeper-warm starts it again.`,
+					});
 				}
-			});
+			};
 			// A real request started (or the session moved on); it refreshes the cache itself. What went out stays counted.
 			// If that run sent nothing, the refresh for this expiry is tried again, as for any passing hold-up.
 			if (aborted) {
 				if (!out) return;
 				ifSessionAlive(() => {
-					trace(ctx, { ...base, action: "cancelled", seconds, ...ended, reason: "a new request or a change of session cancelled it", usage, budget: budgetRecord(p), ...fallback });
+					trace(ctx, { ...base, action: "cancelled", seconds, ...ended, reason: "a new request or a change of session cancelled it", usage, budget: budgetRecord(p), ...fallback, ...sentAs });
+					sayFellBack();
 					// A hit reported before the cancellation: the period waits for the next expiry, counted from it.
 					if (verdict === "hit" && period === p && !running && ctx.isIdle()) startTimer(ctx);
 				});
@@ -1500,29 +1554,27 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					// It settles first; a hit lets the next one go out.
 				} else if (settling) {
 					// Tried again on the next ticks, until the last safe moment.
-					if (p.busyFor !== expiresAt) trace(ctx, { ...base, action: "skip", seconds, reason: SETTLING_REASON });
+					if (p.busyFor !== expiresAt) trace(ctx, { ...base, action: "skip", seconds, hold: "settling", reason: SETTLING_REASON });
 					p.busyFor = expiresAt;
 				} else if (held) {
 					// Tried again on the next ticks, as any passing hold-up.
-					if (p.busyFor !== expiresAt) trace(ctx, { ...base, action: "skip", seconds, reason: "Pi got busy or a message was queued while the refresh was being prepared, so it was withheld; tried again until the last safe moment" });
+					if (p.busyFor !== expiresAt) trace(ctx, { ...base, action: "skip", seconds, hold: "busy", reason: "Pi got busy or a message was queued while the refresh was being prepared, so it was withheld; tried again until the last safe moment" });
 					p.busyFor = expiresAt;
 				} else if (refused) {
 					// Withheld for good; warming ends with the reason where it has not ended yet.
 					trace(ctx, { ...base, action: "skip", seconds, ...ended, reason: refused, budget: budgetRecord(p) });
 				} else if (late) {
-					trace(ctx, { ...base, action: "skip", seconds, reason: "too late: the cache was about to expire before the refresh went out, so it was not sent" });
+					trace(ctx, { ...base, action: "skip", seconds, hold: "late", reason: "too late: the cache was about to expire before the refresh went out, so it was not sent" });
 				} else if (failed) {
-					// A hit reported before the failure kept the cache warm: nothing to warn of.
-					if (ctx.hasUI && verdict !== "hit") ctx.ui.notify(`pi-cache-keeper could not keep the cache warm: ${failure}`, "warning");
-					trace(ctx, { ...base, action: "failed", seconds, ...ended, reason: failure, usage, budget: budgetRecord(p), ...fallback });
+					// Said by its record: a hit reported before the failure kept the cache warm, and says so.
+					trace(ctx, { ...base, action: "failed", seconds, ...ended, reason: failure, usage, budget: budgetRecord(p), ...fallback, ...sentAs });
+					sayFellBack();
 				} else {
 					// The time limit, from the expiry just read.
 					const until = after?.sendBy;
 					const limit = !ended && until !== undefined && !wantsWarm(until, p.idleSince, warmMinutes()) ? endWarm(p, "limit", limitReason()) : undefined;
-					trace(ctx, { ...base, action: verdict === "miss" ? "missed" : "warm", seconds, ...(ended ?? limit), usage, budget: budgetRecord(p), ...fallback });
-					if (verdict === "miss" && !fellBack && ctx.hasUI) {
-						ctx.ui.notify(`Keeping the cache warm read only ${Math.floor(100 * (share ?? 0))}% from the cache, so it wrote the context again. Stopped until your next message.`, "warning");
-					}
+					trace(ctx, { ...base, action: verdict === "miss" ? "missed" : "warm", seconds, ...(ended ?? limit), usage, budget: budgetRecord(p), ...fallback, ...sentAs });
+					sayFellBack();
 				}
 				if (ctx.isIdle()) startTimer(ctx);
 			});
@@ -1677,6 +1729,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		// A new session, a reload or a restart starts a new idle period (its state is in memory).
 		goIdle(ctx, true);
 		obeyStop(ctx, true);
+		noteLeft(ctx);
 		applyRetention(config.cacheRetention === "long", ctx.hasUI);
 		startTimer(ctx);
 		// Another Pi window may have refreshed the data since this one loaded it.
@@ -1757,6 +1810,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	pi.on("agent_settled", (_event, ctx) => {
 		goIdle(ctx);
 		obeyStop(ctx, true);
+		noteLeft(ctx);
 		// The latest answer may say which cache tier it wrote.
 		showData(ctx);
 		if (!compactWhenFull(ctx)) startTimer(ctx);
