@@ -597,6 +597,7 @@ All of the list below was decided as written, with these exceptions and addition
 
 - **11: B**, built as section 5 says under "Built: B".
 - **The request let go, in words a user understands.** The footer says `keep-warm: Pi's (you switched model or branch, or compacted)`, and the reason (in `/cache-keeper`, the log and the notice) is "you switched the model or the branch, or the conversation was compacted, so the extension no longer has the request to re-send".
+- **An unnamed route.** A proxy's `model-upstreams:answered` with `upstreams: []` means "this answer's route is unknown": it is kept as a report that names no route, which differs from every other report (an empty one included), so a period that sees one is treated as on a change of route, and one whose answer had one is Pi's from its start (`keep-warm: Pi's (the route is unknown)`).
 - Where the build differed in detail: `pi-stopped` records carry a budget only for a period the extension took (a period Pi warms with keep-warm on has a budget computed but unused); a period a reloaded instance starts is never taken (it has not seen the request), so its stop writes no `skip` record, while Pi is told to stop all the same; the notice of a model left to Pi after two in a row comes after the refresh's own line; a `left` record carries the seconds left the plain reading gives.
 
 ## 13a. The list as it was put to the maintainer

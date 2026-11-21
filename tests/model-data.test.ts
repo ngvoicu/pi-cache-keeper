@@ -365,7 +365,9 @@ test("a proxy extension's events: every model's route, and what answered a reque
 	assert.equal(parseUpstreamsEvent({ provider: "cliproxyapi" }), undefined);
 	assert.equal(parseUpstreamsEvent("x"), undefined);
 	assert.deepEqual(parseAnsweredEvent({ provider: "cliproxyapi", model: "claude-opus-5-5", upstreams: [key] }), { provider: "cliproxyapi", model: "claude-opus-5-5", upstreams: [key] });
-	assert.equal(parseAnsweredEvent({ provider: "cliproxyapi", model: "claude-opus-5-5", upstreams: [] }), undefined);
+	// An empty list says this answer's route is unknown: kept, not dropped.
+	assert.deepEqual(parseAnsweredEvent({ provider: "cliproxyapi", model: "claude-opus-5-5", upstreams: [] }), { provider: "cliproxyapi", model: "claude-opus-5-5", upstreams: [] });
+	assert.equal(parseAnsweredEvent({ provider: "cliproxyapi", model: "claude-opus-5-5" }), undefined, "no list: not a report");
 });
 
 test("which values are sure: one entry, the smaller of values that differ, or a value only some entries have", () => {

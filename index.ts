@@ -161,7 +161,10 @@ interface RouteReport {
 	seq: number;
 	/** The model it is for, as `provider/id`. */
 	key: string;
-	/** The whole report, every field the proxy sent, keys in a fixed order: two reports are one route only when equal. */
+	/**
+	 * The whole report, every field the proxy sent, keys in a fixed order: two reports are one route only when equal. A
+	 * report that names no route (`upstreams: []`) is one of its own, equal to no other, an unnamed one included.
+	 */
 	identity: string;
 	upstreams: Upstream[];
 }
@@ -492,7 +495,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const whyNotOwned = (
 		state: StartFacts | undefined,
 		model: Model<Api> | undefined,
-		route: { identity: string; changed?: "while out" | "after the answer"; upstreams?: Upstream[] },
+		route: { identity: string; changed?: "while out" | "after the answer" | "unnamed"; upstreams?: Upstream[] },
 	): { reason: string; label?: string } | { clock: PeriodClock } => {
 		const no = (label: string | undefined, reason: string) => ({ reason, ...(label ? { label } : {}) });
 		const fellBack = fallbackFor(model);
@@ -529,6 +532,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (request.sharedPrefix || cache.mixed) return no("several cache lifetimes", "the request carries more than one cache lifetime");
 		// The proxy reported different routes for the model during the answer's run (also between the answer and Pi going
 		// idle): which cache the answer wrote is not known.
+		if (route.changed === "unnamed") return no("the route is unknown", "the proxy did not name the route that served the last answer, so which route's cache it wrote is not known");
 		if (route.changed === "while out") return no("the route changed", "the proxy reported different routes for this model while the last answer's request was out, so which route's cache it wrote is not known");
 		if (route.changed === "after the answer") {
 			return no("the route changed", "the proxy reported a route for this model after the last answer ended that is not the answer's own (or none for the answer itself), so which route's cache the answer wrote is not known");
@@ -571,7 +575,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const later = ofModel.filter((r) => r.seq > answeredSeq);
 		const route = {
 			identity: reported?.identity ?? (model ? standIn(model) : "none reported"),
-			changed: inWindow.some((r) => r.identity !== reported?.identity)
+			// An answer whose report names no route (`upstreams: []`) has an unknown route: nothing is warmed on a guess.
+			changed: reported?.upstreams.length === 0
+				? ("unnamed" as const)
+				: inWindow.some((r) => r.identity !== reported?.identity)
 				? ("while out" as const)
 				: later.some((r) => reported === undefined || r.identity !== reported.identity)
 					? ("after the answer" as const)
@@ -1855,10 +1862,14 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const event = parseAnsweredEvent(payload);
 		const ctx = sessionCtx;
 		if (!event) return;
-		answered = { provider: event.provider, id: event.model, upstreams: event.upstreams };
+		// An answer whose route the proxy did not name: the values in the footer are again those of what may serve the model,
+		// as before any report; for a period it is a route of its own, unlike any other (below).
+		const unnamed = event.upstreams.length === 0;
+		answered = unnamed ? undefined : { provider: event.provider, id: event.model, upstreams: event.upstreams };
 		// Kept per model, whole, with when it came; and among the current run's reports.
 		const key = `${event.provider}/${event.model}`;
-		const report: RouteReport = { at: Date.now(), seq: ++order, key, identity: canonical(payload), upstreams: event.upstreams };
+		const seq = ++order;
+		const report: RouteReport = { at: Date.now(), seq, key, identity: unnamed ? `a route the proxy did not name (#${seq})` : canonical(payload), upstreams: event.upstreams };
 		reports.set(key, report);
 		runLog.push(report);
 		// The period's clock is told the route that served its model, also where nothing reads it before it changes again;

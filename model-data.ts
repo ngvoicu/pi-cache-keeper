@@ -640,11 +640,14 @@ export function parseUpstreamsEvent(value: unknown): { provider: string; models:
 	return { provider: value.provider, models };
 }
 
-/** The ANSWERED_EVENT payload: `{ provider, model, upstreams }`, what served the last request to a proxy model. */
+/**
+ * The ANSWERED_EVENT payload: `{ provider, model, upstreams }`, what served the last request to a proxy model. An empty
+ * list (`upstreams: []`, or one with an upstream that can't be read) is kept: it says this answer's route is unknown.
+ */
 export function parseAnsweredEvent(value: unknown): { provider: string; model: string; upstreams: Upstream[] } | undefined {
 	if (!isPlainObject(value) || typeof value.provider !== "string" || typeof value.model !== "string") return undefined;
 	const upstreams = parseUpstreams(value.upstreams);
-	return upstreams && upstreams.length > 0 ? { provider: value.provider, model: value.model, upstreams } : undefined;
+	return upstreams ? { provider: value.provider, model: value.model, upstreams } : undefined;
 }
 
 const lifetimeLabel = (seconds: number): string => (seconds % 3600 === 0 ? `${seconds / 3600} h` : seconds % 60 === 0 ? `${seconds / 60} min` : `${seconds} s`);
