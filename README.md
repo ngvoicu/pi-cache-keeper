@@ -350,7 +350,7 @@ Each other window says once, when it learns of it, `Warming is stopped in this w
 
 The extension says in the transcript every refresh it sends and every issue it meets while keeping warm, at once, whatever Pi's `showCacheMissNotices` says. Each line is a record of the log said aloud: nothing is logged that is not said, and nothing is said that is not logged.
 
-**Every refresh keeps its own line.** A refresh that was sent is said when it settles, as an entry saved in the session (a custom entry, which Pi draws with the extension's renderer and draws again after `/reload` or `/resume`; it is not sent to the model). In an idle period that is at most as many lines as the budget allows refreshes: up to 11 with a cache-write price, 8 without one, 10 without prices. Its line is dim where it went well and in the warning colour where it did not:
+**Every refresh keeps its own line.** A refresh that was sent is said when it settles, as an entry saved in the session (a custom entry, which Pi draws with the extension's renderer and draws again after `/reload` or `/resume`; it is not sent to the model). In an idle period that is at most as many lines as the budget allows refreshes, within the time limit: one cache miss divided by one refresh, so it depends on the model's prices. At a cached read of a tenth of the input price that is 11 with a cache-write price of 1.25× and 8 without one; a model whose cached read is cheaper against its write gets more (48 for one whose cached read is 2% of its write price, `claude-fable-5-2` in Pi 1.6.0's catalog); without prices, at most 10. Its line is dim where it went well and in the warning colour where it did not:
 
 | The refresh | Its line |
 | --- | --- |

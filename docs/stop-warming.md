@@ -322,7 +322,7 @@ Unchanged, and outside this list: the notices of compacting (`Prompt cache expir
 
 **Would a line for every refresh flood the screen?** Less than it looks, for three reasons that are the design's own:
 
-- *The budget bounds it.* In one idle period the extension sends at most as many refreshes as one cache miss pays for; at a cached read of a tenth of the input price that is 11 where the write price is 1.25 times the input price, 8 where there is none, and 10 without prices. A 5-minute cache is refreshed every 4 min 35 s for at most 55 minutes, not for hours, whatever `keepWarmMinutes` says; then warming ends, with one line.
+- *The budget bounds it.* In one idle period the extension sends at most as many refreshes as one cache miss pays for; at a cached read of a tenth of the input price that is 11 where the write price is 1.25 times the input price, 8 where there is none, and 10 without prices; where the cached read is cheaper against the write, more (48 at `claude-fable-5-2`'s prices in Pi 1.6.0, whose cached read is 2% of its write price). A 5-minute cache is refreshed every 4 min 35 s for at most 55 minutes, not for hours, whatever `keepWarmMinutes` says; then warming ends, with one line.
 - *Pi keeps one `info` line.* Successes and hold-backs are `info`, and Pi draws each in the place of the one before while nothing else comes between (any `info` notice does that, also another extension's, and the extension's own line before a compaction). An idle window therefore ends with one line, the latest, and that line has the refresh's number and the period's sum: `Cache warmed (pi-cache-keeper, refresh 11): …; $1.98 spent, a miss costs $2.07`. What it replaced is in the log, line by line.
 - *What repeats is said once*: a hold-back once per expiry, a session left to Pi once per reason, a stop once per window.
 
@@ -333,7 +333,7 @@ The choice, which is the maintainer's (B was chosen):
 | | What the transcript shows | What it takes |
 | --- | --- | --- |
 | A. One replacing `info` line | each refresh when it settles; the latest stands in place of the one before, with the number and the sum; every issue stays | nothing beyond Pi's own way of drawing an `info` notice. It rests on that way: a Pi that drew them otherwise would show each line |
-| **B. Every refresh keeps its line (built)** | up to 8 to 11 lines per idle period (10 without prices), each with its own cost | a saved entry per refresh (`pi.appendEntry` with a renderer, as the compaction card is): written into the session file from an idle window, drawn again after a reload, and a card as the session's last entry already changes what Pi answers to `/compact` |
+| **B. Every refresh keeps its line (built)** | as many lines per idle period as the budget allows refreshes, each with its own cost: 8 to 11 at the example prices, more where the cached read is cheaper against the write (48 at `claude-fable-5-2`'s prices in Pi 1.6.0), at most 10 without prices | a saved entry per refresh (`pi.appendEntry` with a renderer, as the compaction card is): written into the session file from an idle window, drawn again after a reload, and a card as the session's last entry already changes what Pi answers to `/compact` |
 | C. One line per idle period | a summary when warming ends or the next message comes (`Kept the cache warm 7 times: $1.26 spent, a miss costs $2.07`); issues at once | less on the screen than was asked: a refresh is not said when it happens |
 
 ### The log
