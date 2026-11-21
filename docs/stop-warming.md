@@ -4,6 +4,8 @@ A design, not yet built. It is written against pi-cache-keeper 0.6.1 and Pi 1.6.
 
 The ask: one command, typed in any Pi window, that stops the idle spending on cache warming in every Pi window on the computer, without changing a setting, and that undoes itself: each window warms again as usual after its next message.
 
+A second ask is designed here with it, since both are about what a window says of its warming (section 5, "Notices"): a line in the transcript when one of the extension's refreshes kept the cache warm, as Pi has for its own, and one when a stop takes effect in a window.
+
 ## 1. The rule
 
 **A stop ends warming, in every window that is open when it is given, for the idle period the window is in or the one its run ends in, and for every idle period that starts there after it, until the user sends that window a message: the first real answer after that message starts an idle period that is warmed as usual.**
@@ -231,6 +233,38 @@ stopped: the stop record (~/.pi/agent/cache-keeper-stop.json) can't be read: <th
 
 `/cache-keeper-warm`, where a stop holds in its window, ends its text with: ` A /cache-keeper-stop holds in this window until your next message; this command does not lift it.`
 
+### Notices
+
+Two new lines in the transcript, both `info` notices (`ctx.ui.notify`), both only where the session has an interface.
+
+**How Pi makes its own**, read in Pi 1.6.0. After each refresh of its own that did not fail, Pi's warmer appends a usage entry of kind `cache_warm` to the session (`CacheWarmer.refresh`), which counts in the session's cost. The interactive mode draws that entry when it is appended (`addCacheWarmingUsage`), only where Pi's setting `showCacheMissNotices` reads true (off by default; the effective settings, as that window holds them): a dim line after a blank one, `Cache warmed: $0.210` (`formatCacheWarmingUsage`: the cost with three to six decimals), or `Cache warmed (extension override): $0.210` where an extension turned Pi's own "stop" into a refresh. Warms that follow each other with nothing between them are one line, with their costs added up. The entry is in the session file, so the line is drawn again whenever the session is shown again. An extension's `info` notice is drawn the same way (a dim line after a blank one), and one that directly follows another such notice takes its place.
+
+**A refresh that kept the cache warm.** Today the extension says nothing then; only the footer's amounts move.
+
+| | |
+| --- | --- |
+| When | one of the extension's refreshes settles as answered with a hit: the case the log records as `kept the cache warm`, where the refresh reported a prompt and read 90% or more of it from the cache. Not for a miss, a failure, a refresh that reported no usage or a hand-over to Pi, which keep the warnings they have, shown whatever the setting; not for a hit followed by a failure or a cancellation, where nothing is said today either |
+| Whether | where Pi's `showCacheMissNotices` reads true at that moment, read through `pi.getSettings()`: the value Pi's own notice goes by, in that window. So a user sees both kinds of line or neither, and a change in Pi's `/settings` holds for both at once. On a Pi without `getSettings`, or where it can't be read: no line, as before this version. The extension gets no setting of its own for it |
+| Words, with prices | `Cache warmed (pi-cache-keeper): $0.18; $0.36 spent, a miss costs $2.07`. Pi's words in Pi's form, the note saying whose refresh it was; the refresh's own reported cost; then the idle period's amounts as the footer says them (`spendingText`). Amounts are written as the extension writes them everywhere (`formatUsd`), so the line and the footer agree |
+| Words, without prices | `Cache warmed (pi-cache-keeper): 3 of 10 refreshes` (a subscription login, a model with every rate zero: no cost to name). Also where a priced refresh reported a cost of zero: the period's amounts alone |
+
+Each line carries the period's total because an `info` notice that directly follows another takes its place: where Pi adds up its warms in one line, the extension's latest line says the sum itself, and nothing is lost when it replaces the one before.
+
+What differs from Pi's, and can't be otherwise: the line is not in the session file (an extension can't add usage entries, and a notice is no entry), so it is not drawn again after `/reload` or `/resume`, and the refresh is not in Pi's session cost. The log and `/cache-keeper` list every refresh, as before.
+
+Not chosen: a saved entry for each refresh (`pi.appendEntry` with a renderer, as the compaction card is). It would be drawn again later, but it writes into the session file from an idle window once per refresh, its lines can't be joined into one (eleven lines an hour on a 5-minute cache), and a card as the session's last entry already changes what Pi answers to `/compact` (the README's limitation).
+
+**A stop taking effect.** In the window where `/cache-keeper-stop` is typed, the command's own text is the notice (above). In every other window, once, when its period becomes stopped:
+
+```
+Warming is stopped in this window until your next message: /cache-keeper-stop was given at 14:02. This idle period's refreshes: $0.36 spent, a miss costs $2.07.
+```
+
+- The second sentence is there only for a period the extension had taken (`3 of 10 refreshes` without prices). It matters where the notice takes the place of a `Cache warmed` line just above it: the amounts stay on the screen.
+- Once per stop and per session: a window says it the first time one of its periods obeys a given record, and not again for that record (after `/reload`, or for a later period that starts stopped). A later stop is a new record and is said again where it stops a window that had a message since.
+- It is said when the window learns of the stop (section 3): within a second where the footer shows a countdown, otherwise at the window's next reading of the record.
+- It does not follow `showCacheMissNotices`: it is the effect of a command the user gave, as the notice of a model left to Pi's own warming is not gated either. Nothing is said when the stop ends: the user has just sent a message, and the footer changes back.
+
 ### The log
 
 No new kind of record. Two existing ones say it:
@@ -288,9 +322,20 @@ export function rememberLoad(): void;
 export function noteMessage(session: string, id: string | null): void;
 /** What the session had seen at the user's last message; else what any session of the process had at the latest one; else at load. */
 export function seenFor(session: string): string | null;
+/** Whether the stop `id` is said in this session for the first time; true once per session and id, and it remembers. */
+export function firstSaid(session: string, id: string): boolean;
 ```
 
 `writeStop` uses `writeAtomic` of `model-data.ts`, exported for it, and `randomUUID` of `node:crypto`. `rememberLoad` samples `null` where the record is unreadable. The path is read from `getAgentDir()` at each call, as `model-data.ts` reads its own.
+
+### `keep-warm.ts`
+
+```ts
+/** The line of a refresh that kept the cache warm (section 5): Pi's words, whose refresh, its cost where it has one, the period's amounts. */
+export function warmedNotice(budget: WarmBudget, spending: WarmSpending): string;
+```
+
+The cost is `spending.last`, which the settlement has just set from the refresh's own report; where the budget is not priced or `last` is not set, the amounts alone.
 
 ### `trace.ts`
 
@@ -327,7 +372,7 @@ export function warmer(p: { stopped: boolean; taken: boolean; on: boolean; fellB
 | the factory's first line | `rememberLoad()` |
 | `WarmPeriod` | `seen: string \| null`, set once in `goIdle` from `seenFor(session id)` when a period is made (a period that goes on keeps its own); `stopped?: { id: string; at: number }`, set once by `obeyStop` |
 | `stopRecord(fresh = false): StopRead` | beside `keepWarmSetting`, and like it: one reading per millisecond, `fresh` reads again |
-| `obeyStop(ctx, fresh = false): void` | the only place a period becomes stopped. Nothing while there is no period, a run is going on, or the period is already stopped. It reads the record; where it is a record and `covers(record, period.seen)`: sets `period.stopped`; for a period the extension took (`taken`, whoever warms it now), ends its warming with `endWarm(p, "stopped", "given at HH:MM")` (the time as `fallbackLine` writes one) and, where that ended it, writes the one `skip` record of section 5 (seconds left from `look(ctx).sendBy`, the model from the period's `fixed`, the period's budget); then renders the footer. So a stopped period that was taken has always ended its warming |
+| `obeyStop(ctx, fresh = false): void` | the only place a period becomes stopped. Nothing while there is no period, a run is going on, or the period is already stopped. It reads the record; where it is a record and `covers(record, period.seen)`: sets `period.stopped`; for a period the extension took (`taken`, whoever warms it now), ends its warming with `endWarm(p, "stopped", "given at HH:MM")` (the time as `fallbackLine` writes one) and, where that ended it, writes the one `skip` record of section 5 (seconds left from `look(ctx).sendBy`, the model from the period's `fixed`, the period's budget); then renders the footer; then, where `firstSaid(session id, record.id)` and the session has an interface, the notice of section 5 (the amounts where the period was taken). So a stopped period that was taken has always ended its warming |
 | `warmerOf` | passes `stopped: p.stopped !== undefined` |
 | `session_start`, `agent_settled` | `obeyStop(ctx, true)` right after `goIdle` |
 | the countdown's `tick` | `obeyStop(ctx)` first, before the cache is read |
@@ -340,7 +385,9 @@ export function warmer(p: { stopped: boolean; taken: boolean; on: boolean; fellB
 | `keepWarmNote` | for a stopped period, while no run is going on: where its warming had ended for another reason than the stop, as today; otherwise the rule alone, followed as today by the line of a model left to Pi after two refreshes without a hit |
 | `/cache-keeper` | `obeyStop(ctx, true)` first; the `stopped:` line of section 5 |
 | `/cache-keeper-warm` | `obeyStop(ctx, true)` first; the sentence of section 5 |
-| `/cache-keeper-stop` (new) | notes the window's state (a run going on, already stopped, the period's warmer); `writeStop(Date.now())`; on failure the error notice and nothing else; else `obeyStop(ctx, true)` and the notice of section 5 |
+| `/cache-keeper-stop` (new) | notes the window's state (a run going on, already stopped, the period's warmer); `writeStop(Date.now())`; on failure the error notice and nothing else; else `firstSaid(session id, its id)` (so `obeyStop` says nothing of it here), `obeyStop(ctx, true)` and the command's text of section 5 |
+| `showsWarmNotices(): boolean` | `pi.getSettings().showCacheMissNotices === true`; false where Pi has no `getSettings` or it throws. Read at each use, never kept |
+| the refresh's settlement in `keepWarm` | in its last case (answered: the record `warm` or `missed`), after the record is written: where the refresh reported a hit, the session has an interface and `showsWarmNotices()`, `ctx.ui.notify(warmedNotice(budget, spending), "info")`. The existing warnings are not touched |
 
 Nothing else changes: who takes a period, the clock, the budget, the gate's other checks, compacting before expiry and its last check, what a compaction does to the period (`forget`), the settings and `config.ts` are as they are. `agent_start` is not touched: a run is not what ends a stop. `index.ts` still writes no `action: "stop"` of its own, sends in two places, and reads the period's starting lifetime in one place.
 
@@ -383,6 +430,10 @@ The repository's own kind: `node --test`, the harness of `tests/keep-warm-flow.t
 16. A second stop: a window that had a message since is stopped again.
 17. Two sessions in one process: a message in one does not lift the stop in the other.
 18. A period whose warming had ended on a miss before the stop: the footer keeps the warning beside the stopped part, and `/cache-keeper` keeps its `keep warm:` line.
+19. The notice of a stop: a stop from another window is said once in this one, with the period's amounts where the extension had taken it and without them otherwise; not again after `/reload`, nor for a later period that starts stopped; in the window that gave the command only the command's text is shown; a second stop is said again in a window that had a message since; nothing without an interface.
+20. The notice of a refresh, with the harness's `pi.getSettings` returning `showCacheMissNotices: true`: a refresh that reads the cache shows `Cache warmed (pi-cache-keeper): $0.18; $0.18 spent, a miss costs $2.07`, the second one the period's sum; without prices `Cache warmed (pi-cache-keeper): 1 of 10 refreshes`. With the setting false, absent, `getSettings` missing or throwing: none, and every existing test's notices are as they were. Read at each refresh: switched on between two refreshes, the second is said. A miss, a failure, an unreported refresh, a hit followed by a failure: no such line, and the warnings as before.
+
+`tests/keep-warm.test.ts`: `warmedNotice` with prices, without, and priced with no reported cost.
 
 What the design relies on in Pi, against the installed Pi:
 
@@ -403,10 +454,11 @@ After each: `npm run typecheck` and `npm test` pass.
 1. **`stop-record.ts` and its test**, with `writeAtomic` exported from `model-data.ts`. Nothing uses it yet: the extension behaves as 0.6.1.
 2. **The one more value**: `WarmStop`, `stopLabel`, `Warmer`, `warmer`'s `stopped` input (every caller passes `false`), `ENDED_SHORT`; the tests of `warm-period`, `trace`. Still 0.6.1's behaviour, and every existing test passes untouched except where it lists all values.
 3. **The window obeys a record**: the period's `seen` and `stopped`, `rememberLoad`, the `input` handler, `stopRecord`, `obeyStop` and its calls, `owns`, the decision handler, the last gate, `shown`. There is no command yet: flow tests 1, 3 to 14, 16 and 17 and the two session tests pass with the record written by the test (their footer and `/cache-keeper` assertions come with steps 4 and 5). With no record on disk, every existing test passes untouched.
-4. **The command and what is said**: `/cache-keeper-stop`, the `stopped:` line, `/cache-keeper-warm`'s sentence, `keepWarmNote`. Flow tests 2, 15 and 18.
+4. **The command and what is said**: `/cache-keeper-stop`, the `stopped:` line, `/cache-keeper-warm`'s sentence, `keepWarmNote`, the notice of a stop (`firstSaid`). Flow tests 2, 15, 18 and 19.
 5. **The footer**: `FooterView.stopped`, the part, `renderFooter`. The footer tests, and the footer assertions of the flow tests.
 6. **The structure test** in `tests/one-clock.test.ts`.
-7. **The words**: the README, the changelog, the line in `docs/live-tests.md`, the version (section 10); this document corrected wherever the build differed from it.
+7. **The notice of a refresh**: `warmedNotice`, `showsWarmNotices`, the one call in the settlement. Flow test 20 and the `keep-warm` test. It depends on nothing of steps 1 to 6 and can be built, reviewed and released apart from them.
+8. **The words**: the README, the changelog, the line in `docs/live-tests.md`, the version (section 10); this document corrected wherever the build differed from it.
 
 ## 10. The README, the changelog, the version
 
@@ -420,6 +472,7 @@ After each: `npm run typecheck` and `npm test` pass.
 - *The footer*, after "Where the extension stepped back", one more short table, **A stop**: `warming stopped until your next message` | `/cache-keeper-stop` was given, in this window or another, since your last message here: nothing is sent to keep this window's cache warm, with keep-warm on or off, until the answer to your next message. In the place of keep-warm's own note; keep-warm's warnings stay beside it. Narrower: `warming stopped`
 - *Keeping the cache warm*, a paragraph after "When warming ends", **Stopping it in every window**, saying in the README's manner: the rule of section 1, what the user's message is, and its two tables in prose; that it holds with keep-warm off, where it stops Pi's own idle warming; that compacting before expiry still runs, sooner than it would have, and that nothing warms the window after it (section 2); the record and why an old one stops nothing (section 3, without the code); what "every window" means; that a refresh on its way is not called back; that it can't be taken back and why (section 4).
 - *Compacting before the cache expires*, one sentence: a `/cache-keeper-stop` does not hold it back.
+- *Keeping the cache warm*, in the paragraph that says what a refresh costs and where refreshes are listed: with Pi's `showCacheMissNotices` on, each refresh that read the cache is also said in the transcript, as Pi says its own (`Cache warmed (pi-cache-keeper): $0.18; $0.36 spent, a miss costs $2.07`), a line that is not kept in the session; with it off, as before, only the footer moves. And that a stop taking effect is said once in each window.
 - The table "When warming ends" is not changed: the footer says a stop with its own part.
 - *Limitations*, four items: a window that has not loaded this version does not obey; a window without a countdown shows the stop only when it next reads the record; an unreadable record stops the extension's refreshes until `/cache-keeper-stop` writes it again; a run another extension starts with a custom message does not end a stop, so a window that only such runs keep busy stays unwarmed until you send it a message.
 - *Documentation*: a line for this document.
@@ -429,7 +482,8 @@ After each: `npm run typecheck` and `npm test` pass.
 
 ```markdown
 ### Added
-- **`/cache-keeper-stop`: stop keeping idle caches warm in every Pi window, until each one's next message** — Typed in any window, it ends warming for the idle period every window is in (for a window in a run, the period that run ends in) and for the ones that follow there: the extension sends no further refresh, and Pi's own idle warming is told to stop the next time it asks, also with `keepWarmMinutes: 0`. No setting changes, and it undoes itself: the answer to the next message you send a window (typed, over RPC, or sent in your name by another extension) starts an idle period that is warmed as usual. Nothing Pi or the extension sends by itself ends it. A stop is one more way a period's warming ends (`keep-warm ended (stopped by /cache-keeper-stop)` in the log, a `stopped:` line in `/cache-keeper`), and the footer says `warming stopped until your next message`. It is recorded in `cache-keeper-stop.json` beside the settings, which every window reads before it sends anything; a window obeys a record only if it is not the one it saw when your last message reached it, so no clock is compared and an old record stops nothing later. A refresh already on its way is not called back; a stop can't be taken back, since Pi's own warming, once stopped, starts again only with the next request; and compacting before the cache expires still runs where it is on, after which the window stays quiet: a summary starts no warming, the extension's or Pi's.
+- **`/cache-keeper-stop`: stop keeping idle caches warm in every Pi window, until each one's next message** — Typed in any window, it ends warming for the idle period every window is in (for a window in a run, the period that run ends in) and for the ones that follow there: the extension sends no further refresh, and Pi's own idle warming is told to stop the next time it asks, also with `keepWarmMinutes: 0`. No setting changes, and it undoes itself: the answer to the next message you send a window (typed, over RPC, or sent in your name by another extension) starts an idle period that is warmed as usual. Nothing Pi or the extension sends by itself ends it. A stop is one more way a period's warming ends (`keep-warm ended (stopped by /cache-keeper-stop)` in the log, a `stopped:` line in `/cache-keeper`), and the footer says `warming stopped until your next message`. It is recorded in `cache-keeper-stop.json` beside the settings, which every window reads before it sends anything; a window obeys a record only if it is not the one it saw when your last message reached it, so no clock is compared and an old record stops nothing later. A refresh already on its way is not called back; a stop can't be taken back, since Pi's own warming, once stopped, starts again only with the next request; and compacting before the cache expires still runs where it is on, after which the window stays quiet: a summary starts no warming, the extension's or Pi's. Each other window says once that it was stopped.
+- **A line in the transcript when a refresh kept the cache warm, where Pi shows its own** — With Pi's setting `showCacheMissNotices` on (off by default), each of the extension's refreshes that read the cache is said as Pi says its own warms: `Cache warmed (pi-cache-keeper): $0.18; $0.36 spent, a miss costs $2.07` (the refresh's cost, then the idle period's amounts as the footer has them; `3 of 10 refreshes` for a model without prices). One setting, Pi's, governs both kinds of line, read each time. The line is a notice, not a session entry: it is not shown again after a reload, and the refresh is still not in Pi's session cost. With the setting off nothing changes: only the footer moves, and a miss, a failure and a hand-over to Pi are said as before, whatever the setting.
 ```
 
 ## 11. Simpler things that do not serve it
@@ -461,3 +515,7 @@ To decide:
 8. **The footer says the stop in every stopped window**, also where there was nothing to warm (a cold cache, no lifetime). The other reading says it only where something was being warmed, and then a glance at a window does not tell whether it obeyed.
 9. **The figure of footer states is left as it is** for this version.
 10. **Version 0.7.0.**
+11. **The notice of a refresh follows Pi's `showCacheMissNotices`** and has no setting of its own: both kinds of line or neither. The other reading (a setting under `cacheKeeper`) lets a user have the extension's line without Pi's miss notices, at the cost of one more setting.
+12. **It is a notice, not a saved entry**: not drawn again after a reload, and joined with the one before it. The other reading is in section 5, with what it costs.
+13. **Its words**: Pi's `Cache warmed`, the note `(pi-cache-keeper)`, the refresh's cost, the period's amounts.
+14. **The notice of a stop in the other windows is shown whatever that setting**, once per stop and window. The other reading puts it under `showCacheMissNotices` too, and then a window stopped from elsewhere says nothing in its transcript by default; its footer still does.
