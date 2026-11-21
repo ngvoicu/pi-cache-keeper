@@ -1068,11 +1068,25 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	};
 
 	// `timer` (the model and lifetime) is logged with keep-warm on; with it off the records are as they were.
-	const compactBeforeExpiry = (ctx: ExtensionContext, remainingMs: number, timer: TimerContext = {}) => {
-		if (!config.compactBeforeExpiry) return;
+	// "postponed" when only a passing reason stood in the way (Pi busy or a message queued), so the countdown tries again
+	// on its next tick; "skipped" when a lasting one did, which spends the try for this expiry. `traced` holds the reasons
+	// this countdown has already written to the trace, each written once. `expiresAt` is the expiry tried for: a failed
+	// compaction starts the countdown again with that expiry spent, not whatever expiry is read by then.
+	const compactBeforeExpiry = (
+		ctx: ExtensionContext,
+		remainingMs: number,
+		expiresAt: number,
+		traced: Set<string>,
+		timer: TimerContext = {},
+	): "compacting" | "postponed" | "skipped" => {
+		if (!config.compactBeforeExpiry) return "skipped";
 		const secondsLeft = Math.ceil(remainingMs / 1000);
 		const contextTokens = ctx.getContextUsage()?.tokens ?? undefined;
-		const skip = (reason: string) => trace(ctx, { event: "expiry", action: "skip", reason, secondsLeft, contextTokens, ...timer });
+		const skip = (reason: string, outcome: "postponed" | "skipped" = "skipped") => {
+			if (!traced.has(reason)) trace(ctx, { event: "expiry", action: "skip", reason, secondsLeft, contextTokens, ...timer });
+			traced.add(reason);
+			return outcome;
+		};
 		let compactionOn: boolean;
 		try {
 			compactionOn = autoCompactionEnabled(ctx.isProjectTrusted() ? ctx.cwd : undefined);
@@ -1080,7 +1094,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			return skip(`Pi's settings could not be read: ${error instanceof Error ? error.message : String(error)}`);
 		}
 		if (!compactionOn) return skip("automatic compaction is off in Pi's settings");
-		if (!ctx.isIdle() || ctx.hasPendingMessages()) return skip("Pi is busy or has queued messages");
+		if (!ctx.isIdle() || ctx.hasPendingMessages()) return skip("Pi is busy or has queued messages", "postponed");
 		if (contextTokens === undefined) return skip("the context size is unknown");
 		if (contextTokens < config.minContextTokens) {
 			return skip(`the context holds ${formatTokens(contextTokens)} tokens, under minContextTokens (${formatTokens(config.minContextTokens)})`);
@@ -1100,10 +1114,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			onError: () => {
 				ownTrigger = undefined;
 				ifSessionAlive(() => {
-					if (ctx.isIdle()) startTimer(ctx, false);
+					if (ctx.isIdle()) startTimer(ctx, expiresAt);
 				});
 			},
 		});
+		return "compacting";
 	};
 
 	// After a turn, compacts once the context passes compactAtPercent of the window or the compactAtTokens cap,
@@ -1594,7 +1609,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// goes on reading the cache, so that a change of regime (keep-warm switched off or on, here or in another window) is
 	// seen: the countdown then starts again from that reading. Where Pi warms such a period and nothing seen says its
 	// cache is gone yet (`goneBy`), the countdown shows that, for display only: nothing is sent on it.
-	const startTimer = (ctx: ExtensionContext, compactAtExpiry = true) => {
+	// `triedFor`: the expiry whose try to compact before it is already spent (a failed compaction's); any other expiry the
+	// countdown reads gets its own try.
+	const startTimer = (ctx: ExtensionContext, triedFor?: number) => {
 		stopTimer(ctx, false);
 		const first = look(ctx);
 		timerRegime = first.regime;
@@ -1612,7 +1629,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			lifetimeSource: first.lifetime?.source,
 		};
 		let ticks = 0;
-		let attempted = !compactAtExpiry;
+		// One try per expiry, from the expiry read now: when it moves (Pi's own refresh, the period's facts), the new one
+		// gets its own. A try postponed by a passing reason is made again on the next tick, while the cache lives.
+		let spent = triedFor;
+		const skipsTraced = new Set<string>();
 		let warmChecked = false;
 		// What the countdown shows: the expiry anything may be sent on, or, where Pi warms the period on a route that has not
 		// been seen to change and that has passed, the moment nothing seen says the cache is alive any more.
@@ -1628,7 +1648,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const read = (): boolean => {
 			view = look(ctx);
 			if (view.regime !== timerRegime) {
-				startTimer(ctx, compactAtExpiry);
+				startTimer(ctx, spent);
 				return false;
 			}
 			if (view.regime === "period") {
@@ -1666,19 +1686,17 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				// Keep-warm off, or a period the extension did not take: as with keep-warm off.
 				if (remaining <= warmLead && !warmChecked) {
 					warmChecked = true;
-				} else if (remaining <= EXPIRY_LEAD_MS && !attempted) {
+				} else if (expiresAt !== undefined && remaining <= EXPIRY_LEAD_MS && spent !== expiresAt) {
 					// Pi's own refresh may still be in flight; its usage entry moves the expiry when it lands.
 					if (piWarmAt !== undefined && Date.now() - piWarmAt < 30_000) return;
-					attempted = true;
-					compactBeforeExpiry(ctx, remaining);
+					if (compactBeforeExpiry(ctx, remaining, expiresAt, skipsTraced) !== "postponed") spent = expiresAt;
 				}
 			} else {
 				// A taken period, whoever warms it: its refresh where the extension warms it, and compacting before the expiry
 				// its own facts give (Pi's refreshes do not move it, so nothing waits for them).
 				if (remaining <= warmLead) keepWarm(ctx, timer);
-				if (!warming && !out && remaining <= EXPIRY_LEAD_MS && !attempted) {
-					attempted = true;
-					compactBeforeExpiry(ctx, remaining, timer);
+				if (!warming && !out && expiresAt !== undefined && remaining <= EXPIRY_LEAD_MS && spent !== expiresAt) {
+					if (compactBeforeExpiry(ctx, remaining, expiresAt, skipsTraced, timer) !== "postponed") spent = expiresAt;
 				}
 			}
 		};
