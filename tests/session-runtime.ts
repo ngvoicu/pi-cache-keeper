@@ -63,6 +63,16 @@ const closed = (events: { type: string }[]) =>
 		}),
 		{ headers: { "content-type": "text/event-stream" } },
 	);
+// An answer with this text, as the Anthropic API streams it, from the in-memory provider.
+export const textAnswer = (text: string) =>
+	closed([
+		messageStart(0, 0),
+		{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } as { type: string },
+		{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } } as { type: string },
+		{ type: "content_block_stop", index: 0 } as { type: string },
+		...end,
+	]);
+export { anthropic };
 export const settingsFile = join(dir, "settings.json");
 export const writeDefaults = (cacheKeeper: Record<string, unknown>) =>
 	writeFileSync(settingsFile, JSON.stringify({ cacheKeeper: { modelData: false, cacheRetention: "short", compactAtPercent: 0, ...cacheKeeper }, cacheWarming: "idle", packages: [] }));
@@ -105,7 +115,7 @@ interface Window {
 // Pi's real session runtime with this extension in its TUI mode, Claude Sonnet 4.6 on Anthropic's API with the 5-minute
 // cache. Each refresh the extension sends goes through the real Anthropic adapter to an in-memory provider that reads
 // the whole cache; `refreshes` counts them.
-export async function inWindow(scenario: (w: Window) => Promise<void>, o: { persisted?: boolean; mode?: "tui" | "rpc" } = {}) {
+export async function inWindow(scenario: (w: Window) => Promise<void>, o: { persisted?: boolean; mode?: "tui" | "rpc"; realCompact?: boolean } = {}) {
 	delete (globalThis as Record<symbol, unknown>)[STORE];
 	delete (globalThis as Record<symbol, unknown>)[STOP_SEEN];
 	rmSync(join(dir, "cache-keeper-stop.json"), { force: true });
@@ -143,9 +153,12 @@ export async function inWindow(scenario: (w: Window) => Promise<void>, o: { pers
 	const compactAt: number[] = [];
 	const bind = async (session: Any) => {
 		const runner = session.extensionRunner;
-		session.compact = async () => {
-			compactAt.push(Date.now());
-		};
+		// Pi's compaction itself is not run, unless the test asks for it.
+		if (!o.realCompact) {
+			session.compact = async () => {
+				compactAt.push(Date.now());
+			};
+		}
 		const theme = { fg: (_tone: string, text: string) => text, bg: (_tone: string, text: string) => text, bold: (text: string) => text };
 		const uiContext = {
 			...runner.getUIContext(),
