@@ -123,7 +123,7 @@ import {
 	type Fetch,
 	type Found,
 } from "./model-data.ts";
-import { agentDirLabel, covers, firstSaid, noteMessage, readStop, rememberLoad, seenAtStart, stopPathLabel, writeStop, type StopRead } from "./stop-record.ts";
+import { agentDirLabel, covers, firstSaid, noteMessage, readStop, rememberLoad, seenFor, stopPathLabel, writeStop, type StopRead } from "./stop-record.ts";
 import { answerToPi, end, leave, mayLeave, onAgainst, settle, WAITING, warmer, type Warmer, type WarmPhase } from "./warm-period.ts";
 import { formatFooter, lifetimesView, priceAt, sentView, tierInUse, type Countdown, type DataView, type FooterView, type KeepWarmView, type PriceView } from "./footer.ts";
 
@@ -627,7 +627,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			...(why?.label ? { notOwnedLabel: why.label } : {}),
 			...(model ? { model: `${model.provider}/${model.id}` } : {}),
 			onAtStart,
-			seen: seenAtStart(ctx.sessionManager.getSessionId(), answeredAt),
+			seen: seenFor(ctx.sessionManager.getSessionId()),
 			since: sentSeq,
 			taken: onAtStart && clock !== undefined && budget !== undefined && fixed !== undefined,
 			...(clock ? { clock } : {}),
@@ -1296,26 +1296,22 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (!p || running || p.stopped) return;
 		const record = reading !== undefined ? reading : stopRecord(fresh);
 		if (!record || "unreadable" in record || !covers(record, p.seen)) return;
-		// Stopped first, and warming ended, without the context: what follows uses it, and a context made stale by a reload
-		// must not keep the period from obeying.
 		p.stopped = { id: record.id, at: record.at };
-		const ended = p.taken && p.budget ? endWarm(p, "stopped", `given at ${hhmm(record.at)}`) : {};
-		ifSessionAlive(() => {
-			let amounts: string | undefined;
-			if (p.taken && p.budget) {
-				if ("stop" in ended) {
-					const sendBy = look(ctx).sendBy;
-					trace(ctx, { ...warmBase(ctx, p, sendBy ?? Date.now(), p.fixed ? { model: p.fixed.model } : {}), action: "skip", ...ended, budget: budgetRecord({ ...p, budget: p.budget }) });
-				}
-				amounts = spendingText(p.budget, p.spending);
+		let amounts: string | undefined;
+		if (p.taken && p.budget) {
+			const ended = endWarm(p, "stopped", `given at ${hhmm(record.at)}`);
+			if ("stop" in ended) {
+				const sendBy = look(ctx).sendBy;
+				trace(ctx, { ...warmBase(ctx, p, sendBy ?? Date.now(), p.fixed ? { model: p.fixed.model } : {}), action: "skip", ...ended, budget: budgetRecord({ ...p, budget: p.budget }) });
 			}
-			renderFooter(ctx);
-			// Said once per stop and session, when the window learns of it: not again after /reload, nor for a later period
-			// that starts stopped. The window that gave the command has said it already.
-			if (ctx.hasUI && firstSaid(ctx.sessionManager.getSessionId(), record.id)) {
-				say(ctx, { level: "info", text: `Warming is stopped in this window until your next message: /cache-keeper-stop was given at ${hhmm(record.at)}.${amounts ? ` This idle period's refreshes: ${amounts}.` : ""}` });
-			}
-		});
+			amounts = spendingText(p.budget, p.spending);
+		}
+		renderFooter(ctx);
+		// Said once per stop and session, when the window learns of it: not again after /reload, nor for a later period that
+		// starts stopped. The window that gave the command has said it already.
+		if (ctx.hasUI && firstSaid(ctx.sessionManager.getSessionId(), record.id)) {
+			say(ctx, { level: "info", text: `Warming is stopped in this window until your next message: /cache-keeper-stop was given at ${hhmm(record.at)}.${amounts ? ` This idle period's refreshes: ${amounts}.` : ""}` });
+		}
 	};
 
 	// A period left to Pi's own warming from its start, with keep-warm on: said when its reason is not the one this instance
@@ -1837,22 +1833,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// keeps the period warm itself, or kept it until its warming ended; for a period handed over to Pi, stopped only once
 	// nothing seen says its cache is alive. In any other state, and with keep-warm off, nothing: Pi's decision stands.
 	pi.on("cache_warming_decision", (event, ctx) => {
+		const p = period;
 		// A fresh read of the saved setting: a switch-off in any window holds from this decision on.
 		keepWarmSetting(true);
-		// And of the stop record, before the cache is read, so a stopped period is not handed over at this decision. This
-		// needs no context: a stop holds also where Pi asks while it reloads, through the old instance's stale context.
+		// And of the stop record, before the cache is read, so a stopped period is not handed over at this decision.
 		obeyStop(ctx, true);
-		try {
-			return decideForPi(event, ctx);
-		} catch {
-			// The context is gone (Pi is reloading or replacing the session): answered from what is known without it, the
-			// record and the period. A stopped period, or one the extension keeps warm, is told to stop; nothing else.
-			const action = running ? undefined : answerToPi({ warmer: warmerOf(period), idle: true, goneBy: undefined, now: Date.now() });
-			return action ? { action } : undefined;
-		}
-	});
-	const decideForPi = (event: { action: string }, ctx: ExtensionContext): { action: NonNullable<ReturnType<typeof answerToPi>> } | undefined => {
-		const p = period;
 		// The cache's clock read afresh first (Pi's refreshes since the answer, the route now): evidence against the period
 		// changes its hands before Pi is answered.
 		const idle = !running && ctx.isIdle();
@@ -1882,7 +1867,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		}
 		if (event.action === "warm") piWarmAt = Date.now();
 		return undefined;
-	};
+	});
 	// The user's message (Pi's `input`: typed, over RPC, or sent in the user's name by another extension; idle, steering or
 	// a follow-up): the stop record in place now is the one this session has seen. An unreadable one samples nothing. The
 	// input goes on unchanged.

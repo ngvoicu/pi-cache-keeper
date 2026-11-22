@@ -90,8 +90,6 @@ async function inRuntime(
 		ui?: boolean;
 		/** A session saved to a file in the agent directory, rather than in memory. */
 		persisted?: boolean;
-		/** More extensions, loaded after this one. */
-		extensions?: string[];
 	} = {},
 ) {
 	const tier = o.tier ?? "short";
@@ -102,7 +100,7 @@ async function inRuntime(
 	delete (globalThis as Record<symbol, unknown>)[STORE];
 	const model = catalog.MODELS.anthropic["claude-sonnet-4-6"];
 	const loader = {
-		additionalExtensionPaths: [new URL("../index.ts", import.meta.url).pathname, ...(o.extensions ?? [])],
+		additionalExtensionPaths: [new URL("../index.ts", import.meta.url).pathname],
 		noSkills: true,
 		noPromptTemplates: true,
 		noThemes: true,
@@ -458,84 +456,6 @@ test("Pi starts its own warming in one place, for a request that carries the ses
 	assert.match(text.slice(Math.max(0, at - 200), at), /if \(options\?\.sessionId === sessionManager\.getSessionId\(\)\) \{\s*$/, "under the session's own id");
 	assert.match(text.slice(text.lastIndexOf("streamFn:", at), at), /streamFn: async \(model, context, options\) => \{/, "inside the session's stream function");
 });
-
-// The review's probes of a stop through a real /reload, with Pi's own warmer and a real session prompt (keep-warm off:
-// Pi's warming is the only one). The answer reads 600,000 cached tokens, so Pi's warmer refreshes at 270 s.
-for (const when of ["while Pi reloads", "after an input another extension handled"] as const) {
-	test(`a stop holds through /reload ${when}: Pi's own warmer sends nothing, and the footer still says it`, { skip }, async () => {
-		delete (globalThis as Record<symbol, unknown>)[STOP_SEEN];
-		rmSync(join(dir, "cache-keeper-stop.json"), { force: true });
-		process.env.ANTHROPIC_API_KEY = "fixture-key";
-		let seen: Any;
-		try {
-			const result = await inRuntime(
-				() => {
-					throw new Error("keep-warm is off: the extension sends nothing");
-				},
-				async (s) => {
-					const session = s.runtime.session;
-					const transport = session._cacheWarmer.models;
-					const loader = session.resourceLoader;
-					const originalStream = transport.streamSimple;
-					const originalReload = loader.reload.bind(loader);
-					const calls: number[] = [];
-					transport.streamSimple = (m: Any, c: Any, opts: Any) =>
-						anthropic.streamSimple(m, c, {
-							...opts,
-							apiKey: "fixture-key",
-							maxRetries: 0,
-							fetch: async () => {
-								calls.push(Date.now());
-								return closed([messageStart(600_000, 0), ...end]);
-							},
-						});
-					try {
-						await session.prompt("Produce a fixture answer.");
-						assert.equal(calls.length, 1, "the answer");
-						const at = calls[0];
-						await s.ticks(when === "while Pi reloads" ? 268 : 1);
-						writeStop(Date.now());
-						await s.ticks(1);
-						const afterStop = s.footer();
-						if (when === "while Pi reloads") {
-							// Pi's warmer comes due while the reload loads its resources: it asks the old instance.
-							loader.reload = async (...args: unknown[]) => {
-								await s.ticks(2);
-								return originalReload(...args);
-							};
-						} else {
-							let handled: unknown;
-							await session.prompt("handle locally", { preflightResult: (status: unknown) => (handled = status) });
-							assert.equal(handled, "handled", "the input was handled by the other extension, nothing sent");
-						}
-						await session.reload();
-						const afterReload = s.footer();
-						await s.ticks(300);
-						seen = {
-							afterStop,
-							afterReload,
-							sent: calls.map((c) => c - at),
-							answers: session.sessionManager.getBranch().filter((e: Any) => e.type === "message" && e.message.role === "assistant").length,
-							warmEntries: session.sessionManager.getBranch().filter((e: Any) => e.type === "usage" && e.kind === "cache_warm").length,
-						};
-					} finally {
-						loader.reload = originalReload;
-						transport.streamSimple = originalStream;
-					}
-				},
-				{ keepWarmMinutes: 0, prompt: 600_000, ui: true, extensions: [new URL("./fixtures/consume-input.ts", import.meta.url).pathname] },
-			);
-			assert.deepEqual(result.thrown, []);
-		} finally {
-			delete process.env.ANTHROPIC_API_KEY;
-		}
-		assert.equal(seen.answers, 1, "no new answer");
-		assert.deepEqual(seen.sent, [0], "Pi's warmer sent nothing after the answer");
-		assert.equal(seen.warmEntries, 0);
-		assert.match(seen.afterStop ?? "", /warming stopped until your next message/);
-		assert.match(seen.afterReload ?? "", /warming stopped until your next message/, "still stopped after the reload");
-	});
-}
 
 // The review's probe: in an interactive session saved to a file, a refresh goes out at 276 s and settles before or after
 // a real /reload. Its line is saved in the session file once either way: a refresh that settles after the reload made its

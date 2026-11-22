@@ -8,7 +8,7 @@ import test from "node:test";
 const dir = mkdtempSync(join(tmpdir(), "pcc-stop-"));
 process.env.PI_CODING_AGENT_DIR = dir;
 const stop = await import("../stop-record.ts");
-const { covers, firstSaid, noteMessage, readStop, rememberLoad, seenAtStart, seenFor, stopPathLabel, writeStop } = stop;
+const { covers, firstSaid, noteMessage, readStop, rememberLoad, seenFor, stopPathLabel, writeStop } = stop;
 
 const path = join(dir, "cache-keeper-stop.json");
 const SEEN = Symbol.for("pi-cache-keeper.stop-seen");
@@ -121,16 +121,4 @@ test("firstSaid: once per session and stop", () => {
 	assert.equal(firstSaid("s1", "a"), false);
 	assert.equal(firstSaid("s2", "a"), true);
 	assert.equal(firstSaid("s1", "b"), true);
-});
-
-test("seenAtStart: a period started again from the same answer (a /reload) keeps what that answer's period had seen; only a new answer takes up the message's sample", () => {
-	clear();
-	newProcess();
-	rememberLoad();
-	assert.equal(seenAtStart("s1", 1000), null, "the answer's period, before any stop");
-	const record = writeStop(5);
-	noteMessage("s1", record.id); // the user's message, handled locally: no answer
-	assert.equal(seenAtStart("s1", 1000), null, "the same answer again (/reload): still the old value, so the stop holds");
-	assert.equal(seenAtStart("s1", 2000), record.id, "a new real answer: the message's sample");
-	assert.equal(seenAtStart("s1", undefined), record.id, "no answer: what the session has seen");
 });

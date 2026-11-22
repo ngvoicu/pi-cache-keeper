@@ -86,8 +86,6 @@ interface StopSeen {
 	latest?: { id: string | null };
 	/** Per session, the stops said there. */
 	said: Map<string, Set<string>>;
-	/** Per session, the answer its latest period started from, and what that period had seen. */
-	periods: Map<string, { answeredAt: number | undefined; seen: string | null }>;
 }
 function store(): StopSeen | undefined {
 	return (globalThis as Record<symbol, unknown>)[STOP_SEEN] as StopSeen | undefined;
@@ -96,13 +94,10 @@ function store(): StopSeen | undefined {
 /** Called once per load of the extension, first thing: on the first call in a process, samples the record in place. */
 export function rememberLoad(): void {
 	const found = store();
-	if (found?.sessions instanceof Map && found.said instanceof Map) {
-		if (!(found.periods instanceof Map)) found.periods = new Map();
-		return;
-	}
+	if (found?.sessions instanceof Map && found.said instanceof Map) return;
 	const read = readStop();
 	const atLoad = read !== null && "id" in read ? read.id : null;
-	(globalThis as Record<symbol, unknown>)[STOP_SEEN] = { atLoad, sessions: new Map(), said: new Map(), periods: new Map() } satisfies StopSeen;
+	(globalThis as Record<symbol, unknown>)[STOP_SEEN] = { atLoad, sessions: new Map(), said: new Map() } satisfies StopSeen;
 }
 
 /** The user's message reached the session with `id` in place (null: no record). */
@@ -119,21 +114,6 @@ export function seenFor(session: string): string | null {
 	const seen = store() as StopSeen;
 	if (seen.sessions.has(session)) return seen.sessions.get(session) ?? null;
 	return seen.latest ? seen.latest.id : seen.atLoad;
-}
-
-/**
- * What a period that starts now in the session has seen. A period started again from the same answer (a /reload, which
- * builds the period of the answer it already had) keeps what the session's period of that answer had seen: what the
- * user's message sampled since is taken up only by the period of a new real answer. Else what `seenFor` gives.
- */
-export function seenAtStart(session: string, answeredAt: number | undefined): string | null {
-	rememberLoad();
-	const periods = (store() as StopSeen).periods;
-	const last = periods.get(session);
-	if (answeredAt !== undefined && last?.answeredAt === answeredAt) return last.seen;
-	const seen = seenFor(session);
-	periods.set(session, { answeredAt, seen });
-	return seen;
 }
 
 /** Whether the stop `id` is said in this session for the first time; true once per session and id, and it remembers. */
