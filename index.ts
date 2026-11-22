@@ -106,6 +106,7 @@ import {
 } from "./keep-warm.ts";
 import {
 	DATA_MAX_AGE_MS,
+	DATA_READING,
 	DATA_SOURCE,
 	describeFound,
 	desiredOverride,
@@ -1108,8 +1109,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 
 	const refreshData = (ctx: ExtensionContext, force: boolean): Promise<DataSummary> =>
 		(dataRefresh ??= (async () => {
-						const dataset = await fetchDataset(neededProviders(ctx), data, httpFetch, { force });
-			data = { ...data, providers: dataset.providers, datasetVersion: dataset.datasetVersion, checkedAt: Date.now() };
+			const dataset = await fetchDataset(neededProviders(ctx), data, httpFetch, { force });
+			data = { ...data, providers: dataset.providers, datasetVersion: dataset.datasetVersion, reading: DATA_READING, checkedAt: Date.now() };
 			saveStore(data);
 			return { models: await applyData(ctx), downloaded: dataset.downloaded };
 		})().finally(() => {
@@ -1160,14 +1161,15 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		});
 	};
 
-	// At the start of an interactive session: ask providers.dev again when the saved data is a day old, or when pi
-	// can now use a provider it has no data for. Never waited for, and never in PI_OFFLINE mode.
+	// At the start of an interactive session: ask providers.dev again when the saved data is a day old, was read by an
+	// earlier version (DATA_READING), or when pi can now use a provider it has no data for. Never waited for, and never
+	// in PI_OFFLINE mode.
 	const refreshDataIfDue = (ctx: ExtensionContext) => {
 		// Turned off by hand in settings.json: take this extension's values out of models.json, as the menu does.
 		// The footer then shows Pi's own values again.
 		if (!config.modelData && Object.keys(data.written).length > 0) void applyData(ctx).then(() => ifSessionAlive(() => showData(ctx)), () => {});
 		if (!config.modelData || !ctx.hasUI || process.env.PI_OFFLINE) return;
-		const due = data.checkedAt === undefined || Date.now() - data.checkedAt > DATA_MAX_AGE_MS || neededProviders(ctx).some((provider) => data.providers[provider] === undefined);
+		const due = data.checkedAt === undefined || Date.now() - data.checkedAt > DATA_MAX_AGE_MS || data.reading !== DATA_READING || neededProviders(ctx).some((provider) => data.providers[provider] === undefined);
 		if (due) void refreshAndReport(ctx, false, false);
 	};
 

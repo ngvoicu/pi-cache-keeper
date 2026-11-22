@@ -13,6 +13,13 @@ const PAGE_SIZE = 200;
 const REQUEST_TIMEOUT_MS = 20_000;
 /** A shorter lifetime cannot carry a countdown or a refresh, so it is treated as "no safe lifetime". */
 const MIN_LIFETIME_SECONDS = 60;
+/**
+ * How the saved facts were read from providers.dev's answers. Saved facts of another reading (or of none: before 0.9.0)
+ * are fetched again once, even when the dataset has not changed. 2: the safe values of API 1.4.0, without pi's own.
+ */
+export const DATA_READING = 2;
+/** The source providers.dev names for a value that is pi's own catalog's, as of its last import. */
+const PI_SOURCE = "pi.dev";
 
 const storePath = () => join(getAgentDir(), "cache-keeper-models.json");
 const modelsPath = () => join(getAgentDir(), "models.json");
@@ -65,6 +72,8 @@ export interface DataStore {
 	/** When providers.dev was last asked, and the dataset it answered with. */
 	checkedAt?: number;
 	datasetVersion?: string;
+	/** How `providers` was read from the answers (DATA_READING). Absent: before 0.9.0. */
+	reading?: number;
 	/** providers.dev provider id → model id → facts. */
 	providers: Record<string, Record<string, Facts>>;
 	/** pi provider id → model id → where the model really comes from, as the extension serving it last said. */
@@ -164,25 +173,55 @@ export function costOf(pricing: unknown): Cost | undefined {
 	return cost;
 }
 
-/** One entry of the providers.dev API (a model at a provider and access method) as facts. */
+type SafeQuantity = "input_window" | "max_output" | "cache_short" | "cache_long";
+
+/**
+ * One safe value of an entry of providers.dev's API 1.4.0 (`safe.<quantity>`): the value and whether it is only a
+ * lower bound. Null when the entry's answer has `safe` for it and there is nothing to take: no value, or a value that
+ * is pi's own (`source: "pi.dev"`; written into models.json it would pin providers.dev's copy of pi's catalog over the
+ * value pi ships). Undefined when the answer has no safe value for it (an API before 1.4.0).
+ */
+function safeValueOf(entry: Record<string, unknown>, quantity: SafeQuantity): { value: unknown; atLeast: boolean } | null | undefined {
+	if (!isPlainObject(entry.safe)) return undefined;
+	const safe = entry.safe[quantity];
+	if (!isPlainObject(safe)) return undefined;
+	if (safe.source === PI_SOURCE) return null;
+	return { value: safe.value, atLeast: safe.at_least === true };
+}
+
+/**
+ * One entry of the providers.dev API (a model at a provider and access method) as facts: its safe values (`safe`,
+ * API 1.4.0), except one that is pi's own; from an answer without them, the fields that carried them before.
+ */
 export function factsOf(entry: unknown): Facts {
 	const facts: Facts = {};
 	if (!isPlainObject(entry)) return facts;
-	const window = isPlainObject(entry.input_window) ? entry.input_window : undefined;
-	const tokens = positive(window?.tokens);
+	// A record of the fields that carried the safe values before 1.4.0, unless its value is pi's.
+	const notPi = (record: unknown) => (isPlainObject(record) && record.source !== PI_SOURCE ? record : undefined);
+
+	const safeWindow = safeValueOf(entry, "input_window");
+	const windowRecord = notPi(entry.input_window);
+	const window = safeWindow !== undefined ? safeWindow : windowRecord && { value: windowRecord.tokens, atLeast: windowRecord.bound === "at_least" };
+	const tokens = positive(window?.value);
 	if (tokens !== undefined) {
 		facts.window = tokens;
-		if (window?.bound === "at_least") facts.windowAtLeast = true;
+		if (window?.atLeast) facts.windowAtLeast = true;
 	}
-	const maxOutput = positive(entry.max_output);
+
+	const output = safeValueOf(entry, "max_output");
+	const maxOutput = positive(output === undefined ? entry.max_output : output?.value);
 	if (maxOutput !== undefined) facts.maxOutput = maxOutput;
+
 	const lifetime = isPlainObject(entry.cache_lifetime) ? entry.cache_lifetime : {};
 	for (const tier of ["short", "long"] as const) {
-		const tierData = lifetime[tier];
-		const seconds = atLeastZero(isPlainObject(tierData) ? tierData.safe_s : undefined);
+		const safe = safeValueOf(entry, tier === "short" ? "cache_short" : "cache_long");
+		const seconds = atLeastZero(safe === undefined ? notPi(lifetime[tier])?.safe_s : safe?.value);
 		if (seconds !== undefined) facts[tier] = seconds;
 	}
-	const cost = costOf(entry.pricing);
+
+	// `pricing` is the safe price, whole; `safe.price.source` says whose it is.
+	const price = isPlainObject(entry.safe) && isPlainObject(entry.safe.price) ? entry.safe.price : undefined;
+	const cost = price?.source === PI_SOURCE ? undefined : costOf(entry.pricing);
 	if (cost) facts.cost = cost;
 	return facts;
 }
@@ -507,6 +546,7 @@ export function loadStore(): DataStore {
 			version: 1,
 			checkedAt: positive(parsed.checkedAt),
 			datasetVersion: typeof parsed.datasetVersion === "string" ? parsed.datasetVersion : undefined,
+			reading: positive(parsed.reading),
 			providers: part("providers") as DataStore["providers"],
 			upstreams: part("upstreams") as DataStore["upstreams"],
 			written: part("written") as DataStore["written"],
@@ -575,12 +615,12 @@ export interface Dataset {
 
 /**
  * The facts for `providerIds` from providers.dev. One small request tells whether the dataset changed; when it did
- * not and every provider is already saved, nothing else is fetched. Throws when providers.dev cannot be read, so
- * the caller keeps what it has.
+ * not and every provider is already saved, as this version reads it (DATA_READING), nothing else is fetched. Throws
+ * when providers.dev cannot be read, so the caller keeps what it has. What it returns is read as DATA_READING.
  */
 export async function fetchDataset(providerIds: string[], saved: DataStore, fetchImpl: Fetch, options: { force?: boolean; signal?: AbortSignal } = {}): Promise<Dataset> {
 	const datasetVersion = datasetVersionOf(await getJson(fetchImpl, `${DATA_API}/meta`, {}, options.signal));
-	const complete = providerIds.every((id) => saved.providers[id] !== undefined);
+	const complete = saved.reading === DATA_READING && providerIds.every((id) => saved.providers[id] !== undefined);
 	if (!options.force && complete && datasetVersion !== undefined && datasetVersion === saved.datasetVersion) {
 		return { datasetVersion, providers: Object.fromEntries(providerIds.map((id) => [id, saved.providers[id]])), downloaded: false };
 	}

@@ -242,6 +242,30 @@ test("the next session start asks nothing while the data is fresh; changing the 
 	assert.equal(h.statuses.get("cache-keeper"), "cache lifetime unknown · sub, counted at $2/$10 per M · providers.dev: no data for this model");
 });
 
+test("data saved by 0.8.0 (no `reading`) is fetched again once at the next start, though fresh and of the same dataset; models.json keeps this extension's values as its own", async () => {
+	const saved = JSON.parse(readFileSync(storePath, "utf8"));
+	assert.equal(saved.reading, 2);
+	delete saved.reading;
+	writeFileSync(storePath, JSON.stringify(saved));
+	const before = readFileSync(modelsPath, "utf8");
+
+	const h = harness();
+	h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
+	await h.settle();
+	assert.equal(h.requests[0]?.url, "https://providers.dev/api/v1/meta");
+	assert.ok(h.requests.some((request) => request.url.includes("/entries?provider=openai-codex")), "the same dataset is downloaded again");
+	const after = JSON.parse(readFileSync(storePath, "utf8"));
+	assert.equal(after.reading, 2);
+	assert.deepEqual(after.written, saved.written, "which overrides are this extension's own is kept");
+	assert.equal(readFileSync(modelsPath, "utf8"), before, "the same data: models.json unchanged, no value left behind as the user's");
+
+	// Once: the next start asks nothing.
+	const next = harness();
+	next.handlers.get("session_start")!({ reason: "startup" }, next.ctx);
+	await next.settle();
+	assert.deepEqual(next.requests, []);
+});
+
 test("/cache-keeper-refresh fetches again, keeps a value the user set, and a failed refresh keeps models.json", async () => {
 	const h = harness();
 	// The user sets a window by hand, and removes a lifetime this extension wrote.

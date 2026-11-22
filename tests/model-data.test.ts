@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+	DATA_READING,
 	costOf,
 	describeFound,
 	desiredOverride,
@@ -56,6 +57,111 @@ test("an entry gives the input window, the output limit and one safe lifetime pe
 	assert.deepEqual(factsOf(entry("meta", "muse-ember-1.0")).short, undefined);
 	assert.deepEqual(factsOf(null), {});
 	assert.deepEqual(factsOf({ input_window: { tokens: "many" }, max_output: -1, cache_lifetime: { short: { safe_s: null } } }), {});
+});
+
+// A summary of providers.dev's API 1.4.0: `safe` beside the fields that carried the safe values before (5.1 of the
+// site's design). Only the keys this extension reads; `legacy` is what the copied fields say.
+type Source = "measured" | "providers.dev" | "models.dev" | "pi.dev" | null;
+const safeValue = (value: number | null, source: Source, atLeast = false) => ({ value, source, at_least: atLeast, agreement: source ? "single" : "none", sources: [] });
+const summary140 = (safe: {
+	window?: ReturnType<typeof safeValue>;
+	output?: ReturnType<typeof safeValue>;
+	short?: ReturnType<typeof safeValue>;
+	long?: ReturnType<typeof safeValue>;
+	price?: Source;
+}) => {
+	const base = entry("anthropic", "claude-haiku-5-5") as Record<string, unknown>;
+	const none = safeValue(null, null);
+	const window = safe.window ?? none;
+	const short = safe.short ?? none;
+	const long = safe.long ?? none;
+	// The copied fields say what `safe` says, pi's values included (`mirror` on the site).
+	return {
+		...base,
+		max_output: (safe.output ?? none).value,
+		input_window: { tokens: window.value, bound: window.value === null ? null : window.at_least ? "at_least" : "limit", source: window.source === "measured" ? "providers.dev" : window.source },
+		cache_lifetime: {
+			short: { safe_s: short.value, source: short.source === "measured" ? "providers.dev" : short.source },
+			long: { safe_s: long.value, source: long.source === "measured" ? "providers.dev" : long.source },
+		},
+		safe: {
+			input_window: window,
+			max_output: safe.output ?? none,
+			cache_short: short,
+			cache_long: long,
+			price: { source: safe.price === undefined ? "models.dev" : safe.price, agreement: "single", differs: [], sources: [] },
+			differing: [],
+		},
+	};
+};
+
+test("API 1.4.0: each quantity is its safe value, a lower bound stays one, and the price is `pricing` whole", () => {
+	const facts = factsOf(summary140({
+		window: safeValue(921_500, "measured", true),
+		output: safeValue(128_000, "models.dev"),
+		short: safeValue(300, "measured"),
+		long: safeValue(3600, "providers.dev"),
+	}));
+	assert.deepEqual(facts, { window: 921_500, windowAtLeast: true, maxOutput: 128_000, short: 300, long: 3600, cost: factsOf(entry("anthropic", "claude-haiku-5-5")).cost });
+	assert.ok(facts.cost?.tiers, "the safe price keeps its tiers");
+
+	// `safe` is read, not the copied fields: where the two part (they never should), `safe` wins.
+	const parted = summary140({ window: safeValue(200_000, "models.dev"), output: safeValue(64_000, "providers.dev"), short: safeValue(600, "measured"), long: safeValue(1800, "measured") });
+	const stale = { ...parted, max_output: 1, input_window: { tokens: 5, bound: "at_least" }, cache_lifetime: { short: { safe_s: 7 }, long: { safe_s: 9 } } };
+	assert.deepEqual({ ...factsOf(stale), cost: undefined }, { window: 200_000, maxOutput: 64_000, short: 600, long: 1800, cost: undefined });
+
+	// A limit, not a bound: no windowAtLeast.
+	assert.equal(factsOf(summary140({ window: safeValue(1_000_000, "models.dev") })).windowAtLeast, undefined);
+	// "No safe lifetime" (0) is still kept apart from "nothing known".
+	assert.equal(factsOf(summary140({ short: safeValue(0, "measured") })).short, 0);
+	// Unknown (no source states it) and withheld (providers.dev publishes it as unknown on purpose): nothing taken.
+	const unknown = factsOf(summary140({ window: safeValue(null, null), short: safeValue(null, "providers.dev"), long: safeValue(null, null) }));
+	assert.deepEqual({ ...unknown, cost: undefined }, { cost: undefined });
+	// A price no source states: `pricing` has no rules.
+	assert.equal(factsOf({ ...summary140({ price: null }), pricing: { billing: "per_use", rules: null } }).cost, undefined);
+});
+
+test("API 1.4.0: a safe value that is pi's own (source pi.dev) is not taken, for a number and for the price, nor from the copied fields", () => {
+	const piOnly = summary140({
+		window: safeValue(500_000, "pi.dev"),
+		output: safeValue(4096, "pi.dev"),
+		short: safeValue(300, "pi.dev"),
+		long: safeValue(3600, "pi.dev"),
+		price: "pi.dev",
+	});
+	// The copied fields carry pi's values too (`source: "pi.dev"`), and `pricing` is pi's price: none of it is taken.
+	assert.equal((piOnly.input_window as { tokens: number }).tokens, 500_000);
+	assert.equal(piOnly.max_output, 4096);
+	assert.deepEqual(factsOf(piOnly), {});
+
+	// One quantity pi's, the others another source's: only pi's is left out.
+	const mixed = factsOf(summary140({ window: safeValue(400_000, "models.dev"), output: safeValue(4096, "pi.dev"), short: safeValue(300, "measured"), long: safeValue(3600, "pi.dev") }));
+	assert.deepEqual({ ...mixed, cost: undefined }, { window: 400_000, short: 300, cost: undefined });
+	assert.ok(mixed.cost, "a price from models.dev is taken");
+	assert.equal(factsOf(summary140({ price: "pi.dev" })).cost, undefined);
+	assert.ok(factsOf(summary140({ price: "providers.dev" })).cost);
+
+	// pi's value as a source beside the one the safe value is from changes nothing.
+	const beside = summary140({ window: safeValue(922_000, "models.dev") });
+	(beside.safe.input_window.sources as unknown[]).push({ source: "pi.dev", value: 500_000 });
+	assert.equal(factsOf(beside).window, 922_000);
+});
+
+test("an answer without `safe` (an API before 1.4.0) is read from the fields as before; one of them that is pi's is not taken", () => {
+	const old = entry("openai-codex", "gpt-6-astra") as Record<string, unknown>;
+	assert.equal("safe" in old, false);
+	assert.deepEqual({ ...factsOf(old), cost: undefined }, { window: 915_011, windowAtLeast: true, short: 7200, cost: undefined });
+	// The fields name their source; a value that is pi's is not taken there either.
+	const piWindow = { ...old, input_window: { ...(old.input_window as object), source: "pi.dev" } };
+	assert.equal(factsOf(piWindow).window, undefined);
+	const lifetimes = old.cache_lifetime as Record<string, Record<string, unknown>>;
+	const piShort = { ...old, cache_lifetime: { ...lifetimes, short: { ...lifetimes.short, source: "pi.dev" } } };
+	assert.equal(factsOf(piShort).short, undefined);
+	// A `safe` object without one quantity (not 1.4.0's shape): that quantity is read from its field.
+	const partial = summary140({ window: safeValue(400_000, "models.dev") });
+	delete (partial.safe as Partial<typeof partial.safe>).cache_short;
+	partial.cache_lifetime.short = { safe_s: 300, source: "models.dev" };
+	assert.equal(factsOf(partial).short, 300);
 });
 
 test("prices become pi's cost: base prices, the shortest lifetime's write price, a tier per context size; region and service-tier prices are left out", () => {
@@ -279,9 +385,17 @@ test("the saved data and models.json are read and written in pi's folder, and mo
 	process.env.PI_CODING_AGENT_DIR = dir;
 	try {
 		assert.deepEqual(loadStore(), emptyStore());
-		const store: DataStore = { ...emptyStore(), checkedAt: 5, datasetVersion: "v1", providers: { openai: { m: { window: 1 } } }, written: { p: { m: { maxTokens: 2 } } } };
+		const store: DataStore = { ...emptyStore(), checkedAt: 5, datasetVersion: "v1", reading: DATA_READING, providers: { openai: { m: { window: 1 } } }, written: { p: { m: { maxTokens: 2 } } } };
 		saveStore(store);
 		assert.deepEqual(loadStore(), store);
+		// A store saved by 0.8.0 or earlier has no `reading`: it is still version 1, so `written` (which overrides in
+		// models.json are this extension's own) is kept; only the facts are fetched again (fetchDataset).
+		const { reading: _, ...earlier } = store;
+		writeFileSync(join(dir, "cache-keeper-models.json"), JSON.stringify(earlier));
+		const loaded = loadStore();
+		assert.equal(loaded.reading, undefined);
+		assert.deepEqual(loaded.written, store.written);
+		assert.deepEqual(loaded.providers, store.providers);
 		writeFileSync(join(dir, "cache-keeper-models.json"), "{ cut short");
 		assert.deepEqual(loadStore(), emptyStore());
 		writeFileSync(join(dir, "cache-keeper-models.json"), JSON.stringify({ version: 2, providers: { a: {} } }));
@@ -326,7 +440,7 @@ test("providers.dev is asked once whether the dataset changed, then per provider
 	assert.equal(calls.length, 4);
 
 	// The same dataset and every provider saved: one small request.
-	const saved: DataStore = { ...emptyStore(), datasetVersion: "v2", providers: fresh.providers };
+	const saved: DataStore = { ...emptyStore(), datasetVersion: "v2", reading: DATA_READING, providers: fresh.providers };
 	calls.length = 0;
 	const unchanged = await fetchDataset(["openai-codex", "nope"], saved, fetchImpl);
 	assert.equal(unchanged.downloaded, false);
@@ -335,6 +449,10 @@ test("providers.dev is asked once whether the dataset changed, then per provider
 	// A provider that is not saved yet, an older dataset, or a forced refresh: download.
 	assert.equal((await fetchDataset(["openai-codex"], { ...saved, datasetVersion: "v1" }, fetchImpl)).downloaded, true);
 	assert.equal((await fetchDataset(["openai-codex"], saved, fetchImpl, { force: true })).downloaded, true);
+	// Saved facts read by an earlier version (no `reading`, or another one): the same dataset is downloaded again.
+	const { reading: _, ...before } = saved;
+	assert.equal((await fetchDataset(["openai-codex", "nope"], before, fetchImpl)).downloaded, true);
+	assert.equal((await fetchDataset(["openai-codex", "nope"], { ...saved, reading: 1 }, fetchImpl)).downloaded, true);
 	await assert.rejects(fetchDataset(["openai-codex", "meta"], saved, fetchImpl), /answered 503/);
 	await assert.rejects(fetchDataset(["openai-codex"], saved, async () => { throw new Error("offline"); }), /offline/);
 });
