@@ -267,7 +267,7 @@ test("a run that sends nothing after a failed compaction does not give the same 
 	assert.equal(h.state.compacts, 2);
 });
 
-// The review's sequence (T-319, finding 6): a route whose short cache lasts 300 s and long one 305 s; the reply lands at
+// The review's sequence: a route whose short cache lasts 300 s and long one 305 s; the reply lands at
 // 1 s, so the expiries are 301 s and 306 s. Every compaction fails. The retention goes short -> long -> short for the
 // same answer: the first expiry, tried already, is not tried again on its return. One try per expiry the answer has had.
 test("a retention switched short -> long -> short for the same answer tries each expiry once: 300, 305, not 300 again", (t) => {
