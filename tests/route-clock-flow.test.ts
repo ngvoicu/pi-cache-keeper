@@ -1025,3 +1025,85 @@ test("after Pi re-sent the first leg without strict tools, the run's later tool 
 	await s.until(3700);
 	assert.deepEqual(s.wires.filter((w) => w.kind === "refresh").map((w) => [w.at, w.read, w.cap, w.rejected ?? false]), [[3420, 600_000, 1, false]]);
 });
+
+// ------------------------------------------------------------------- an answer whose route the proxy does not name
+
+// A proxy reports `upstreams: []` for an answer its proxy would not name. Before 0.7.0 the empty list was dropped, the
+// silence let the configured upstreams stand in, and a period was warmed on a guessed route: the reviewer's probe sent a
+// refresh at 3,420 s that wrote all 600,000 tokens again ($2.25 where a hit costs $0.18). Now it is a route of its own.
+test("an unnamed answer during a period is a change of route: the helper's answer at 600 s, no refresh at 3,420 s into a cache nobody can name", { skip }, async (t) => {
+	const N = 600_000;
+	const provider = accountCaches(N);
+	const s = await session({
+		model: claudeGateway(keyValues),
+		store: loginOverKey(),
+		settings: { keepWarmMinutes: 120, compactBeforeExpiry: false },
+		prompt: N,
+		answered: { read: 0, write: N, oneHour: N },
+		serve: ({ kind, at }) => (kind === "answer" ? { read: 0, write: 0, oneHour: 0 } : provider.serve({ at })),
+		whileOut: (announce) => announce([LOGIN]),
+	});
+	t.after(() => s.done());
+	await s.until(270);
+	assert.deepEqual(s.decide(), { action: "stop" }, "the extension keeps the login's hour warm");
+	await s.until(600);
+	provider.use("key");
+	const reply = await s.continueAt(600);
+	assert.equal(reply.stopReason, "stop");
+	s.announce([]);
+	await s.until(615);
+	assert.match(s.statuses.at(-1) ?? "", /^cache cold/, "nothing says which cache is warm");
+	assert.match(await s.command(), /counted as expired: the route changed/);
+	await s.until(3500);
+	assert.deepEqual(s.wires.filter((w) => w.kind === "refresh"), [], "no refresh on a guessed route");
+	// Warming ended once, and the period is Pi's (what the clock read first against it is logged as the reason).
+	assert.deepEqual(s.traces().filter((r: { stop?: string }) => r.stop).map((r: { stop: string; handedOver?: string }) => [r.stop, r.handedOver]), [["unable", "evidence"]]);
+});
+
+test("an answer whose own report names no route: the period is Pi's from its start, and two unnamed reports are never one route", { skip }, async (t) => {
+	const N = 600_000;
+	const s = await session({
+		model: claudeGateway(keyValues),
+		store: loginOverKey(),
+		settings: { keepWarmMinutes: 120, compactBeforeExpiry: false },
+		prompt: N,
+		answered: { read: 0, write: N, oneHour: N },
+		serve: () => ({ read: N, write: 0, oneHour: 0 }),
+		whileOut: (announce) => announce([]),
+	});
+	t.after(() => s.done());
+	await s.until(270);
+	assert.equal(s.decide(), undefined, "Pi's own warming decides");
+	assert.match(await s.command(), /this session is left to Pi's own warming: the proxy did not name the route that served the last answer, so which route's cache it wrote is not known/);
+	assert.match(s.statuses.at(-1) ?? "", /keep-warm: Pi's \(the route is unknown\)/);
+	await s.until(3500);
+	assert.deepEqual(s.wires.filter((w) => w.kind === "refresh"), []);
+});
+
+// The review's probe: DeepSeek on Chat Completions through a gateway, otherwise kept warm by the extension. An answer
+// whose report names no route is Pi's for that reason, said as such, not as a missing lifetime.
+for (const unnamed of [false, true]) {
+	test(`an otherwise replayable openai-completions gateway period: ${unnamed ? "an unnamed answer is Pi's, the route is unknown" : "unreported, it is kept warm"}`, { skip }, async (t) => {
+		const N = 600_000;
+		const routed = deepseek("gateway-fixture", { short: 300, long: 3600 }, DEEPSEEK_PRICES);
+		const s = await session({
+			model: routed,
+			store: { providers: { deepseek: { [routed.id]: { short: 300, long: 3600 } } }, upstreams: { "gateway-fixture": { [routed.id]: { upstreams: [{ provider: "deepseek", model: routed.id }] } } } },
+			settings: { keepWarmMinutes: 120, compactBeforeExpiry: false },
+			prompt: N,
+			answered: { read: N, write: 0, oneHour: 0 },
+			serve: () => ({ read: N, write: 0, oneHour: 0 }),
+			...(unnamed ? { whileOut: (announce: (upstreams: readonly unknown[]) => void) => announce([]) } : {}),
+		});
+		t.after(() => s.done());
+		await s.until(280);
+		const refreshes = s.wires.filter((w) => w.kind === "refresh").length;
+		if (!unnamed) {
+			assert.equal(refreshes, 1);
+			return;
+		}
+		assert.equal(refreshes, 0);
+		assert.match(s.statuses.at(-1) ?? "", /keep-warm: Pi's \(the route is unknown\)/);
+		assert.match(await s.command(), /this session is left to Pi's own warming: the proxy did not name the route that served the last answer/);
+	});
+}

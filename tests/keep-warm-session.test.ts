@@ -3,7 +3,7 @@
 // out of a callback ends Pi. The refresh must settle without a throw, and what it showed (a miss, a hit, nothing) must
 // still be counted. No network: the adapter's transport is in memory, and the global fetch rejects.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mock, test } from "node:test";
@@ -72,6 +72,8 @@ interface Session {
 	decide: () => Promise<unknown>;
 	/** The real request of the latest answer, as Pi's own warming would keep it warm. */
 	request: () => { model: Any; context: Any; options: Any };
+	/** The extension's footer as last set (with `ui`). */
+	footer: () => string | undefined;
 }
 
 // Pi's real session runtime with this extension, Claude Sonnet 4.6 on Anthropic's API, keep-warm on: by default the
@@ -80,7 +82,15 @@ interface Session {
 async function inRuntime(
 	refresh: (n: number, signal: AbortSignal, body: Any) => Response,
 	scenario: (session: Session) => Promise<void>,
-	o: { tier?: "short" | "long"; keepWarmMinutes?: number; prompt?: number } = {},
+	o: {
+		tier?: "short" | "long";
+		keepWarmMinutes?: number;
+		prompt?: number;
+		/** An interactive session (Pi's TUI mode with a UI context), rather than none. */
+		ui?: boolean;
+		/** A session saved to a file in the agent directory, rather than in memory. */
+		persisted?: boolean;
+	} = {},
 ) {
 	const tier = o.tier ?? "short";
 	writeFileSync(
@@ -103,13 +113,21 @@ async function inRuntime(
 		const { session } = await servicesModule.createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, model });
 		return { session, services, diagnostics: services.diagnostics };
 	};
-	const runtime = await runtimeModule.createAgentSessionRuntime(factory, { cwd, agentDir: dir, sessionManager: sessionModule.SessionManager.inMemory(cwd) });
+	const runtime = await runtimeModule.createAgentSessionRuntime(factory, {
+		cwd,
+		agentDir: dir,
+		sessionManager: o.persisted ? sessionModule.SessionManager.create(cwd, join(dir, "sessions")) : sessionModule.SessionManager.inMemory(cwd),
+	});
 	const thrown: unknown[] = [];
 	const onThrow = (error: unknown) => thrown.push(error);
 	process.on("uncaughtException", onThrow);
 	process.on("unhandledRejection", onThrow);
 	const runner = runtime.session.extensionRunner;
-	await runtime.session.bindExtensions({ onError: () => {} });
+	let lastStatus: string | undefined;
+	if (o.ui) {
+		const uiContext = { ...runner.getUIContext(), theme: { fg: (_tone: string, text: string) => text }, notify: () => {}, setStatus: (_key: string, text: string | undefined) => (lastStatus = text) };
+		await runtime.session.bindExtensions({ mode: "tui", uiContext, onError: () => {} });
+	} else await runtime.session.bindExtensions({ onError: () => {} });
 	const ctx = runner.createContext();
 	const sessions = runtime.session.sessionManager;
 	let refreshes = 0;
@@ -152,6 +170,7 @@ async function inRuntime(
 		},
 		decide: () => runner.emitCacheWarmingDecision({ type: "cache_warming_decision", action: "warm", timestamp: Date.now() }),
 		request: () => lastRequest!,
+		footer: () => lastStatus,
 	};
 	try {
 		await scenario(session);
@@ -378,5 +397,117 @@ for (const tier of ["short", "long"] as const) {
 		}, goal);
 		const times = tier === "short" ? [275, 550, 825] : [3420, 6840];
 		assert.deepEqual(sent, times.map((at) => ({ at, cap: 1 })));
+	});
+}
+
+// ------------------------------------------------------------------------------------------------- /cache-keeper-stop
+
+const { writeStop } = await import("../stop-record.ts");
+const STOP_SEEN = Symbol.for("pi-cache-keeper.stop-seen");
+
+// What the stop relies on in Pi: its `input` event is raised for the user's messages from every source, idle and into a
+// run, reaches the extension's handler and goes on unchanged; a decision of Pi's warming is asked of the extension; a
+// reload keeps what the process remembers. With keep-warm off, so the only warming is Pi's own.
+test("a stop through Pi's real runtime: Pi's warming is told to stop; an input from any source, idle or into a run, reaches the handler, goes on unchanged and lifts it; a real /reload keeps it", { skip }, async () => {
+	delete (globalThis as Record<symbol, unknown>)[STOP_SEEN];
+	rmSync(join(dir, "cache-keeper-stop.json"), { force: true });
+	const result = await inRuntime(
+		() => closed([messageStart(120_000, 0), ...end]),
+		async (s) => {
+			await s.answer();
+			assert.equal(await s.decide(), "warm", "keep-warm off: Pi's proposal stands");
+			for (const [source, streamingBehavior] of [
+				["interactive", undefined],
+				["rpc", undefined],
+				["extension", undefined],
+				["interactive", "steer"],
+				["rpc", "followUp"],
+			] as const) {
+				const what = `${source}${streamingBehavior ? `, ${streamingBehavior}` : ""}`;
+				writeStop(Date.now());
+				await s.ticks(1);
+				await s.answer(); // an answer no message of the user's brought: stopped from its start
+				assert.equal(await s.decide(), "stop", `${what}: stopped`);
+				assert.deepEqual(await s.runner.emitInput("Go on.", undefined, source, streamingBehavior), { action: "continue" }, `${what}: unchanged`);
+				await s.ticks(1);
+				await s.answer();
+				assert.equal(await s.decide(), "warm", `${what}: its answer's period is warmed as usual`);
+			}
+			writeStop(Date.now());
+			await s.ticks(1);
+			await s.answer();
+			assert.equal(await s.decide(), "stop");
+			await s.runtime.session.reload();
+			const runner = s.runtime.session.extensionRunner;
+			assert.equal(await runner.emitCacheWarmingDecision({ type: "cache_warming_decision", action: "warm", timestamp: Date.now() }), "stop", "after /reload: still stopped");
+		},
+		{ keepWarmMinutes: 0 },
+	);
+	assert.deepEqual(result.thrown, []);
+	assert.equal(result.refreshes, 0, "the extension sent nothing");
+});
+
+test("Pi starts its own warming in one place, for a request that carries the session's own id: the extension's refreshes and summaries never start it", (t) => {
+	const sdk = new URL("../node_modules/@earendil-works/pi-coding-agent/dist/core/sdk.js", import.meta.url);
+	if (!existsSync(sdk)) return t.skip("the installed Pi has no dist/core/sdk.js");
+	const text = readFileSync(sdk, "utf8");
+	assert.equal(text.split("cacheWarmer.start(").length - 1, 1, "one call");
+	const at = text.indexOf("cacheWarmer.start(");
+	assert.match(text.slice(Math.max(0, at - 200), at), /if \(options\?\.sessionId === sessionManager\.getSessionId\(\)\) \{\s*$/, "under the session's own id");
+	assert.match(text.slice(text.lastIndexOf("streamFn:", at), at), /streamFn: async \(model, context, options\) => \{/, "inside the session's stream function");
+});
+
+// The review's probe: in an interactive session saved to a file, a refresh goes out at 276 s and settles before or after
+// a real /reload. Its line is saved in the session file once either way: a refresh that settles after the reload made its
+// context stale is written through the instance that runs the session now.
+for (const reloadFirst of [false, true]) {
+	test(`a refresh that settles ${reloadFirst ? "after" : "before"} a real /reload keeps its one line in the session file`, { skip }, async () => {
+		delete (globalThis as Record<symbol, unknown>)[STOP_SEEN];
+		rmSync(join(dir, "cache-keeper-stop.json"), { force: true });
+		let release: (() => void) | undefined;
+		let sent: AbortSignal | undefined;
+		let seen: Any;
+		const result = await inRuntime(
+			(_n, signal) => {
+				sent = signal;
+				return sse(
+					new ReadableStream({
+						start(controller) {
+							controller.enqueue(packet(messageStart(120_000, 0)));
+							release = () => {
+								if (signal.aborted) controller.error(new Error("cancelled"));
+								else {
+									for (const e of end) controller.enqueue(packet(e));
+									controller.close();
+								}
+							};
+						},
+					}),
+				);
+			},
+			async (s) => {
+				await s.answer();
+				const manager = s.runtime.session.sessionManager;
+				await s.ticks(276);
+				assert.equal(typeof release, "function", "the refresh is out");
+				if (reloadFirst) await s.runtime.session.reload();
+				release?.();
+				await s.ticks(2);
+				if (!reloadFirst) await s.runtime.session.reload();
+				const file = readFileSync(manager.getSessionFile(), "utf8").split("\n").filter(Boolean).map((line: string) => JSON.parse(line));
+				seen = {
+					onBranch: manager.getBranch().filter((e: Any) => e.type === "custom" && e.customType === "cache-keeper-refresh").length,
+					inFile: file.filter((e: Any) => e.customType === "cache-keeper-refresh"),
+					aborted: sent?.aborted,
+				};
+			},
+			{ ui: true, persisted: true },
+		);
+		assert.deepEqual(result.thrown, []);
+		assert.equal(result.refreshes, 1);
+		assert.equal(seen.aborted, reloadFirst, "the reload cancels a refresh still on its way");
+		assert.equal(seen.inFile.length, 1, "one line in the session file");
+		assert.equal(seen.onBranch, 1);
+		assert.match(seen.inFile[0].data.text, reloadFirst ? /^Cache warmed \(pi-cache-keeper, refresh 1\): .*\. It was then cancelled by a new request or a change of session\.$/ : /^Cache warmed \(pi-cache-keeper, refresh 1\): /);
 	});
 }

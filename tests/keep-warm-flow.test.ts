@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { mock } from "node:test";
 import { calculateCost } from "@earendil-works/pi-ai";
@@ -13,7 +13,9 @@ const readSettings = () => JSON.parse(readFileSync(join(dir, "settings.json"), "
 settings({ keepWarmMinutes: 120, minContextTokens: 100_000 });
 const { default: cacheKeeper } = await import("../index.ts");
 const { clockText } = await import("../footer.ts");
-const { formatRemaining } = await import("../trace.ts");
+const { formatRemaining, noticeOf } = await import("../trace.ts");
+const { writeStop } = await import("../stop-record.ts");
+const STOP_FILE = join(dir, "cache-keeper-stop.json");
 
 const HOUR = 3_600_000;
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -68,20 +70,34 @@ interface Options {
 	level?: string;
 	/** What a proxy reports served the first request, while it is out (`model-upstreams:answered`). */
 	report?: unknown;
+	/** The session's id (another session of the same Pi process, as after /new). */
+	session?: string;
 }
 
 function harness(options: Options = {}) {
 	const respond = options.respond;
 	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	const renderers = new Map<string, unknown>();
+	const entries: { customType: string; data: { level: string; text: string } }[] = [];
+	// What the transcript shows, in order: notices and saved entries.
+	const transcript: { via: "notice" | "entry"; level: string; text: string }[] = [];
 	const commands = new Map<string, (args: string, ctx: unknown) => unknown>();
 	// Events between extensions (a proxy saying what served a request): `signal` delivers one.
 	const bus = new Map<string, (payload: unknown) => void>();
 	const pi = {
 		on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(event, handler),
-		registerEntryRenderer: () => {},
+		registerEntryRenderer: (type: string, render: unknown) => renderers.set(type, render),
 		events: { on: (name: string, handler: (payload: unknown) => void) => (bus.set(name, handler), () => {}), emit: () => {} },
 		registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => unknown }) => commands.set(name, command.handler),
-		appendEntry: () => {},
+		// Saved entries: on the branch, as Pi appends them, and in the order they came.
+		appendEntry: (customType: string, data: unknown) => {
+			// After the leaf, as Pi appends it.
+			const entry = { type: "custom", customType, data, id: `c${branch.length}`, parentId: (branch.at(-1) as { id?: string } | undefined)?.id ?? null, timestamp: new Date().toISOString() };
+			branch.push(entry as never);
+			entries.push({ customType, data: data as never });
+			const line = data as { level: string; text: string };
+			transcript.push({ via: "entry", level: line.level, text: line.text });
+		},
 		getThinkingLevel: () => thinkingLevel.value,
 	};
 	const thinkingLevel = { value: options.level ?? "high" };
@@ -120,12 +136,18 @@ function harness(options: Options = {}) {
 	const state = { compacts: 0, compactedAt: 0, idle: true, pending: false, abortReports: true, ignoresAbort: false, attempts: 0, beforePayload: undefined as (() => void) | undefined };
 	const statuses: { at: number; text: string | undefined }[] = [];
 	const notes: string[] = [];
+	// Every notice with its level, also those a command's output clears from `notes`.
+	const said: { text: string; level: string }[] = [];
 	const ctx = {
 		hasUI: options.ui === true,
 		mode: "print",
 		ui: {
 			setStatus: (key: string, text: string | undefined) => key === "cache-keeper" && statuses.push({ at: Date.now(), text }),
-			notify: (text: string) => notes.push(text),
+			notify: (text: string, level = "info") => {
+				notes.push(text);
+				said.push({ text, level });
+				transcript.push({ via: "notice", level, text });
+			},
 			theme: { fg: (_color: string, text: string) => text },
 		},
 		cwd: dir,
@@ -136,7 +158,7 @@ function harness(options: Options = {}) {
 		getContextUsage: () => ({ tokens: cached }),
 		sessionManager: {
 			getBranch: () => branch,
-			getSessionId: () => "s1",
+			getSessionId: () => options.session ?? "s1",
 			getSessionFile: () => undefined,
 			// Pi's own warming records its refreshes as usage entries.
 			appendUsage: (kind: string, provider: string, modelId: string, usage: unknown) => {
@@ -241,7 +263,9 @@ function harness(options: Options = {}) {
 		return notes.join("\n");
 	};
 	const signal = (name: string, payload: unknown) => bus.get(name)?.(payload);
-	return { emit, idle, warms, state, sent, model, branch, statuses, notes, command, decide, run, usage: refreshUsage, ctx, thinkingLevel, release: () => pending?.(), signal };
+	// The user's message (Pi's `input`), from a source, idle or into a run.
+	const input = (source = "interactive", streamingBehavior?: string) => emit("input", { type: "input", text: "more", source, streamingBehavior });
+	return { emit, idle, warms, state, sent, model, branch, statuses, notes, said, entries, transcript, renderers, handlers, commands, command, decide, run, input, usage: refreshUsage, ctx, thinkingLevel, release: () => pending?.(), signal };
 }
 
 const allTraces = () =>
@@ -252,7 +276,10 @@ const allTraces = () =>
 		.map((line) => JSON.parse(line));
 const traces = () => allTraces().filter((record) => record.event === "warm" || record.event === "expiry");
 // The models a missed refresh left to Pi belong to the Pi process (R9); each test starts as a new process.
-const newProcess = () => delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-cache-keeper.warm-misses")];
+const newProcess = () => {
+	delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-cache-keeper.warm-misses")];
+	delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-cache-keeper.stop-seen")];
+};
 // The footer as it reads without PI_OFFLINE (with it, it adds that no model data was fetched).
 const online = (t: { after: (fn: () => void) => void }) => {
 	const saved = process.env.PI_OFFLINE;
@@ -263,6 +290,7 @@ const online = (t: { after: (fn: () => void) => void }) => {
 };
 const fresh = (keepWarm: Record<string, unknown> = {}) => {
 	newProcess();
+	rmSync(STOP_FILE, { force: true, recursive: true });
 	settings({ keepWarmMinutes: 120, minContextTokens: 100_000, ...keepWarm });
 	writeFileSync(join(dir, "cache-keeper.jsonl"), "");
 };
@@ -427,7 +455,8 @@ for (const [label, options] of [
 		assert.deepEqual(on.pi, off.pi, "exactly as with keep-warm off");
 		assert.ok(on.answers.every((a) => a === undefined));
 		assert.equal(on.warms, 0);
-		assert.deepEqual(traces().filter((r) => r.event === "warm"), [], "and logs no refresh of its own");
+		// Only that the session is left to Pi, said once, with why.
+		assert.deepEqual(traces().filter((r) => r.event === "warm").map((r) => r.action), ["left"], "and logs no refresh of its own");
 	});
 }
 
@@ -511,7 +540,7 @@ test("R1: an answer that used the cache, then a successful one that used none: t
 	assert.deepEqual(on.pi, off.pi, "Pi refreshes exactly as with keep-warm off");
 	assert.deepEqual(on.decisions.map((d) => [d.at, d.pi]), off.decisions.map((d) => [d.at, d.pi]));
 	assert.equal(on.warms, 0, "the extension sends nothing");
-	assert.deepEqual(on.traces.filter((r) => r.event === "warm"), []);
+	assert.deepEqual(on.traces.filter((r) => r.event === "warm").map((r) => [r.action, r.reason]), [["left", "the last answer did not use the prompt cache"]], "only that it is left to Pi, said once");
 	assert.match(on.shown, /this session is left to Pi's own warming: the last answer did not use the prompt cache/);
 });
 
@@ -852,10 +881,10 @@ test("R4: each end reason is recorded once, with the amounts, in the log, the fo
 		assert.equal(h.decide(), undefined, "Pi's warming decides while the cache can be alive");
 	});
 	assert.deepEqual([r.stop.action, r.stop.stop, r.h.warms.length], ["skip", "unable", 0]);
-	assert.match(r.stop.reason, /^the extension no longer holds the period's request \(the model, the branch or the conversation changed\), so it can't refresh it$/);
+	assert.match(r.stop.reason, /^you switched the model or the branch, or the conversation was compacted, so the extension no longer has the request to re-send$/);
 	assert.equal(r.footer, undefined, "no 'keep-warm ended': the period is Pi's");
 	// The branch move forgot the request, so the footer no longer says what was sent.
-	assert.equal(lastFooter(r.h), "cache cold · next message full price · keep-warm: Pi's (request let go) · short 5m (in use) · long 5m · api $3/$15 per M");
+	assert.equal(lastFooter(r.h), "cache cold · next message full price · keep-warm: Pi's (you switched model or branch, or compacted) · short 5m (in use) · long 5m · api $3/$15 per M");
 	// Three hours on, nothing seen says the period's cache is alive (Pi's refreshes included): Pi's refresh would write it.
 	assert.deepEqual(r.h.decide(), { action: "stop" });
 });
@@ -1832,7 +1861,10 @@ test("a period left to Pi reads its cache as with keep-warm off: GPT-6.1 Sol ask
 			const decided = h.decide();
 			await h.idle(ms);
 			const shown = (await h.command("cache-keeper")).split("\n").find((l) => l.startsWith("cache:"));
-			return { decided, compacts: h.state.compacts, compactedAt: h.state.compactedAt, attempts: h.state.attempts, traces: allTraces(), shown };
+			// The record that the session is left to Pi (keep-warm on only) is the one difference, said once.
+			const all = allTraces();
+			assert.ok(all.filter((r) => r.action === "left").length <= 1);
+			return { decided, compacts: h.state.compacts, compactedAt: h.state.compactedAt, attempts: h.state.attempts, traces: all.filter((r) => r.action !== "left"), shown };
 		};
 		const label = tools.length ? "with tools" : "as the reviewer built it, without tools";
 		const on = await runOnce(120, 35 * 60_000);
@@ -1912,7 +1944,10 @@ test("R9: one miss ends only its period; the next period is owned and refreshes,
 	assert.deepEqual(await nextPeriod(h, true), { decided: { action: "stop" }, refreshed: 1 });
 	assert.deepEqual(traces().filter((r) => r.stop).map((r) => [r.action, r.stop]), [["missed", "missed"]]);
 	assert.equal(countOf(), 1);
-	assert.ok(h.notes.includes("Keeping the cache warm read only 50% from the cache, so it wrote the context again. Stopped until your next message."));
+	// The miss keeps its own line in the transcript, a saved entry, with what it read and cost.
+	assert.deepEqual(h.entries.map((e) => [e.customType, e.data.level, e.data.text]), [
+		["cache-keeper-refresh", "warning", "Keeping the cache warm read only 50% of 600k from the cache, so it wrote the context again: $1.22; $1.22 spent, a miss costs $2.07. Stopped until your next message."],
+	]);
 	assert.deepEqual(await nextPeriod(h), { decided: { action: "stop" }, refreshed: 1 }, "the next period is owned and refreshes");
 	assert.equal(countOf(), 0, "a hit sets it back to zero");
 	assert.ok(!h.notes.includes(WARNING));
@@ -2098,7 +2133,8 @@ test("the period's rule: a refresh that fails before it leaves ends warming (\"f
 	assert.deepEqual(records.map((r) => [r.action, r.stop, r.reason]), [["failed", "failed", "no API key for cliproxyapi"]]);
 	assert.equal(records[0].budget.spent, 0, "nothing spent");
 	assert.equal(countOf(), 0, "nothing counted toward two in a row");
-	assert.deepEqual(h.notes.filter((n) => n.includes("could not keep the cache warm")), ["pi-cache-keeper could not keep the cache warm: no API key for cliproxyapi"]);
+	assert.deepEqual(h.said.filter((n) => n.text.includes("could not keep the cache warm")), [{ level: "warning", text: "pi-cache-keeper could not keep the cache warm: no API key for cliproxyapi (nothing was sent); $0 spent, a miss costs $2.07. Stopped until your next message." }]);
+	assert.deepEqual(h.entries, [], "nothing was sent: a notice, not a refresh's line");
 });
 
 // ------------------------------------------------------------------------------- the owned period's one expiry
@@ -2510,10 +2546,10 @@ test("a model round trip: a model switch away and back without a message: the pe
 		const stops = traces().filter((r) => r.stop);
 		assert.deepEqual(
 			stops.map((r) => [r.stop, r.reason]),
-			[["unable", "the extension no longer holds the period's request (the model, the branch or the conversation changed), so it can't refresh it"]],
+			[["unable", "you switched the model or the branch, or the conversation was compacted, so the extension no longer has the request to re-send"]],
 			label,
 		);
-		assert.match(lastFooter(h) ?? "", /keep-warm: Pi's \(request let go\)/, label);
+		assert.match(lastFooter(h) ?? "", /keep-warm: Pi's \(you switched model or branch, or compacted\)/, label);
 	}
 });
 
@@ -3576,7 +3612,7 @@ test("footer: after a model switch, the new model's lifetimes and price, and not
 	// (the stated hour), with the lifetime its clock counts.
 	h.ctx.model = h.model as never;
 	h.emit("model_select");
-	assert.equal(lastFooter(h), "keep-warm: Pi's (request let go) · long 1h (in use) · short 1h · api $3/$15 per M");
+	assert.equal(lastFooter(h), "keep-warm: Pi's (you switched model or branch, or compacted) · long 1h (in use) · short 1h · api $3/$15 per M");
 	assert.equal(h.decide(), undefined, "Pi's warming decides");
 
 	// A period left to Pi is said for its own model only.
@@ -3875,4 +3911,838 @@ test("footer: keep-warm's goal on a model without prices counts refreshes; a per
 	const left = harness({ ui: true, lifetime: 300, cost: WITH_WRITE, thinking: { type: "enabled", budget_tokens: 1024 } });
 	left.emit("agent_settled");
 	assert.equal(lastFooter(left), "cache warm · 5m left · keep-warm: Pi's (thinking on) · short 5m (in use) · long 5m · sent default cache · api $3/$15 per M");
+});
+
+// ------------------------------------------------------------------------------------------------- /cache-keeper-stop
+// "Another window" is what it is for the settings: the record written in the test's agent directory, here by writeStop,
+// since a window is a process and the record is all that passes between two.
+
+/** A clock time as the extension writes the time a stop was given. */
+const hhmm = (at: number) => new Date(at).toTimeString().slice(0, 5);
+const stopRecords = () => traces().filter((r) => r.stop === "stopped");
+/** /reload as Pi does it: the instance shuts down and a new one starts the session, with the same context and branch. */
+function reloadStopped(h: ReturnType<typeof harness>, t: { after: (fn: () => void) => void }) {
+	const marker = process.env.PI_CACHE_KEEPER_RETENTION;
+	const retention = process.env.PI_CACHE_RETENTION;
+	t.after(() => {
+		if (marker === undefined) delete process.env.PI_CACHE_KEEPER_RETENTION;
+		else process.env.PI_CACHE_KEEPER_RETENTION = marker;
+		if (retention === undefined) delete process.env.PI_CACHE_RETENTION;
+		else process.env.PI_CACHE_RETENTION = retention;
+	});
+	h.emit("session_shutdown");
+	h.handlers.clear();
+	h.commands.clear();
+	cacheKeeper({
+		on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => h.handlers.set(event, handler),
+		registerEntryRenderer: (type: string, render: unknown) => h.renderers.set(type, render),
+		events: { on: () => () => {}, emit: () => {} },
+		registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => unknown }) => h.commands.set(name, command.handler),
+		appendEntry: (customType: string, data: unknown) => {
+			h.branch.push({ type: "custom", customType, data, id: `c${h.branch.length}`, parentId: (h.branch.at(-1) as { id?: string } | undefined)?.id ?? null, timestamp: new Date().toISOString() } as never);
+			h.entries.push({ customType, data: data as never });
+		},
+		getThinkingLevel: () => "high",
+	} as never);
+	h.emit("session_start", { reason: "reload" });
+	t.after(() => h.emit("session_shutdown"));
+}
+
+test("stop: from another window, in a period the extension warms: nothing more leaves, one record says so, the spending stays; Pi's real warmer is told to stop", { skip: noWarmer }, async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE });
+	await h.idle(0);
+	h.emit("agent_settled");
+	await h.idle(300_000);
+	assert.equal(h.warms.length, 1, "the first refresh, at 276 s");
+	// Pi's warmer of the next answer's request, and a stop given in another window at 400 s.
+	mock.timers.tick(1000);
+	h.run(true);
+	const pi = withPiWarmer(h);
+	t.after(() => pi.warmer.cancel());
+	pi.start();
+	pi.warmer.onAgentSettled();
+	await pi.advance(98_000);
+	const given = writeStop(Date.now());
+	await pi.advance(2 * HOUR);
+	assert.equal(h.warms.length, 1, "nothing leaves after the stop");
+	assert.equal(pi.piRefreshes.length, 0, "nor anything of Pi's");
+	assert.deepEqual(pi.decisions.map((d) => d.answer), [{ action: "stop" }], "Pi's one idle decision is answered stop");
+	const stops = stopRecords();
+	assert.deepEqual(stops.map((r) => [r.action, r.reason, r.model]), [["skip", `given at ${hhmm(given.at)}`, "cliproxyapi/sub/claude"]], "one record, at the next tick");
+	assert.equal(stops[0].at, new Date(given.at + 1000).toISOString());
+	assert.deepEqual(stops[0].budget, { unit: "usd", spent: 0, limit: stops[0].budget.limit, next: stops[0].budget.next }, "the new period had spent nothing");
+	const told = traces().filter((r) => r.action === "pi-stopped");
+	assert.deepEqual(told.map((r) => r.reason), [`/cache-keeper-stop (given at ${hhmm(given.at)}) holds until your next message (Pi would have refreshed)`]);
+	assert.ok(existsSync(STOP_FILE), "the record stays");
+});
+
+test("stop: with keepWarmMinutes 0, Pi's real warmer is answered stop at its idle decision and sends nothing; the record has no budget", { skip: noWarmer }, async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ keepWarmMinutes: 0, compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE });
+	const pi = withPiWarmer(h);
+	t.after(() => pi.warmer.cancel());
+	pi.start();
+	h.emit("agent_settled");
+	pi.warmer.onAgentSettled();
+	const given = writeStop(Date.now());
+	await pi.advance(HOUR);
+	assert.equal(pi.piRefreshes.length, 0);
+	assert.deepEqual(pi.decisions.map((d) => [d.at, d.answer]), [[271_000, { action: "stop" }]]);
+	assert.equal(h.warms.length, 0);
+	const told = traces().filter((r) => r.action === "pi-stopped");
+	assert.equal(told.length, 1);
+	assert.equal(told[0].budget, undefined, "no budget: the extension took nothing");
+	assert.equal(told[0].reason, `/cache-keeper-stop (given at ${hhmm(given.at)}) holds until your next message (Pi would have refreshed)`);
+	assert.deepEqual(stopRecords(), [], "no end of the extension's warming: it had none");
+});
+
+test("stop: a refresh on its way is not called back; its hit is counted and moves the countdown, and nothing follows it; a miss counts toward two in a row", async (t) => {
+	for (const outcome of ["hit", "miss"] as const) {
+		clock();
+		t.after(() => mock.timers.reset());
+		fresh({ compactBeforeExpiry: false });
+		const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true, hold: (n) => n === 1, respond: (n) => (n === 1 && outcome === "miss" ? HALF_MISS : {}) });
+		h.emit("agent_settled");
+		await h.idle(277_000);
+		assert.equal(h.warms.length, 1, `${outcome}: out at 276 s`);
+		writeStop(Date.now());
+		await h.idle(2000);
+		assert.equal(stopRecords().length, 1, `${outcome}: warming ended while it was out`);
+		assert.equal((h.warms[0].options.signal as AbortSignal).aborted, false, `${outcome}: not cancelled`);
+		h.release();
+		await flush();
+		await flush();
+		const settled = traces().find((r) => r.action === (outcome === "hit" ? "warm" : "missed"));
+		assert.ok(settled, `${outcome}: its own record`);
+		assert.ok(settled.budget.spent > 0, `${outcome}: counted in the period's spending`);
+		if (outcome === "hit") {
+			// Its hit counts from when it left (276 s): the cache lasts to 576 s, past the answer's 301 s.
+			await h.idle(150_000);
+			assert.match(h.statuses.at(-1)?.text ?? "", /^cache warm · 2m left/, "the countdown moved");
+		} else assert.equal(countOf(), 1, "the miss counts");
+		await h.idle(2 * HOUR);
+		assert.equal(h.warms.length, 1, `${outcome}: nothing follows it`);
+	}
+});
+
+test("stop: a refresh being prepared when the stop comes is refused at the last gate: nothing leaves, nothing is reserved", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE });
+	h.emit("agent_settled");
+	h.state.beforePayload = () => {
+		h.state.beforePayload = undefined;
+		writeStop(Date.now());
+	};
+	await h.idle(HOUR);
+	assert.equal(h.state.attempts, 1, "prepared once");
+	assert.equal(h.warms.length, 0, "nothing left");
+	const records = traces().filter((r) => r.event === "warm");
+	assert.deepEqual(records.map((r) => [r.action, r.stop, r.reason]), [
+		["skip", "stopped", `given at ${hhmm(276_000)}`],
+		["skip", undefined, `keep-warm ended: given at ${hhmm(276_000)}`],
+	]);
+	assert.equal(records[0].budget.spent, 0, "nothing reserved");
+});
+
+test("stop: a window in a run when it is given: Pi's decision during the run stands; the period the run ends in is stopped, unless the user wrote into the run since", async (t) => {
+	for (const steered of [false, true]) {
+		clock();
+		t.after(() => mock.timers.reset());
+		fresh({ compactBeforeExpiry: false });
+		const h = harness({ lifetime: 300, cost: WITH_WRITE });
+		h.emit("agent_settled");
+		mock.timers.tick(10_000);
+		let during: unknown = "not asked";
+		h.run(true, () => {
+			writeStop(Date.now());
+			during = h.decide();
+			if (steered) h.input("interactive", "steer");
+		});
+		assert.equal(during, undefined, "during the run nothing is said to Pi");
+		assert.deepEqual(h.decide(), { action: "stop" }, "idle: the extension's, or stopped");
+		await h.idle(HOUR);
+		if (steered) {
+			assert.ok(h.warms.length > 0, "a message typed into the run after the stop: warmed as usual");
+			assert.deepEqual(stopRecords(), []);
+		} else {
+			assert.equal(h.warms.length, 0, "stopped from its start");
+			assert.equal(stopRecords().length, 1);
+		}
+	}
+});
+
+test("stop: the user's next message, from any source, and its answer: that period and the ones after it are warmed as usual, the first refresh on time", async (t) => {
+	for (const source of ["interactive", "rpc", "extension"]) {
+		clock();
+		t.after(() => mock.timers.reset());
+		fresh({ compactBeforeExpiry: false });
+		const h = harness({ lifetime: 300, cost: WITH_WRITE });
+		h.emit("agent_settled");
+		writeStop(Date.now());
+		await h.idle(300_000);
+		assert.equal(h.warms.length, 0, `${source}: stopped`);
+		mock.timers.tick(1000);
+		h.input(source);
+		h.run(true);
+		const answeredAt = Date.now();
+		await h.idle(280_000);
+		assert.deepEqual(h.warms.map((w) => w.at), [answeredAt + 275_000], `${source}: refreshed 25 s before the new answer's expiry`);
+		// A later period, after a run no message started (another extension's): warmed too.
+		mock.timers.tick(1000);
+		h.run(true);
+		await h.idle(280_000);
+		assert.equal(h.warms.length, 2, `${source}: the period after it as well`);
+		assert.equal(stopRecords().length, 1, `${source}: only the first period was stopped`);
+	}
+});
+
+test("stop: the user's message whose run sends nothing leaves the window stopped; the next real answer, whatever brings it, is warmed as usual", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE });
+	h.emit("agent_settled");
+	writeStop(Date.now());
+	await h.idle(10_000);
+	h.input();
+	h.run(false);
+	await h.idle(HOUR);
+	assert.equal(h.warms.length, 0, "still stopped: no new period");
+	mock.timers.tick(1000);
+	h.run(true);
+	await h.idle(280_000);
+	assert.equal(h.warms.length, 1, "an answer without a message of its own: warmed as usual");
+});
+
+test("stop: a run no message of the user's started brings a new answer: the period is stopped from its start, with its own record; Pi's real warmer, started by that run's request, is told to stop", { skip: noWarmer }, async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE });
+	h.emit("agent_settled");
+	writeStop(Date.now());
+	await h.idle(10_000);
+	const pi = withPiWarmer(h);
+	t.after(() => pi.warmer.cancel());
+	for (const n of [1, 2]) {
+		mock.timers.tick(1000);
+		h.run(true);
+		pi.start();
+		pi.warmer.onAgentSettled();
+		await pi.advance(300_000);
+		assert.equal(h.warms.length, 0, `run ${n}: nothing of the extension's`);
+		assert.equal(pi.piRefreshes.length, 0, `run ${n}: nothing of Pi's`);
+		assert.deepEqual(pi.decisions.at(-1)?.answer, { action: "stop" }, `run ${n}: Pi told to stop`);
+		assert.equal(stopRecords().length, n + 1, `run ${n}: its period's own record`);
+	}
+});
+
+test("stop: a record already on disk when the extension loads stops nothing", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	writeStop(500);
+	const h = harness({ lifetime: 300, cost: WITH_WRITE });
+	h.emit("agent_settled");
+	await h.idle(280_000);
+	assert.equal(h.warms.length, 1);
+	assert.deepEqual(stopRecords(), []);
+});
+
+test("stop: /reload keeps it, and Pi's warmer, which the reload does not touch, is told to stop; /new is stopped until its first message", { skip: noWarmer }, async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE });
+	h.emit("agent_settled");
+	writeStop(Date.now());
+	await h.idle(10_000);
+	const pi = withPiWarmer(h);
+	t.after(() => pi.warmer.cancel());
+	pi.start();
+	pi.warmer.onAgentSettled();
+	reloadStopped(h, t);
+	await pi.advance(HOUR);
+	assert.equal(h.warms.length, 0, "nothing of the reloaded instance's");
+	assert.equal(pi.piRefreshes.length, 0);
+	assert.deepEqual(pi.decisions.map((d) => d.answer), [{ action: "stop" }], "a period the reloaded instance did not take (it never saw the request) is stopped all the same");
+	assert.equal(stopRecords().length, 1, "only the period the extension had taken records an end of its warming");
+
+	// /new: another session of the same process, which has had no message yet.
+	clock();
+	const other = harness({ lifetime: 300, cost: WITH_WRITE, session: "s2", model: { id: "sub/new" } });
+	other.emit("agent_settled");
+	await other.idle(300_000);
+	assert.equal(other.warms.length, 0, "/new: stopped");
+	mock.timers.tick(1000);
+	other.input();
+	other.run(true);
+	await other.idle(280_000);
+	assert.equal(other.warms.length, 1, "/new: warmed after its first message");
+});
+
+test("stop: an unreadable record: no refresh leaves and the period's warming ends as unable; with keep-warm off the handler adds nothing", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE });
+	h.emit("agent_settled");
+	writeFileSync(STOP_FILE, "{");
+	await h.idle(HOUR);
+	assert.equal(h.warms.length, 0);
+	assert.deepEqual(traces().filter((r) => r.stop).map((r) => [r.stop, r.reason]), [["unable", "the stop record could not be read"]]);
+	fresh({ keepWarmMinutes: 0, compactBeforeExpiry: false });
+	const off = harness({ lifetime: 300, cost: WITH_WRITE });
+	off.emit("agent_settled");
+	writeFileSync(STOP_FILE, "{");
+	assert.equal(off.decide(), undefined, "Pi's decision stands");
+});
+
+test("stop: compacting before expiry still runs in a stopped period, and starts nothing again: no refresh, no hand-over; Pi's warmer of a replaced transcript asks nothing", { skip: noWarmer }, async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: true });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE });
+	h.emit("agent_settled");
+	writeStop(Date.now());
+	await h.idle(HOUR);
+	assert.equal(h.state.compacts, 1, "the summary");
+	assert.equal(h.state.compactedAt, 281_000, "20 s before the period's expiry");
+	assert.equal(h.warms.length, 0);
+	// Pi's compaction lands: the transcript is replaced, and a warmer's run tied to the old one is no longer current.
+	let current = true;
+	const pi = withPiWarmer(h);
+	t.after(() => pi.warmer.cancel());
+	pi.warmer.start({ model: h.model, context: { messages: [] }, options: {} }, () => current);
+	pi.warmer.onAgentSettled();
+	h.branch.push({ type: "compaction", id: "k", parentId: null, timestamp: new Date().toISOString(), summary: "s", firstKeptEntryId: "a", tokensBefore: 600_000 } as never);
+	current = false;
+	h.emit("session_compact", { compactionEntry: { id: "k", summary: "s", tokensBefore: 600_000 }, fromExtension: true, reason: "manual" });
+	h.state.compacts = 0;
+	await pi.advance(4 * 300_000);
+	assert.equal(h.warms.length, 0, "no refresh of the extension's through four lifetimes");
+	assert.equal(pi.piRefreshes.length, 0, "nor of Pi's");
+	assert.equal(pi.decisions.length, 0, "Pi's warmer asked nothing");
+	assert.equal(pi.warmer.status.reason, "conversation context changed");
+	assert.deepEqual(h.decide(), { action: "stop" }, "not handed over: still stopped");
+	assert.equal(h.state.compacts, 0, "and no second summary");
+	// The user's message and its answer: warmed as usual.
+	mock.timers.tick(1000);
+	h.input();
+	h.run(true);
+	await h.idle(280_000);
+	assert.equal(h.warms.length, 1);
+});
+
+test("stop: in a period handed over to Pi, Pi is told to stop; the period is not handed over again, and the countdown shows the time Pi's last refresh gives", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	h.emit("agent_settled");
+	await h.idle(100_000);
+	// The request let go (a branch move): the period is Pi's from now; Pi refreshes at 271 s.
+	h.emit("session_tree");
+	await h.idle(170_000);
+	h.ctx.sessionManager.appendUsage("cache_warm", h.model.provider, h.model.id, h.usage());
+	await h.idle(29_000);
+	assert.equal(h.decide(), undefined, "handed over, Pi's cache alive: Pi decides");
+	writeStop(Date.now());
+	await h.idle(2000);
+	assert.deepEqual(h.decide(), { action: "stop" }, "stopped");
+	await h.idle(100_000);
+	assert.match(h.statuses.at(-1)?.text ?? "", /^cache warm/, "Pi's refresh at 271 s keeps it warm past 301 s");
+	assert.match(await h.command("cache-keeper"), /left by Pi's own warming/);
+	assert.equal(h.warms.length, 0);
+	assert.deepEqual(stopRecords(), [], "its warming had ended at the hand-over");
+});
+
+test("stop: a second stop stops again a window that had a message since the first", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE });
+	h.emit("agent_settled");
+	writeStop(Date.now());
+	await h.idle(10_000);
+	h.input();
+	h.run(true);
+	await h.idle(10_000);
+	assert.equal(stopRecords().length, 1);
+	writeStop(Date.now());
+	await h.idle(HOUR);
+	assert.equal(h.warms.length, 0, "stopped again");
+	assert.equal(stopRecords().length, 2);
+});
+
+test("stop: two sessions in one process: a message in one does not lift the stop in the other", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const a = harness({ lifetime: 300, cost: WITH_WRITE, session: "a" });
+	const b = harness({ lifetime: 300, cost: WITH_WRITE, session: "b", model: { id: "sub/other" } });
+	a.input();
+	b.input();
+	a.emit("agent_settled");
+	b.emit("agent_settled");
+	writeStop(Date.now());
+	mock.timers.tick(1000);
+	a.input();
+	a.run(true);
+	b.run(true);
+	await a.idle(0);
+	await b.idle(280_000);
+	assert.equal(a.warms.length, 1, "the session written to: warmed");
+	assert.equal(b.warms.length, 0, "the other: still stopped");
+});
+
+const commandText = async (h: ReturnType<typeof harness>) => h.command("cache-keeper-stop");
+const THEN = [
+	'Other windows: each reads the stop before it sends anything, and its footer says "warming stopped" within a second where it shows a countdown. How many there are can\'t be known from here, and a window that has not loaded this version (no /reload since the update) doesn\'t read it.',
+	"A refresh already on its way is not called back. A stop can't be taken back: a window warms again as usual after the answer to the next message you send it.",
+];
+const EXPIRY_LINE = "Compacting before the cache expires still runs where it is on (compactBeforeExpiry); it starts no warming again.";
+
+test("stop, the command: the record on disk, the same effects at once, the second line by the window's state, the last line only with compactBeforeExpiry on", async (t) => {
+	const label = dir.startsWith(homedir()) ? `~${dir.slice(homedir().length)}` : dir;
+	const first = `Warming is stopped in every Pi window that uses ${label}, until each window's next message.`;
+	// Idle, the extension keeping the period warm, after one refresh.
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	h.emit("agent_settled");
+	await h.idle(300_000);
+	assert.equal(h.warms.length, 1);
+	const text = await commandText(h);
+	const saidSoFar = h.said.length;
+	assert.ok(existsSync(STOP_FILE), "the record");
+	assert.equal(text, [first, "This window: the extension was keeping this idle period warm, and that has ended ($0.18 spent, a miss costs $2.07).", ...THEN].join("\n"));
+	assert.equal(h.said.at(-1)?.level, "info");
+	assert.equal(stopRecords().length, 1, "ended at once");
+	await h.idle(HOUR);
+	assert.equal(h.warms.length, 1, "nothing more leaves");
+	assert.equal(h.said.length, saidSoFar, "this window says nothing more of the stop: the command said it");
+	// Given again: already stopped, since the first.
+	const firstAt = Date.now() - HOUR;
+	assert.equal((await commandText(h)).split("\n")[1], `This window: already stopped, since ${hhmm(firstAt)}.`);
+
+	// Idle, Pi's own warming (keep-warm off), with compactBeforeExpiry on.
+	clock();
+	fresh({ keepWarmMinutes: 0, compactBeforeExpiry: true });
+	const off = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	off.emit("agent_settled");
+	assert.equal(await commandText(off), [first, "This window: the extension was not keeping anything warm; Pi's own warming is told to stop the next time it asks.", ...THEN, EXPIRY_LINE].join("\n"));
+	assert.deepEqual(off.decide(), { action: "stop" });
+
+	// In a run: the period it ends in is stopped.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const busy = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	busy.emit("agent_settled");
+	mock.timers.tick(1000);
+	let during = "";
+	busy.run(true, () => {
+		void commandText(busy).then((said) => (during = said));
+	});
+	await flush();
+	assert.equal(during.split("\n")[1], "This window: a run is going on; the idle period it ends in is stopped too, unless you send it a message first.");
+	await busy.idle(HOUR);
+	assert.equal(busy.warms.length, 0, "the period the run ended in is stopped");
+
+	// The directory can't be written: nothing is stopped, this window included.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const failing = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	failing.emit("agent_settled");
+	const saved = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = join(dir, "settings.json", "agent");
+	let failed: string;
+	try {
+		failed = await commandText(failing);
+	} finally {
+		process.env.PI_CODING_AGENT_DIR = saved;
+	}
+	assert.match(failed, /^pi-cache-keeper could not write .*cache-keeper-stop\.json: .+\. Nothing was stopped\.$/);
+	assert.equal(failing.said.at(-1)?.level, "error");
+	await failing.idle(280_000);
+	assert.equal(failing.warms.length, 1, "this window keeps warming");
+});
+
+test("stop, /cache-keeper-warm in a stopped window: the counts are cleared, its text says it does not lift the stop, and the window stays stopped, also for a model left to Pi", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true, respond: () => HALF_MISS });
+	await nextPeriod(h, true);
+	await nextPeriod(h);
+	assert.ok(misses()?.fallback.has(MODEL_KEY), "left to Pi after two misses");
+	mock.timers.tick(1000);
+	h.run(true);
+	writeStop(Date.now());
+	const [learnt, text] = (await h.command("cache-keeper-warm")).split("\n");
+	assert.match(learnt, /^Warming is stopped in this window until your next message/, "the window learns of the stop here, and says it first");
+	assert.match(text, /^pi-cache-keeper keeps cliproxyapi\/sub\/claude warm again/);
+	assert.ok(text.endsWith(" A /cache-keeper-stop holds in this window until your next message; this command does not lift it."), text);
+	assert.equal(misses()?.fallback.size, 0, "cleared");
+	const before = h.warms.length;
+	await h.idle(HOUR);
+	assert.equal(h.warms.length, before, "still stopped: nothing sent");
+	assert.deepEqual(h.decide(), { action: "stop" });
+});
+
+test("stop, after warming ended on a miss: /cache-keeper keeps its keep warm line, and says the stop below it", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true, respond: () => HALF_MISS });
+	h.emit("agent_settled");
+	await h.idle(300_000);
+	const before = await keepWarmLineOf(h);
+	assert.match(before ?? "", /keep-warm ended \(a refresh missed the cache\)/);
+	const given = writeStop(Date.now());
+	const shown = await h.command("cache-keeper");
+	assert.equal(shown.split("\n").find((l) => l.startsWith("keep warm:")), before, "unchanged");
+	assert.equal(
+		shown.split("\n").find((l) => l.startsWith("stopped:")),
+		`stopped: by /cache-keeper-stop at ${hhmm(given.at)}, until your next message: nothing is sent to keep this window's cache warm, and Pi's own warming is told to stop when it asks; this idle period's refreshes: $1.22 spent, a miss costs $2.07`,
+	);
+	// A period warming as usual: the rule alone, and the stopped line with compacting before expiry.
+	clock();
+	fresh({ compactBeforeExpiry: true });
+	const ok = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	ok.emit("agent_settled");
+	const at = writeStop(Date.now());
+	const lines = (await ok.command("cache-keeper")).split("\n");
+	assert.equal(lines.find((l) => l.startsWith("keep warm:")), RULE);
+	assert.equal(
+		lines.find((l) => l.startsWith("stopped:")),
+		`stopped: by /cache-keeper-stop at ${hhmm(at.at)}, until your next message: nothing is sent to keep this window's cache warm, and Pi's own warming is told to stop when it asks; compacting before expiry still runs; this idle period's refreshes: $0 spent, a miss costs $2.07`,
+	);
+});
+
+test("stop, an unreadable record: /cache-keeper says it, and the command writes a good one", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	h.emit("agent_settled");
+	writeFileSync(STOP_FILE, "{");
+	assert.match(await h.command("cache-keeper"), /\nstopped: the stop record \(.*cache-keeper-stop\.json\) can't be read: it is not JSON; the extension sends no refresh while that lasts, and \/cache-keeper-stop writes it again\n/);
+	await commandText(h);
+	assert.match(await h.command("cache-keeper"), /\nstopped: by \/cache-keeper-stop at /);
+});
+
+test("stop, its notice: said once in a window another stopped, with the period's amounts where the extension had taken it; not again after /reload nor for a later period; again for a second stop after a message; nothing without an interface", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	h.emit("agent_settled");
+	await h.idle(300_000);
+	const given = writeStop(Date.now());
+	await h.idle(2000);
+	const notice = (at: number, amounts?: string) => `Warming is stopped in this window until your next message: /cache-keeper-stop was given at ${hhmm(at)}.${amounts ? ` This idle period's refreshes: ${amounts}.` : ""}`;
+	const stopsSaid = () => h.said.filter((n) => n.text.startsWith("Warming is stopped in this window"));
+	assert.deepEqual(stopsSaid(), [{ text: notice(given.at, "$0.18 spent, a miss costs $2.07"), level: "info" }]);
+	// A later period that starts stopped (a run without a message), and /reload: nothing more.
+	mock.timers.tick(1000);
+	h.run(true);
+	reloadStopped(h, t);
+	await h.idle(10_000);
+	assert.equal(stopsSaid().length, 1);
+	// A message, then a second stop: said again.
+	h.input();
+	mock.timers.tick(1000);
+	h.run(true);
+	const second = writeStop(Date.now());
+	await h.idle(5000);
+	assert.equal(stopsSaid().length, 2);
+	// A period the extension did not take: without the amounts.
+	clock();
+	fresh({ keepWarmMinutes: 0, compactBeforeExpiry: false });
+	const pis = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	pis.emit("agent_settled");
+	const third = writeStop(Date.now());
+	pis.decide();
+	assert.deepEqual(pis.said.map((n) => n.text), [notice(third.at), `Told Pi's own idle warming to stop: /cache-keeper-stop (given at ${hhmm(third.at)}) holds until your next message (Pi would have refreshed)`]);
+	void second;
+	// No interface: nothing.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const quiet = harness({ lifetime: 300, cost: WITH_WRITE });
+	quiet.emit("agent_settled");
+	writeStop(Date.now());
+	await quiet.idle(5000);
+	assert.equal(quiet.said.length, 0);
+});
+
+test("stop, the footer: within a second in a window with a countdown; not during a run; after the summary before expiry it stands first; gone with the next message's answer", async (t) => {
+	online(t);
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ compactBeforeExpiry: true });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	h.emit("agent_settled");
+	await h.idle(10_000);
+	assert.match(h.statuses.at(-1)?.text ?? "", /keep-warm 2h until/);
+	writeStop(Date.now());
+	await h.idle(1000);
+	const line = h.statuses.at(-1)?.text ?? "";
+	assert.match(line, /^cache warm · 4m left · warming stopped until your next message · /);
+	assert.doesNotMatch(line, /keep-warm/);
+	// Compacting before expiry: the summary, then no countdown, and the stop stands first.
+	await h.idle(HOUR);
+	assert.equal(h.state.compacts, 1);
+	h.branch.push({ type: "compaction", id: "k", parentId: null, timestamp: new Date().toISOString(), summary: "s", firstKeptEntryId: "a", tokensBefore: 600_000 } as never);
+	h.emit("session_compact", { compactionEntry: { id: "k", summary: "s", tokensBefore: 600_000 }, fromExtension: true, reason: "manual" });
+	assert.match(h.statuses.at(-1)?.text ?? "", /^warming stopped until your next message · /);
+	// A run no message started: not during it, and again after it.
+	h.state.compacts = 0;
+	mock.timers.tick(1000);
+	let during = "";
+	h.run(true, () => (during = h.statuses.at(-1)?.text ?? ""));
+	assert.doesNotMatch(during, /warming stopped/);
+	assert.match(h.statuses.at(-1)?.text ?? "", /warming stopped until your next message/);
+	// The user's message and its answer: keep-warm's own note again.
+	mock.timers.tick(1000);
+	h.input();
+	h.run(true);
+	assert.doesNotMatch(h.statuses.at(-1)?.text ?? "", /warming stopped/);
+	assert.match(h.statuses.at(-1)?.text ?? "", /keep-warm 2h until/);
+
+	// Keep-warm off: the only thing the footer says about warming.
+	clock();
+	fresh({ keepWarmMinutes: 0, compactBeforeExpiry: false });
+	const off = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	off.emit("agent_settled");
+	writeStop(Date.now());
+	await off.idle(2000);
+	assert.match(off.statuses.at(-1)?.text ?? "", /^cache warm · 4m left · warming stopped until your next message · /);
+});
+
+// ------------------------------------------------------------------------------------------- what is logged is said
+
+/**
+ * Every `warm` record of the log, said: a refresh that was sent as its saved line (an entry kept in the session), every
+ * other one as a notice, in the order of the log; the notices that are no record's (a model left to Pi after two in a
+ * row, a stop's own) left out. Returns what was said.
+ */
+function loggedIsSaid(h: ReturnType<typeof harness>, label: string) {
+	const expected = traces()
+		.filter((r) => r.event === "warm")
+		.flatMap((r) => {
+			const notice = noticeOf(r, "2 h");
+			return notice ? [{ via: r.refresh === undefined ? "notice" : "entry", level: notice.level, text: notice.text }] : [];
+		});
+	const own = (text: string) => !/^Two refreshes in a row without a hit|^Warming is stopped in/.test(text);
+	assert.deepEqual(h.transcript.filter((l) => own(l.text)), expected, label);
+	return expected;
+}
+
+test("what is logged is said: in every flow, each warm record has its line, a refresh's kept as a saved entry, every other one a notice; without an interface nothing", async (t) => {
+	t.after(() => mock.timers.reset());
+	const flows: [string, Options, Record<string, unknown>, ((h: ReturnType<typeof harness>) => Promise<void> | void)?][] = [
+		["hits to the budget", {}, {}],
+		["the time limit", { lifetime: 3600 }, { keepWarmMinutes: 90 }],
+		["a miss", { respond: () => HALF_MISS }, {}],
+		["a refresh without usage", { respond: () => ({ usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 } }) }, {}],
+		["a failure", { respond: () => ({ stopReason: "error", errorMessage: "overloaded", usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 } }) }, {}],
+		["a failure after a hit", { respond: () => ({ stopReason: "error", errorMessage: "overloaded" }) }, {}],
+		[
+			"a cancellation after a hit",
+			{ hold: (n) => n === 1 },
+			{},
+			async (h) => {
+				await h.idle(277_000);
+				h.run(false);
+			},
+		],
+		[
+			"a cancellation before any usage",
+			{ hold: (n) => n === 1 },
+			{},
+			async (h) => {
+				await h.idle(277_000);
+				h.state.abortReports = false;
+				h.run(false);
+			},
+		],
+		[
+			"Pi busy at the refresh",
+			{},
+			{},
+			async (h) => {
+				await h.idle(270_000);
+				h.state.pending = true;
+				await h.idle(10_000);
+				h.state.pending = false;
+			},
+		],
+		[
+			"the request let go",
+			{},
+			{},
+			async (h) => {
+				await h.idle(300_000);
+				h.emit("session_tree");
+			},
+		],
+		[
+			"keep-warm switched off",
+			{},
+			{},
+			async (h) => {
+				await h.idle(300_000);
+				settings({ keepWarmMinutes: 0, minContextTokens: 100_000, compactBeforeExpiry: false });
+			},
+		],
+		[
+			"a stop record that can't be read",
+			{},
+			{},
+			async (h) => {
+				await h.idle(100_000);
+				writeFileSync(STOP_FILE, "{");
+			},
+		],
+		[
+			"Pi told to stop",
+			{},
+			{},
+			(h) => {
+				h.decide();
+			},
+		],
+	];
+	const kinds = new Set<string>();
+	for (const [label, options, keepWarm, act] of flows) {
+		for (const ui of [true, false]) {
+			clock();
+			fresh({ compactBeforeExpiry: false, ...keepWarm });
+			const h = harness({ lifetime: 300, cost: WITH_WRITE, ...options, ui });
+			h.emit("agent_settled");
+			await act?.(h);
+			await h.idle(3 * HOUR);
+			if (!ui) {
+				assert.deepEqual(h.transcript, [], `${label}: nothing without an interface`);
+				continue;
+			}
+			const said = loggedIsSaid(h, label);
+			assert.ok(said.length > 0, `${label}: something was said`);
+			for (const line of said) kinds.add(`${line.via} ${line.level}`);
+		}
+	}
+	assert.deepEqual([...kinds].sort(), ["entry info", "entry warning", "notice info", "notice warning"]);
+	// The words of the commonest line, the first refresh's and the second's, with the period's sum.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const h = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	h.emit("agent_settled");
+	await h.idle(560_000);
+	assert.deepEqual(h.entries.map((e) => e.data.text), [
+		"Cache warmed (pi-cache-keeper, refresh 1): 99% of 600k from the cache, $0.18; $0.18 spent, a miss costs $2.07",
+		"Cache warmed (pi-cache-keeper, refresh 2): 99% of 600k from the cache, $0.18; $0.36 spent, a miss costs $2.07",
+	]);
+	assert.deepEqual(h.entries.map((e) => e.customType), ["cache-keeper-refresh", "cache-keeper-refresh"]);
+	// Each line is on the branch as a custom entry after the answer, and Pi draws it with the extension's renderer.
+	assert.deepEqual(h.branch.filter((e) => e.type === "custom").length, 2);
+	const render = h.renderers.get("cache-keeper-refresh") as (entry: unknown, options: unknown, theme: unknown) => { render: (width: number) => string[] } | undefined;
+	const theme = { fg: (color: string, text: string) => `<${color}>${text}</>` };
+	assert.match(render({ data: h.entries[0].data }, { expanded: false }, theme)?.render(200).join("") ?? "", /<dim>Cache warmed \(pi-cache-keeper, refresh 1\)/);
+	assert.match(render({ data: { level: "warning", text: "x" } }, { expanded: false }, theme)?.render(200).join("") ?? "", /<warning>x<\/>/);
+	assert.equal(render({ data: {} }, { expanded: false }, theme), undefined);
+	// The second miss in a row: its own line, then the notice that the model is left to Pi.
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const two = harness({ lifetime: 300, cost: WITH_WRITE, ui: true, respond: () => HALF_MISS });
+	await nextPeriod(two, true);
+	await nextPeriod(two);
+	const last = two.transcript.slice(-2);
+	assert.deepEqual(last.map((l) => [l.via, l.level]), [["entry", "warning"], ["notice", "warning"]]);
+	assert.match(last[0].text, /^Keeping the cache warm read only 50% of 600k from the cache/);
+	assert.match(last[1].text, /^Two refreshes in a row without a hit/);
+});
+
+test("a session left to Pi from its start is said once: not after every answer; again after the reason changes and after a period the extension took; nothing with keep-warm off or without a label", async (t) => {
+	t.after(() => mock.timers.reset());
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const leftSaid = (h: ReturnType<typeof harness>) => h.said.filter((n) => n.text.startsWith("Keep-warm: this session is left to Pi's own warming"));
+	const h = harness({ lifetime: 30, cost: WITH_WRITE, ui: true });
+	h.emit("agent_settled");
+	for (let i = 0; i < 3; i++) {
+		mock.timers.tick(1000);
+		h.run(true);
+	}
+	assert.deepEqual(leftSaid(h), [{ level: "info", text: "Keep-warm: this session is left to Pi's own warming: the cache lifetime (30 s) is under a minute" }], "once");
+	// Another reason: said again; back to one the extension takes, then left again: said again.
+	const lifetime = (seconds: number) => ((h.model as unknown as { promptCache: unknown }).promptCache = { short: seconds, long: seconds });
+	lifetime(300);
+	mock.timers.tick(1000);
+	h.run("uncached");
+	assert.equal(leftSaid(h).length, 2);
+	assert.match(leftSaid(h)[1].text, /the last answer did not use the prompt cache$/);
+	mock.timers.tick(1000);
+	h.run(true);
+	assert.deepEqual(h.decide(), { action: "stop" }, "taken");
+	lifetime(30);
+	mock.timers.tick(1000);
+	h.run(true);
+	assert.equal(leftSaid(h).length, 3, "said again after a period the extension took");
+	// Keep-warm off: nothing. No answer that used the cache yet (no label): nothing.
+	clock();
+	fresh({ keepWarmMinutes: 0, compactBeforeExpiry: false });
+	const off = harness({ lifetime: 30, cost: WITH_WRITE, ui: true });
+	off.emit("agent_settled");
+	assert.equal(leftSaid(off).length, 0);
+	clock();
+	fresh({ compactBeforeExpiry: false });
+	const cold = harness({ lifetime: 300, cost: WITH_WRITE, ui: true });
+	// No answer on the branch yet (only the user's message).
+	cold.branch.pop();
+	cold.emit("session_start", { reason: "startup" });
+	assert.equal(leftSaid(cold).length, 0, "the footer has no label either");
+});
+
+// The review's probe: the stop is written while the refresh is being prepared; the last gate's reading sees it, and any
+// further read of the record fails (EIO). One reading decides at the gate, so nothing leaves either way.
+test("stop, the last gate: the one reading that sees a new stop decides; a failing read after it lets nothing out", async (t) => {
+	const fs = (await import("node:fs")).default;
+	const { syncBuiltinESMExports } = await import("node:module");
+	for (const failLater of [false, true]) {
+		clock();
+		t.after(() => mock.timers.reset());
+		fresh({ compactBeforeExpiry: false });
+		const h = harness({ lifetime: 300, cost: WITH_WRITE });
+		h.emit("agent_settled");
+		let armed = false;
+		let reads = 0;
+		const realRead = fs.readFileSync;
+		const recording = mock.method(fs, "readFileSync", function (this: unknown, path: unknown, ...args: unknown[]) {
+			if (armed && path === STOP_FILE && failLater && ++reads >= 2) throw Object.assign(new Error("fixture: intermittent read error"), { code: "EIO" });
+			return (realRead as (...a: unknown[]) => unknown).call(fs, path, ...args);
+		});
+		syncBuiltinESMExports();
+		try {
+			h.state.beforePayload = () => {
+				h.state.beforePayload = undefined;
+				writeStop(Date.now());
+				armed = true;
+			};
+			await h.idle(280_000);
+			assert.equal(h.warms.length, 0, `${failLater ? "a failing read after the gate's" : "readable"}: nothing left`);
+			assert.equal(stopRecords().length, 1, "the period obeyed the stop the gate read");
+		} finally {
+			recording.mock.restore();
+			syncBuiltinESMExports();
+		}
+	}
 });

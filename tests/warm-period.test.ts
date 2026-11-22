@@ -76,33 +76,45 @@ const PHASES: [string, WarmPhase][] = [
 ];
 const BOOLS = [false, true];
 
-test("who warms: every combination of taken, keep-warm on, two misses on the model, handed over, and the phase", () => {
+test("who warms: every combination of stopped, taken, keep-warm on, two misses on the model, handed over, and the phase", () => {
 	let rows = 0;
-	for (const taken of BOOLS)
-		for (const on of BOOLS)
-			for (const fellBack of BOOLS)
-				for (const handedOver of BOOLS)
-					for (const [phase, warm] of PHASES) {
-						// The table of the design: Pi where not taken, keep-warm off or two misses; then handed over; then ended.
-						const expected: Warmer = !taken || !on || fellBack ? "Pi" : handedOver ? "Pi, handed over" : phase === "ended" ? "nobody" : "the extension";
-						assert.equal(warmer({ taken, on, fellBack, handedOver, warm }), expected, JSON.stringify({ taken, on, fellBack, handedOver, phase }));
-						rows++;
-					}
-	assert.equal(rows, 48);
+	for (const stopped of BOOLS)
+		for (const taken of BOOLS)
+			for (const on of BOOLS)
+				for (const fellBack of BOOLS)
+					for (const handedOver of BOOLS)
+						for (const [phase, warm] of PHASES) {
+							// The table of the design: a stop first, whatever else holds; then Pi where not taken, keep-warm off or two
+							// misses; then handed over; then ended.
+							const expected: Warmer = stopped ? "nobody, stopped" : !taken || !on || fellBack ? "Pi" : handedOver ? "Pi, handed over" : phase === "ended" ? "nobody" : "the extension";
+							assert.equal(warmer({ stopped, taken, on, fellBack, handedOver, warm }), expected, JSON.stringify({ stopped, taken, on, fellBack, handedOver, phase }));
+							rows++;
+						}
+	assert.equal(rows, 96);
+});
+
+test("a stop ends warming from waiting and from out; from out a hit the refresh still reports counts for the cache, a miss does not", () => {
+	assert.deepEqual(end(WAITING, "stopped", "given at 14:02"), { phase: "ended", stop: "stopped", reason: "given at 14:02" });
+	const stopped = end(out(4, 275_000), "stopped", "given at 14:02");
+	assert.deepEqual(stopped, { phase: "ended", stop: "stopped", reason: "given at 14:02", out: { id: 4, sentAt: 275_000 } });
+	assert.deepEqual(settle(stopped, 4, { hit: true }), { state: stopped, hitSentAt: 275_000 });
+	assert.deepEqual(settle(stopped, 4, { hit: false, stop: "missed", reason: "x" }), { state: stopped });
 });
 
 test("evidence against, or the request let go: the extension's period ends and is handed over; one ended on its limit or as unable is handed over; the rest stays", () => {
-	const ended = (stop: "budget" | "limit" | "missed" | "failed" | "unable" | "unknown"): WarmPhase => ({ phase: "ended", stop, reason: stop });
+	const ended = (stop: "budget" | "limit" | "missed" | "failed" | "unable" | "unknown" | "stopped"): WarmPhase => ({ phase: "ended", stop, reason: stop });
 	assert.equal(onAgainst("the extension", WAITING), "end and hand over");
 	assert.equal(onAgainst("the extension", out(1)), "end and hand over");
 	for (const stop of ["limit", "unable"] as const) assert.equal(onAgainst("nobody", ended(stop)), "hand over", stop);
 	for (const stop of ["budget", "missed", "failed", "unknown"] as const) assert.equal(onAgainst("nobody", ended(stop)), "stays", stop);
-	for (const who of ["Pi", "Pi, handed over"] as const) for (const [, warm] of PHASES) assert.equal(onAgainst(who, warm), "stays", who);
+	for (const who of ["Pi", "Pi, handed over", "nobody, stopped"] as const) for (const [, warm] of PHASES) assert.equal(onAgainst(who, warm), "stays", who);
+	// A stopped period is never handed over to Pi, whatever its warming ended on.
+	for (const stop of ["limit", "unable", "stopped"] as const) assert.equal(onAgainst("nobody, stopped", ended(stop)), "stays", stop);
 });
 
-test("what Pi is told: stop while the extension warms or nobody does; after a hand-over only at or after goneBy; never while busy, never for Pi's own", () => {
+test("what Pi is told: stop while the extension warms or nobody does, a stopped period included; after a hand-over only at or after goneBy; never while busy, never for Pi's own", () => {
 	const S = 1000;
-	for (const who of ["the extension", "nobody", "Pi", "Pi, handed over"] as const)
+	for (const who of ["the extension", "nobody", "nobody, stopped", "Pi", "Pi, handed over"] as const)
 		for (const idle of BOOLS)
 			for (const goneBy of [undefined, 300 * S])
 				for (const now of [299 * S, 300 * S, 301 * S]) {

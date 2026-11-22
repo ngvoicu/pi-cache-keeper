@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { comparison, describeTrace, type TraceRecord, formatCacheStatus, formatRemaining, type CompactTrace, type TraceUsage } from "../trace.ts";
+import { comparison, describeTrace, noticeOf, stopLabel, SWITCHED_OFF, type TraceRecord, type WarmTrace, formatCacheStatus, formatRemaining, type CompactTrace, type TraceUsage } from "../trace.ts";
 
 const cached = (usage: Partial<TraceUsage>, piEstimate: CompactTrace["piEstimate"]): CompactTrace => ({
 	event: "compact",
@@ -95,4 +95,87 @@ test("the log says what keeping warm has spent and why it ended; records from be
 	assert.equal(describeTrace(old), `${time} cache expires in 20s: compacting 600k tokens`);
 	const oldMissed = JSON.parse('{"event":"warm","action":"missed","secondsLeft":180,"idleMinutes":57,"usage":{"input":0,"cacheRead":0,"cacheWrite":692000,"output":1,"cost":2.6},"at":"2026-11-19T10:00:00.000Z","session":"s"}');
 	assert.equal(describeTrace(oldMissed), `${time} keeping the cache warm missed the cache, idle 57 min: 0% of 692k from cache, 1 out, $2.6; stopped until your next message`);
+});
+
+test("a /cache-keeper-stop in the log: its label, the end of a period's warming, and Pi's warming told to stop, with a budget only where the period has one", () => {
+	assert.equal(stopLabel("stopped"), "stopped by /cache-keeper-stop");
+	const at = "2026-11-22T14:02:10.000Z";
+	const time = new Date(at).toLocaleTimeString([], { hourCycle: "h23", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+	const base = { event: "warm" as const, secondsLeft: 2400, at, session: "s", model: "anthropic/claude-sonnet-4-6" };
+	assert.equal(
+		describeTrace({ ...base, action: "skip", stop: "stopped", reason: "given at 14:02", budget: { unit: "usd", spent: 0.36, limit: 2.07 } } as TraceRecord),
+		`${time} cache expires in 2400s: keep-warm ended (stopped by /cache-keeper-stop), given at 14:02; $0.36 of $2.07 (one cache miss) spent`,
+	);
+	const reason = "/cache-keeper-stop (given at 14:02) holds until your next message (Pi would have refreshed)";
+	assert.equal(describeTrace({ ...base, secondsLeft: 0, action: "pi-stopped", reason } as TraceRecord), `${time} told Pi's own idle warming to stop: ${reason}`);
+});
+
+test("what each record says in the transcript: its words and level, with prices and without", () => {
+	const base = { event: "warm" as const, secondsLeft: 12 };
+	const usd = { unit: "usd" as const, spent: 0.36, limit: 2.07 };
+	const none = { unit: "refreshes" as const, spent: 3, limit: 10 };
+	const hit = { input: 2, cacheRead: 600_000, cacheWrite: 0, output: 1, cost: 0.18 };
+	const miss = { input: 0, cacheRead: 75_000, cacheWrite: 525_000, output: 1, cost: 2.25 };
+	const say = (record: Partial<WarmTrace>, limit = "2 h") => noticeOf({ ...base, action: "skip", ...record } as WarmTrace, limit);
+	const A = "$0.36 spent, a miss costs $2.07";
+	const warmed = `Cache warmed (pi-cache-keeper, refresh 2): 99% of 600k from the cache, $0.18; ${A}`;
+	// A refresh that was sent.
+	assert.deepEqual(say({ action: "warm", refresh: 2, verdict: "hit", usage: hit, budget: usd }), { level: "info", text: warmed });
+	assert.deepEqual(say({ action: "warm", refresh: 2, verdict: "hit", usage: { ...hit, cost: 0 }, budget: none }), { level: "info", text: "Cache warmed (pi-cache-keeper, refresh 2): 99% of 600k from the cache; 3 of 10 refreshes" });
+	assert.deepEqual(say({ action: "warm", refresh: 2, verdict: "hit", usage: hit, budget: usd, stop: "budget", reason: "r" }), { level: "info", text: `${warmed}. Keep-warm ended until your next message (budget reached).` });
+	assert.deepEqual(say({ action: "warm", refresh: 2, verdict: "hit", usage: hit, budget: usd, stop: "limit", reason: "r" }), { level: "info", text: `${warmed}. Keep-warm ended until your next message (2 h limit).` });
+	assert.deepEqual(say({ action: "warm", refresh: 2, verdict: "hit", usage: hit, budget: usd, stop: "unable", reason: "it wrote 5%", handedOver: "evidence" }), { level: "warning", text: `${warmed}. Keep-warm ended, and this idle period is left to Pi's own warming: it wrote 5%.` });
+	assert.deepEqual(say({ action: "missed", refresh: 2, verdict: "miss", usage: miss, budget: { ...usd, spent: 2.43 }, stop: "missed" }), {
+		level: "warning",
+		text: "Keeping the cache warm read only 12% of 600k from the cache, so it wrote the context again: $2.25; $2.43 spent, a miss costs $2.07. Stopped until your next message.",
+	});
+	assert.deepEqual(say({ action: "warm", refresh: 2, budget: usd, stop: "unknown" }), { level: "warning", text: `Keeping the cache warm: refresh 2 reported no usage, so what it cost is unknown; ${A}. Stopped until your next message.` });
+	assert.deepEqual(say({ action: "failed", refresh: 2, budget: usd, reason: "overloaded", stop: "failed" }), { level: "warning", text: `pi-cache-keeper could not keep the cache warm: overloaded; ${A}. Stopped until your next message.` });
+	assert.deepEqual(say({ action: "failed", refresh: 2, verdict: "miss", usage: miss, budget: usd, reason: "overloaded", stop: "missed" }), {
+		level: "warning",
+		text: `pi-cache-keeper could not keep the cache warm: overloaded; ${A}. Stopped until your next message. It had read only 12% of 600k from the cache: $2.25.`,
+	});
+	assert.deepEqual(say({ action: "failed", refresh: 2, verdict: "hit", usage: hit, budget: usd, reason: "overloaded" }), { level: "info", text: `${warmed}. The request then failed: overloaded` });
+	assert.deepEqual(say({ action: "cancelled", refresh: 2, verdict: "hit", usage: hit, budget: usd }), { level: "info", text: `${warmed}. It was then cancelled by a new request or a change of session.` });
+	assert.deepEqual(say({ action: "cancelled", refresh: 2, budget: usd }), { level: "info", text: `The cache refresh on its way (refresh 2) was cancelled by a new request or a change of session; it stays counted: ${A}` });
+	assert.deepEqual(say({ action: "cancelled", refresh: 2, verdict: "miss", usage: miss, budget: { ...usd, spent: 2.43 } }), {
+		level: "warning",
+		text: "The cache refresh on its way (refresh 2) was cancelled by a new request; it had read only 12% of 600k from the cache: $2.25; $2.43 spent, a miss costs $2.07",
+	});
+	// Due and not sent.
+	assert.deepEqual(say({ hold: "busy", reason: "r" }), { level: "info", text: "Cache refresh held back: Pi is busy or has queued messages; tried again until the last safe moment." });
+	assert.deepEqual(say({ hold: "settling", reason: "r" }), { level: "info", text: "Cache refresh held back: an earlier refresh of this model has not settled yet, and it may have missed the cache; tried again until the last safe moment." });
+	assert.deepEqual(say({ hold: "late", reason: "r" }), {
+		level: "warning",
+		text: "The cache was not refreshed: too late, less than half the warm lead was left before it expires (the computer slept, or Pi was busy until then). It expires in 12s.",
+	});
+	// Warming ends without a refresh.
+	assert.deepEqual(say({ stop: "budget", reason: "refreshing has cost $1.98", budget: usd }), { level: "info", text: `Keep-warm ended until your next message (budget reached): refreshing has cost $1.98; ${A}` });
+	assert.deepEqual(say({ stop: "limit", reason: "the cache lasts to the end of the 2 h limit after Pi went idle", budget: usd }), {
+		level: "info",
+		text: `Keep-warm ended until your next message (2 h limit): the cache lasts to the end of the 2 h limit after Pi went idle; ${A}`,
+	});
+	assert.deepEqual(say({ stop: "unable", reason: SWITCHED_OFF, budget: usd }), { level: "info", text: `Keep-warm ended for this idle period: keep-warm was turned off; ${A}` });
+	assert.deepEqual(say({ stop: "unable", reason: "the stop record could not be read", budget: usd }), { level: "warning", text: `Keep-warm ended until your next message (the request can't be re-sent): the stop record could not be read; ${A}` });
+	assert.deepEqual(say({ action: "failed", stop: "failed", reason: "no API key", budget: usd }), { level: "warning", text: `pi-cache-keeper could not keep the cache warm: no API key (nothing was sent); ${A}. Stopped until your next message.` });
+	// Who warms changes.
+	assert.deepEqual(say({ stop: "unable", reason: "the route changed", handedOver: "evidence", budget: usd }), { level: "warning", text: `Keep-warm ended, and this idle period is left to Pi's own warming: the route changed; ${A}` });
+	assert.deepEqual(say({ stop: "unable", reason: "you switched", handedOver: "let go", budget: usd }), { level: "info", text: `Keep-warm ended, and this idle period is left to Pi's own warming: you switched; ${A}` });
+	assert.deepEqual(say({ reason: "the route changed", handedOver: "evidence" }), { level: "warning", text: "This idle period is left to Pi's own warming from now: the route changed" });
+	assert.deepEqual(say({ reason: "you switched", handedOver: "let go" }), { level: "info", text: "This idle period is left to Pi's own warming from now: you switched" });
+	assert.deepEqual(say({ action: "left", reason: "the cache lifetime is unknown" }), { level: "info", text: "Keep-warm: this session is left to Pi's own warming: the cache lifetime is unknown" });
+	assert.deepEqual(say({ action: "pi-stopped", reason: "this extension keeps this idle period's cache warm (Pi would have refreshed)" }), {
+		level: "info",
+		text: "Told Pi's own idle warming to stop: this extension keeps this idle period's cache warm (Pi would have refreshed)",
+	});
+	// Nothing: a stop's end (the stop's own notice says it) and a bare skip.
+	assert.equal(say({ stop: "stopped", reason: "given at 14:02", budget: usd }), undefined);
+	assert.equal(say({ reason: "keep-warm ended: given at 14:02" }), undefined);
+});
+
+test("the log reads the two new records: a session left to Pi, and a period handed over after its warming had ended", () => {
+	const at = "2026-11-22T14:02:10.000Z";
+	const time = new Date(at).toLocaleTimeString([], { hourCycle: "h23", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+	assert.equal(describeTrace({ event: "warm", action: "left", reason: "the cache lifetime is unknown", secondsLeft: 0, at, session: "s" }), `${time} keep-warm: left to Pi's own warming, the cache lifetime is unknown`);
+	assert.equal(describeTrace({ event: "warm", action: "skip", handedOver: "evidence", reason: "the route changed", secondsLeft: 2400, at, session: "s" }), `${time} cache expires in 2400s: left to Pi's own warming from now, the route changed`);
 });

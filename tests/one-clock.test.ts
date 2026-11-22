@@ -77,3 +77,14 @@ test("the period's starting lifetime, kept for the log, is read in one place onl
 	assert.equal(count(index, ".logged"), 1);
 	assert.equal(count(body(index, "handTo"), ".logged"), 1);
 });
+
+test("a stop has one place each: only stop-record.ts names the record; index.ts compares a record once, inside obeyStop, makes a period stopped once, and samples the user's message once", () => {
+	for (const name of sources.filter((n) => n !== "stop-record.ts")) assert.equal(count(source(name), "cache-keeper-stop.json"), 0, `${name} names the record`);
+	const index = source("index.ts");
+	assert.equal(count(index, "covers("), 1);
+	assert.equal(count(body(index, "obeyStop"), "covers("), 1, "inside obeyStop");
+	assert.equal(count(index, ".stopped ="), 1);
+	assert.equal(count(body(index, "obeyStop"), ".stopped ="), 1, "inside obeyStop");
+	assert.equal(count(index, "noteMessage("), 1);
+	assert.equal(count(index, "writeStop("), 1, "the command");
+});
