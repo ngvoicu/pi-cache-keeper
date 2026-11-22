@@ -12,7 +12,7 @@
     "prompt-cache",
     "extension"
   ],
-  "author": "Gabriel Voicu <gabrielvoicujpi@gmail.com>",
+  "author": "Gabriel Voicu <office@providers.dev>",
   "contributors": [
     "Nico Bailon (original pi-cached-compaction, https://github.com/nicobailon/pi-cached-compaction)"
   ],
