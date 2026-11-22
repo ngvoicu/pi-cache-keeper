@@ -9,6 +9,7 @@ What it does:
 - **Compacts from the warm cache.** The summary request repeats your conversation as it is and reads about 99% of it from the cache, and the summary sees all the tool output. [Compacting from the cache](#compacting-from-the-cache), [what it costs](#what-it-costs).
 - **Compacts when the context is full,** at 90% of the model's window by default or at a token cap you set, while a summary still fits. [More](#compacting-when-the-context-is-full).
 - **Compacts just before the cache expires** when you step away, so your next message doesn't pay to write the whole session again. [More](#compacting-before-the-cache-expires).
+- **Compacts a cold cache with a model you pick.** When the cache can't be read, the summary would cost your session model's full input price; a cheaper model, or one on a login with spare quota, writes it instead. The same model steps in when your session's model refuses the summary or the conversation no longer fits it, and the session goes on with its own model (off until you pick one). [More](#compacting-a-cold-cache-with-another-model).
 - **Keeps the cache warm through a break,** for up to as long as you choose, and stops once refreshing has cost as much as one cache miss (off until you set it). [More](#keeping-the-cache-warm).
 - **Lets each session set its own compaction and keep-warm values** over the defaults, with `/cache-keeper-settings`. [More](#settings).
 - **Fills in model data from providers.dev:** one safe value per quantity (input window, output limit, cache lifetimes and prices), measured values first; values marked as Pi's own aren't written back. [More](#model-data-from-providersdev).
@@ -126,6 +127,8 @@ A part that fits again once a larger one has gone comes back, and room left over
 
 Each value shown that this session set for itself is marked `(this session)` (`when full: at 80% (this session): …`, `keep warm (this session): …`, `before expiry: on, from 200k tokens of context (this session)`); a value that comes from the defaults is not. The `settings` line lists those values beside the defaults they replace; without any, it reads `settings: the defaults (this session has none of its own)`.
 
+The `cold compaction` line names the [cold compaction model](#compacting-a-cold-cache-with-another-model) with the same three parts as its list in the menu (`cold compaction: google/gemini-2.5-flash (this session) · 1M window · $0.30 in, $2.50 out per M · holds this session`), `not available now` for a pick Pi can't use now, or `off: when the cache can't be read, Pi's compaction writes the summary on this session's model`. Where the next compaction couldn't be read from the cache, the `next compaction` line says whether the picked model would write it (`google/gemini-2.5-flash, because the prompt cache has expired`) or why not (`Pi's compaction, because …; google/gemini-2.5-flash can't: …`).
+
 The `model data` line names the providers.dev entry that describes the model and what it gave. When a guess is in use it says which values are the smaller of the login's and the API key's, and which were not used; when another kind of credential answered, it gives that one's values too.
 
 **`/cache-keeper-settings`**:
@@ -141,16 +144,17 @@ The figures on this page are the extension's own output, from a run of the curre
 Settings come in two layers:
 
 - **The defaults**, for every session: the `cacheKeeper` key in `~/.pi/agent/settings.json`. A session that sets nothing of its own uses them, exactly as before 0.8.0. You can also edit that key by hand. When there is no `cacheKeeper` key, the `cachedCompaction` key of pi-cached-compaction is read instead, unchanged. Project settings files don't apply to it, and an unknown key is an error.
-- **A session's own values**, for that session only: `compactAtPercent`, `compactAtTokens`, `compactBeforeExpiry`, `minContextTokens` and `keepWarmMinutes`. Each value a session sets wins there; every other setting follows the defaults, also a default changed later. They are saved in the session itself, as a `cache-keeper-settings` entry (never sent to the model, and never written to `settings.json`), so they hold when you resume the session, and in a fork or clone made after them. The latest such entry on the branch you are on decides: `/tree` to a point before the change, or `/fork` from a message before it, gives the values in force there. In a new session they are saved with its first answer, when Pi writes the session's file.
+- **A session's own values**, for that session only: `compactAtPercent`, `compactAtTokens`, `coldCompactionModel`, `compactBeforeExpiry`, `minContextTokens` and `keepWarmMinutes`. Each value a session sets wins there; every other setting follows the defaults, also a default changed later. They are saved in the session itself, as a `cache-keeper-settings` entry (never sent to the model, and never written to `settings.json`), so they hold when you resume the session, and in a fork or clone made after them. The latest such entry on the branch you are on decides: `/tree` to a point before the change, or `/fork` from a message before it, gives the values in force there. In a new session they are saved with its first answer, when Pi writes the session's file.
 
 `cacheRetention` and `modelData` are the same for every session, and a session can't set them: the retention works through `PI_CACHE_RETENTION`, which holds for the whole Pi process, and the model data is written into Pi's `models.json`, which every session reads. The menu marks them `all sessions`.
 
-Run `/cache-keeper-settings` to change them in a menu. It opens on **this session**: each warming and compaction row shows its value and whether it is the session's own (`4 h · this session`) or the default (`2 h · default`); Enter steps through the values, the `default` one dropping the session's own value for that row. "Back to the defaults" drops all of them at once. The session's own values apply right away and are saved in the session when the menu closes. Enter on the first row, "Editing", switches to the **defaults for all sessions**: there, changes are saved to `cacheKeeper` in `~/.pi/agent/settings.json` and apply right away, in this session wherever it has no value of its own. Outside the TUI the command lists both layers: each value with `[default]` or `[this session; default …]`.
+Run `/cache-keeper-settings` to change them in a menu. It opens on **this session**: each warming and compaction row shows its value and whether it is the session's own (`4 h · this session`) or the default (`2 h · default`); Enter steps through the values, the `default` one dropping the session's own value for that row; on "Compact a cold cache with" it opens the list of models instead, whose first line, `default (…)`, drops it. "Back to the defaults" drops all of them at once. The session's own values apply right away and are saved in the session when the menu closes. Enter on the first row, "Editing", switches to the **defaults for all sessions**: there, changes are saved to `cacheKeeper` in `~/.pi/agent/settings.json` and apply right away, in this session wherever it has no value of its own. Outside the TUI the command lists both layers: each value with `[default]` or `[this session; default …]`.
 
 | Setting | Menu | Default | Per session | What it does |
 |---|---|---|---|---|
 | `compactAtPercent` | Compact when the context is | `90` | yes | after a turn, compact once the context fills this share of the model's window; `0` turns it off |
 | `compactAtTokens` | Or once it holds | `0` | yes | also compact once the context holds this many tokens, on any model, whichever comes first; `0` turns it off |
+| `coldCompactionModel` | Compact a cold cache with | `""` | yes | this model (`"provider/modelId"`) writes the summary when the cache is cold, when the session's model refuses it, or when the conversation doesn't fit the session's model, also with every other setting here off; `""` turns it off ([more](#compacting-a-cold-cache-with-another-model)) |
 | `compactBeforeExpiry` | Compact before the cache expires | `true` | yes | compact 20 s before the cache expires, when idle |
 | `minContextTokens` | Before expiry, only from | `140000` | yes | the smallest context compacted before the cache expires; keeping the cache warm doesn't use it |
 | `keepWarmMinutes` | Keep the cache warm when idle | `0` | yes | keep the cache warm up to this many minutes after Pi goes idle (up to 1440; the menu offers 30 min, 1, 2, 3, 4, 6, 8, 12 and 24 h); it stops once refreshing has cost as much as one cache miss, and while it is on the extension is the only warmer of an idle cache it can refresh; `0` turns it off |
@@ -181,6 +185,7 @@ The defaults are read as they are saved now: `settings.json` is read at every de
 | Change a setting for every session | `/cache-keeper-settings`, Enter on "Editing" (defaults for all sessions), then the row |
 | Put this session back on the defaults | `/cache-keeper-settings`, then "Back to the defaults" |
 | See which settings this session set itself | `/cache-keeper`: the values marked `(this session)` and the `settings` line |
+| Have a cheaper model write the summary when the cache is cold | `/cache-keeper-settings`, then "Compact a cold cache with" (see [Compacting a cold cache with another model](#compacting-a-cold-cache-with-another-model)) |
 | Compact earlier or later on big models | change "Compact when the context is" (`compactAtPercent`) |
 | Keep the context under a fixed size on every model | set "Or once it holds" (`compactAtTokens`) |
 | Stop compacting before the cache expires | `"compactBeforeExpiry": false` in [Settings](#settings) |
@@ -218,7 +223,56 @@ The provider reads nearly all of it from the cache at about a tenth of the input
 | Cache lifetime | Pi's default (5 minutes on Anthropic) | 1 hour in interactive sessions, which Anthropic bills at 2× per write instead of 1.25× ([why](#compacting-before-the-cache-expires)) |
 | What you see | the summary | the summary, a card comparing the cost with Pi's compaction, and a cache countdown in the footer |
 
-Before sending, the extension checks that the request repeats your last one byte for byte up to the new part. When it can't prove that, Pi's own compaction runs as usual. (Claude through pi-claude-bridge is checked by the bridge instead; see [Providers](#providers).) [How it works](#how-it-works) has the details.
+Before sending, the extension checks that the request repeats your last one byte for byte up to the new part. When it can't prove that, Pi's own compaction runs as usual, or the [cold compaction model](#compacting-a-cold-cache-with-another-model) where you picked one. (Claude through pi-claude-bridge is checked by the bridge instead; see [Providers](#providers).) [How it works](#how-it-works) has the details.
+
+## Compacting a cold cache with another model
+
+**What it does.** The cached path writes the summary when it can. When it can't, a model you pick writes it, with Pi's own summarizer. When the picked model can't either, Pi's own compaction runs exactly as before. That one rule covers three cases, with one picked model for all of them: the cache is cold, your session's model refuses the summary, and the conversation no longer fits your session's model.
+
+The summary is Pi's own summary, written by the picked model: Pi's prompt and checkpoint format, its window of recent messages kept word for word, the previous summary updated, the file lists carried forward. The picked model gets no thinking, or its lowest level where it can't turn thinking off. The request goes to that model directly, beside the session: your session's model and thinking level are not touched, and the session goes on with its own model. One difference from the cached path: the picked model sees what Pi's compaction sees, tool results cut to their first 2,000 characters, not the whole conversation the cached path reads from the cache.
+
+It needs no other setting of the extension switched on. With compacting when full, compacting before expiry, keep-warm and the model data all off, Pi's own compactions still pass through the extension: a threshold compaction, an overflow recovery and a `/compact` that can't be read from the cache are written by the picked model. That is where it matters most, because compacting before expiry is what normally keeps a compaction from meeting a cold cache: with it off, or under `minContextTokens`, a session you left alone is compacted cold. Two things follow when those settings are off:
+
+- **With compacting when full off, Pi's threshold compaction rarely fits the cached path, warm or cold.** With Pi's default settings it starts when under `reserveTokens` (16,384) of the window are left, and a cached summary needs 16k of room beside the whole conversation. So it falls back with "only … tokens of the context window are left for the summary", and the picked model writes those summaries too, in the middle of a run with a warm cache.
+- **With the model data off, fewer models have a known cache lifetime,** so more of them are a cache of unknown lifetime (below), where the cached path is tried.
+
+Pick the model in `/cache-keeper-settings`, on the row "Compact a cold cache with" (the `coldCompactionModel` setting, `"provider/modelId"`). Enter opens a list of the models Pi has credentials for, which you can search by typing. Each line shows the model's window, its price at this session's size (or `subscription` for a subscription login, `no price` without prices), and whether it can hold this session now (`holds this session`, `too small now (needs about 150k)`, `can't be used: it declares no context window`). The ones that hold this session come first, then by price. That last part is measured when the list opens, on the context as it stands: an upper bound, since a compaction sends only the part before the messages it keeps. The line is advice: a model you picked stays picked, and the fit is checked again at each compaction. Like the other compaction settings it has a default and a value per session, so a session can turn it off for itself (`off · this session`).
+
+### When it applies
+
+- **The cache is cold.** It has expired, was never written, or belongs to the model you switched away from. The picked model writes the summary, at its own price instead of your session model's full input price.
+- **Your session's model refuses the summary.** Its quota is used up, it is rate-limited, or the request for the summary fails for another reason. The picked model writes it instead, so the session is compacted all the same.
+- **The conversation no longer fits your session's model.** You switched to a model with a smaller window, or the context outgrew the window. If the picked model's window holds the text, it writes the summary.
+
+While the cache is warm and your session's model can write the summary from it, nothing changes. And whenever the picked model can't write it, Pi's own compaction runs as before.
+
+| What started the compaction | Picked model |
+|---|---|
+| `/compact` | yes |
+| Pi's automatic compaction at its threshold | yes |
+| Pi's overflow recovery | yes; the turn is retried after it, as before |
+| Compacting when full | yes |
+| Compacting before expiry | never: it runs only while the cache is warm, and is cancelled when the cached path can't write the summary |
+
+**The rest of the fallbacks go the same way.** On a warm cache the cached path can also fall back where your session's model could still write the summary through Pi's compaction at full price: the request's API isn't supported, the conversation changed since the last request, the request no longer repeats the last one, no kept message has text to quote, or the cached summary hit the output limit, was a tool call or came back empty. The picked model writes those summaries too: nothing is read from the cache either way.
+
+**A cache of unknown lifetime** (a model with no countdown in the footer) is not counted as cold. Nothing says it is gone, so the cached path is tried as before, and the picked model writes the summary only if that path falls back. When such a cache was in fact gone, the summary request pays your session model's full price, as before. A model whose answers report no cache use at all is different: that cache is cold.
+
+### When it falls back
+
+In each of these cases Pi's own compaction runs as before, on your session's model, and the card and the log say which case it was:
+
+- The picked model is a virtual model, or Claude through pi-claude-bridge (a request there is a Claude Code query, with tools). Neither is offered in the list.
+- It is the session's own model, Pi no longer lists it, or Pi has no credentials for its provider. A pick Pi can't use now is kept, and shown as `not available now`: it works again when the model does.
+- It declares no context window. It is not tried: a local server that silently cuts the request would return a summary of the last part only. Declare a window in `models.json`.
+- The conversation and the summary don't fit it. The need is the text Pi's summarizer sends (the messages as text with tool results cut to 2,000 characters, the previous summary, your `/compact` instructions and Pi's prompt; the larger of the two requests for a turn that was split), counted high at 3 characters per token, since no request has been sent to that model to measure its tokenizer. The model fits when that leaves room for a summary of at least 16k tokens, or of its whole output limit where that is smaller. Because the text is cut down, a session far larger than a model's window often fits: 600k tokens of context can be 150k tokens of text.
+- Its request fails (a provider error, a rejected login, an overflow after all, a dropped stream), the summary hits the output limit, the model calls a tool, or it returns no text. There is one attempt, no retry.
+
+**An abort** (Escape during the compaction), before or during the picked model's request, cancels the compaction as an aborted one is cancelled today: nothing more is sent, and Pi's own compaction is not started behind your back.
+
+**Nothing is lost.** The extension hands Pi either a complete compaction with Pi's own cut point and token count, or nothing, and then Pi's compaction runs; it cancels only for your abort. Pi writes the entry itself, and a compaction removes nothing from the session file. An overflow recovery gets either summary, and retries the turn after either.
+
+**Where your conversation goes.** With a cold compaction model set, the part of the conversation being summarized is sent to that model's provider: your messages, the assistant's answers, the tool calls and the first 2,000 characters of each tool result, the previous summary, and any `/compact` instructions. That is the same text Pi's own compaction sends, but to another provider than the one your session talks to, under that provider's terms and with the credentials Pi holds for it. It is off by default, nothing is sent this way until you pick a model, and you can turn it off for one session only. The summary is then as good as the model you picked.
 
 ## The compaction card and the log
 
@@ -229,6 +283,21 @@ Before sending, the extension checks that the request repeats your last one byte
 **When the cache can't be used,** the card says why and what Pi's compaction did instead. Expand it with ctrl+o to see what the decision rested on:
 
 ![The expanded card: "13:48:54 /compact: Pi's compaction, request field "reasoning" differs. cache: lifetime 30 min (OpenAI's minimum), 30 min left. last request: 4 s ago, 20 messages, 2k prompt tokens, 1 new since. request: thinking low, shared 12h prefix. last request had: {"effort":"high","summary":"auto"}. summary request had: {"effort":"low","summary":"auto"}. 13:48:59 Pi's compaction saved: 0% of 923 from cache, 384 out, $0.0003, summary 1243 chars. log: ~/.pi/agent/cache-keeper.jsonl"](media/card-fallback.png)
+
+**When the picked model wrote the summary** ([Compacting a cold cache with another model](#compacting-a-cold-cache-with-another-model)), the card's header reads `cold compaction`, and the line is not in the warning colour: nothing went wrong.
+
+```text
+13:48:54 /compact: summary by google/gemini-2.5-flash, the prompt cache has expired: 148k in, 3k out, $0.052, 12.3s, summary 5120 chars
+         vs anthropic/claude-opus-4-5: 94% less, $0.052 instead of ~$0.82 for the same request
+13:48:54   saved, 412k tokens summarized
+```
+
+The first line names the model, why the cached path couldn't write the summary, and the request's cost: `on a subscription` for a subscription login, `no price` for a model without prices. The second line appears only when both models have prices: the same request priced at your session's model, marked `~` because the two tokenizers differ. Expanded, the card adds `cold model: google/gemini-2.5-flash (API key), thinking off, about 148k tokens of a 1M window, 1 request`. When the picked model couldn't write it, the line says why, in the warning colour as any fallback:
+
+```text
+13:48:54 /compact: Pi's compaction, the prompt cache has expired; google/gemini-2.5-flash did not write the summary: it needs about 260k tokens and its window is 200k
+13:48:59   Pi's compaction saved: 0% of 231k from cache, 2k out, $1.2, summary 4870 chars
+```
 
 **The log.** Every decision is also appended to `~/.pi/agent/cache-keeper.jsonl`, which moves to `.1` past 5 MB: compactions, compacting when full or before expiry (or why not), cache refreshes, and model data fetches. Each compaction line records what triggered it, the path it took and why, the request settings, the provider's cache usage, the estimate for Pi's compaction, and the timing. When the request didn't match, it includes up to 200 characters of each version around the first difference. The log stays on your machine.
 
@@ -527,7 +596,7 @@ Where the two cost about the same, the difference is in what the summary was wri
 3. The instruction can quote where the kept messages start (below).
 4. The rebuilt request is identical to the last one up to the new part. This runs on the exact request Pi would send, using Pi's own serializer, so a different thinking level (on most models), an edited message, or a field another extension changed all count. Nothing is sent when it fails.
 
-If any check fails, Pi's own compaction runs. When compacting before expiry, nothing runs and the cache cools.
+If any check fails, the [cold compaction model](#compacting-a-cold-cache-with-another-model) writes the summary where one is set and can, and otherwise Pi's own compaction runs. When compacting before expiry, nothing runs and the cache cools.
 
 **Where the summary stops.** Pi keeps about the last 20k tokens of messages (its `keepRecentTokens` setting) word for word after the summary. The extension uses Pi's own cut point, so the summary has to stop where those messages begin. But the model reads the kept messages too, since they're part of the cached conversation:
 
@@ -564,6 +633,14 @@ The extension is built and checked for Pi with this extension and a provider ext
 - A run another extension starts with a custom message does not end a stop, so a window that only such runs keep busy stays unwarmed until you send it a message.
 - A stop can, rarely, be undone in part. If Pi's own warming comes due while a `/reload` is loading the extensions, it sends a refresh, and one at each due time while a slow extension keeps the loading going. And if a message of yours has not brought an answer yet (another extension handled it, or its run sent nothing), `/reload`, `/new`, `/resume` or `/fork` lifts the stop before the next answer.
 - A refresh that settles while a `/reload` is under way, or after `/new`, `/resume` or `/fork` replaced its session, may leave no saved line in the session. The log (`cache-keeper.jsonl`) keeps its record.
+- The cold compaction model writes compactions only: `/tree` branch summaries still use the session's model.
+- Virtual models and Claude through pi-claude-bridge can't be picked as the cold compaction model.
+- A model that declares no context window can't be used as the cold compaction model; declare one in `models.json`.
+- The cold compaction model gets one attempt: a request that fails is not retried, and Pi's own compaction follows.
+- The cold compaction model sees what Pi's compaction sees, tool results cut to 2,000 characters, not the whole conversation the cached path reads from the cache.
+- The footer says nothing about the cold compaction model; `/cache-keeper` does.
+- A summary your session's model refuses is not told from any other failed summary request: the card shows the provider's words, not "quota".
+- When Pi's own compaction fails for size and no cold compaction model is set, nothing suggests picking one.
 
 ## Origins and credit
 
