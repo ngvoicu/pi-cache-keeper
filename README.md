@@ -121,7 +121,7 @@ A part that fits again once a larger one has gone comes back, and room left over
 
 ![The output of /cache-keeper: "pi-cache-keeper · anthropic/claude-opus-5-5. cache: 59m left (lifetime 60 min, declared by the model). next compaction: cached path; last request 4 s ago with 185 messages, 1 since. The request prefix is checked when it runs. when full: at 90%: 900k of 1000k on anthropic/claude-opus-5-5, leaving 96k for the summary. keep warm (this session): up to 4 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; so far $0 spent, a miss costs $2.36. before expiry: on, from 140k tokens of context · retention long. model data: claude-subscription/claude-opus-5-5: window 1,000,000, short cache 1 h, long cache 1 h (https://providers.dev, checked 180 min ago; /cache-keeper-refresh fetches it again). settings: this session's own: keepWarmMinutes 4 h (default 2 h); every other follows the defaults · /cache-keeper-settings. log: ~/.pi/agent/cache-keeper.jsonl. This session: 15:05:52 compact when full: cached, 99% of 904k from cache, 5k out, 41.6s, summary 9840 chars. vs Pi's compaction: 75% less, $0.59 instead of ~$2.4 (it sends ~451k tokens, none from cache). 15:06:34 saved, 903k tokens summarized. 16:36:52 kept the cache warm, idle 57 min: 99% of 411k from cache, 1 out, $0.21; $0.21 of $2.36 (one cache miss) spent."](media/status-command.png)
 
-A line whose value this session set for itself says `(this session)`, and the `settings` line lists those values beside the defaults they replace; without any, it reads `settings: the defaults (this session has none of its own)`.
+Each value shown that this session set for itself is marked `(this session)` (`when full: at 80% (this session): …`, `keep warm (this session): …`, `before expiry: on, from 200k tokens of context (this session)`); a value that comes from the defaults is not. The `settings` line lists those values beside the defaults they replace; without any, it reads `settings: the defaults (this session has none of its own)`.
 
 The `model data` line names the providers.dev entry that describes the model and what it gave. When a guess is in use it says which values are the smaller of the login's and the API key's, and which were not used; when another kind of credential answered, it gives that one's values too.
 
@@ -162,7 +162,9 @@ Run `/cache-keeper-settings` to change them in a menu. It opens on **this sessio
 }
 ```
 
-A session's own `keepWarmMinutes` works as the default does: each idle period of that session is kept warm for up to its value, under the same rules (who warms a period, the budget, stopping), and `/cache-keeper-stop` still stops every window. Changed during an idle period, it takes effect as a change of the default would: switched off, warming ends for the period; switched on, from your next message.
+A session's own `keepWarmMinutes` works as the default does: each idle period of that session is kept warm for up to its value, under the same rules (who warms a period, the budget, stopping), and `/cache-keeper-stop` still stops every window. Changed during an idle period, it takes effect as a change of the default would: switched off, warming ends for the period; switched on, from your next message; shortened, no refresh goes out past the new limit, also one already being prepared.
+
+The defaults are read as they are saved now: when `settings.json` changes (from the menu in another window, or by hand), every session that has no value of its own for a setting follows the new default at its next decision, and its menu and `/cache-keeper` show it.
 
 ## Common tasks
 
@@ -175,7 +177,7 @@ A session's own `keepWarmMinutes` works as the default does: each idle period of
 | Compact one big session earlier than the others | `/cache-keeper-settings`, then "Compact when the context is" (or "Or once it holds") to a value marked `this session` |
 | Change a setting for every session | `/cache-keeper-settings`, Enter on "Editing" (defaults for all sessions), then the row |
 | Put this session back on the defaults | `/cache-keeper-settings`, then "Back to the defaults" |
-| See which settings this session set itself | `/cache-keeper`: the lines marked `(this session)` and the `settings` line |
+| See which settings this session set itself | `/cache-keeper`: the values marked `(this session)` and the `settings` line |
 | Compact earlier or later on big models | change "Compact when the context is" (`compactAtPercent`) |
 | Keep the context under a fixed size on every model | set "Or once it holds" (`compactAtTokens`) |
 | Stop compacting before the cache expires | `"compactBeforeExpiry": false` in [Settings](#settings) |
