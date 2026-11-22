@@ -262,13 +262,40 @@ It differs from Pi's own compaction in the model, the thinking level and the mis
 
 The footer does not change in this version.
 
-## 6. The privacy note for the README
+## 6. The README, with its privacy note
 
-To go into the new README section, and in one sentence into the menu row's description:
+The README is part of 0.10.0: the release is not done without it. It gets five things, and the CHANGELOG its entry.
+
+**1. A bullet in the opening "What it does:" list**, after "Compacts just before the cache expires", with its link:
+
+> - **Compacts a cold cache with a model you pick.** When the cache can't be read, the summary would cost your session model's full input price; a cheaper model, or one on a login with spare quota, writes it instead, and the session goes on with its own model (off until you pick one). [More](#compacting-a-cold-cache-with-another-model).
+
+That list is being brought up to date for 0.8.0 and 0.9.0 by other work. The bullet is added to the list as that work leaves it, in its wording and order, not to the list as it stands in 0.9.0.
+
+**2. Its own section, "Compacting a cold cache with another model"**, after "Compacting from the cache". Four parts, in this order:
+
+- **What it does:** the rule of section 0, and what the summary is (section 4): Pi's own summary, written by the picked model, with no thinking or its lowest level; the session's model and thinking level untouched. One comparison with the cached path: the cold model sees what Pi's compaction sees, tool results cut to 2,000 characters, not the whole conversation.
+- **When it applies:** the table of triggers and the three groups of reasons of section 2, and the unknown lifetime.
+- **When it falls back:** the cases of section 3, each ending in Pi's own compaction, the abort, and that nothing is lost.
+- **The privacy note,** as worded here:
 
 > **Where your conversation goes.** With a cold compaction model set, the part of the conversation being summarized is sent to that model's provider: your messages, the assistant's answers, the tool calls and the first 2,000 characters of each tool result, the previous summary, and any `/compact` instructions. That is the same text Pi's own compaction sends, but to another provider than the one your session talks to, under that provider's terms and with the credentials Pi holds for it. It is off by default, nothing is sent this way until you pick a model, and you can turn it off for one session only. The summary is then as good as the model you picked.
 
-The README also gains: the row in the Settings table (`coldCompactionModel`, per session: yes), a short section "Compacting a cold cache with another model" after "Compacting from the cache" (the rule, when it applies, when it can't, what the summary sees compared with the cached path), the card's new lines in "The compaction card and the log", the `/cache-keeper` line, and in "Limitations" the items of section 9.
+The menu row's description carries the note's first sentence.
+
+**3. The row in the Settings table:**
+
+| Setting | Menu | Default | Per session | What it does |
+|---|---|---|---|---|
+| `coldCompactionModel` | Compact a cold cache with | `""` | yes | when the cache can't be read, this model (`"provider/modelId"`) writes the summary instead of the session's own; `""` turns it off |
+
+The paragraph above the table that names the session's own values gains `coldCompactionModel`.
+
+**4. What is shown:** the card's new lines in "The compaction card and the log" (section 5), and the `cold compaction:` line under `/cache-keeper` in "Commands".
+
+**5. "Limitations":** the items of section 9.
+
+**The CHANGELOG entry**, under `## [0.10.0]`, `### Added`: one item, "A cold compaction model", saying the rule, the setting and its two layers, when it falls back, where the conversation goes, and that going back to 0.9.0 needs the key removed from `settings.json` (section 1).
 
 ## 7. Tests
 
@@ -321,7 +348,7 @@ Version **0.10.0**. Each step leaves `npm run check` green.
 4. **`index.ts`, the handler:** `fallBack` hands over to the cold model for every trigger but `expiry`; the call of Pi's `compact()`; the record. Tests 9 to 19.
 5. **`index.ts`, what is shown:** the menu row and its list, `/cache-keeper`, the non-TUI listing, the entry renderer, the card's header and colour. Tests 7, 8.
 6. **Pi's runtime:** tests 21, 22.
-7. **README and CHANGELOG** (section 6; under `## [0.10.0]`, `### Added`, with the note on going back to 0.9.0), and `package.json` to `0.10.0`.
+7. **README and CHANGELOG,** part of the release (section 6): the bullet in the opening "What it does:" list with its link, built on that list as updated for 0.8.0 and 0.9.0; the section "Compacting a cold cache with another model" (what it does, when it applies, when it falls back, the privacy note); the Settings table row; the card and `/cache-keeper` lines; the limitations; and the CHANGELOG entry under `## [0.10.0]`. `package.json` to `0.10.0`.
 
 One check belongs to the build: Pi's `compact()` has the signature used here in Pi 1.5.2 and 1.6.0. The package claims Pi from 0.87.0; run the flow tests on the oldest Pi the package is tested with, and raise the peer range if `compact()` there takes no transport.
 
