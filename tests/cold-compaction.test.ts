@@ -5,15 +5,20 @@ import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-a
 import {
 	COLD_PROMPT_TOKENS,
 	coldChoiceLabel,
+	coldChoiceParts,
 	coldFit,
+	coldModelFit,
 	coldNeedTokens,
+	coldRowLines,
 	coldRequestTokens,
 	coldTextTokens,
 	coldUnusable,
 	fitColdLine,
 	formatModelRef,
 	orderColdChoices,
+	OUTPUT_TOO_SMALL,
 	parseModelRef,
+	shortenModelRef,
 	type ColdChoice,
 } from "../cold-compaction.ts";
 
@@ -147,13 +152,14 @@ test("review 3: the README's privacy note names the shell output sent in full an
 	assert.match(note, /on Pi before 1\.2, the assistant's thinking/);
 });
 
-// Finding 10 (review, round 1): a line too wide for the terminal keeps the end of a model id that doesn't fit.
-test("review 10: fitting a menu line keeps the end of a long model id, and cuts the rest of a line whose id fits", () => {
+// Finding 10 (review, round 1), and 3 (round 2): a line too wide for the terminal shortens a model id that doesn't fit in
+// the middle, keeping the provider, the start of the id and its end.
+test("review 10: fitting a menu line shortens a long model id in the middle, and cuts the rest of a line whose id fits", () => {
 	const a = "amazon-bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0";
 	const b = "amazon-bedrock/anthropic.claude-sonnet-4-6";
 	const line = (ref: string) => `${ref} · 1M window · $3.30 in, $16.50 out per M · holds this session`;
-	assert.equal(fitColdLine(line(a), a, 36), `…${a.slice(-35)}`);
-	assert.equal(fitColdLine(line(b), b, 36), `…${b.slice(-35)}`);
+	assert.equal(fitColdLine(line(a), a, 36), "amazon-bedrock/anthrop…20250929-v1:0");
+	assert.equal(fitColdLine(line(b), b, 36), "amazon-bedrock/anthrop…de-sonnet-4-6");
 	assert.notEqual(fitColdLine(line(a), a, 36), fitColdLine(line(b), b, 36));
 	assert.equal(fitColdLine(line("google/gemini-2.5-flash"), "google/gemini-2.5-flash", 36), "google/gemini-2.5-flash · 1M window ");
 	assert.equal(fitColdLine("off", "", 36), "off");
@@ -170,4 +176,79 @@ test("review 4b: ordinary English prose is counted within 1.5 times its real siz
 	assert.ok(counted >= REAL, `${counted}: not counted low`);
 	assert.ok(counted <= 1.5 * REAL, `${counted}: within 1.5 times`);
 	assert.equal(counted, 155);
+});
+
+// ------------------------------------------------------------------- the review's findings (0.10.0, round 2)
+
+// Blocker 1: one fit for the list and the compaction. A model whose output limit, less what its lowest thinking level
+// adds, can never reach the summary's minimum can't be used, whatever the session's size.
+test("round 2, blocker 1: one fit; an output limit that can never leave room for a summary is \"output limit too small\"", () => {
+	// Cloudflare's gpt-oss-120b in Pi 1.6.0: 16,384 out, thinking at least low (2,048).
+	const gptOss = { provider: "cloudflare-workers-ai", id: "@cf/openai/gpt-oss-120b", api: "openai-completions", reasoning: true, contextWindow: 128_000, maxTokens: 16_384, thinkingLevelMap: { off: null, minimal: null } } as never;
+	for (const need of [715, 50_000]) {
+		const { fit, thinking } = coldModelFit(gptOss, need);
+		assert.equal(thinking, "low");
+		assert.deepEqual(fit, { fits: false, why: OUTPUT_TOO_SMALL, need, window: 128_000, never: true }, String(need));
+		assert.equal(coldChoiceParts({ ref: "x/y", subscription: false, window: 128_000, fit }).at(-1), "can't be used: output limit too small");
+	}
+	// The same model with thinking off holds a small session, with its whole output limit as the cap.
+	assert.deepEqual(coldModelFit({ ...(gptOss as object), thinkingLevelMap: undefined } as never, 715).fit, { fits: true, need: 715, window: 128_000, maxTokens: 16_384 });
+	// An output limit under 16k with no thinking: the whole limit is enough, as before.
+	assert.equal(coldFit({ contextWindow: 128_000, maxTokens: 8_192 }, 715).fits, true);
+	assert.equal(coldFit({ contextWindow: 128_000, maxTokens: 8_192 }, 715, 1_024).fits, false);
+	assert.equal((coldFit({ contextWindow: 128_000, maxTokens: 8_192 }, 715, 1_024) as { never?: true }).never, true);
+	// Too small now is not never.
+	const now = coldFit({ contextWindow: 200_000, maxTokens: 64_000 }, 260_000);
+	assert.equal((now as { never?: true }).never, undefined);
+	// The list orders never with the models that can't be used.
+	const never: ColdChoice = { ref: "a/never", subscription: true, window: 128_000, fit: coldModelFit(gptOss, 715).fit };
+	const fits: ColdChoice = { ref: "b/fits", subscription: false, window: 128_000, price: { input: 9, output: 9 }, fit: coldFit({ contextWindow: 128_000, maxTokens: 64_000 }, 715) };
+	const small: ColdChoice = { ref: "c/small", subscription: false, window: 128_000, price: { input: 9, output: 9 }, fit: coldFit({ contextWindow: 128_000, maxTokens: 64_000 }, 260_000) };
+	assert.deepEqual(orderColdChoices([never, small, fits]).map((c) => c.ref), ["b/fits", "c/small", "a/never"]);
+});
+
+// Blocker 3: a long id is shortened in the middle, keeping the provider, the start of the id and its end; where no single
+// cut tells two references apart, the rows show the whole id.
+test("round 2, blocker 3: shortened in the middle, the cut placed so no other reference reads the same; rows still alike show the whole id", () => {
+	const eu = "amazon-bedrock/eu.anthropic.claude-haiku-4-5-20251001-v1:0";
+	const us = "amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0";
+	assert.equal(shortenModelRef(eu, 36, [eu, us]), "amazon-bedrock/eu.anth\u202620251001-v1:0");
+	assert.equal(shortenModelRef(us, 36, [eu, us]), "amazon-bedrock/us.anth\u202620251001-v1:0");
+	// The cut moves where the third doesn't tell two apart.
+	const a = "amazon-bedrock/meta.llama3-1-70b-instruct-v1:0";
+	const b = "amazon-bedrock/meta.llama3-1-8b-instruct-v1:0";
+	const [sa, sb] = [shortenModelRef(a, 36, [a, b]), shortenModelRef(b, 36, [a, b])];
+	assert.notEqual(sa, sb);
+	for (const s of [sa, sb]) {
+		assert.equal(s.length, 36);
+		assert.match(s, /^amazon-bedrock\/meta.*\u2026.*-instruct-v1:0$/);
+	}
+	// A reference that fits is left whole; a provider too long to keep leaves the end.
+	assert.equal(shortenModelRef("google/gemini-2.5-flash", 36), "google/gemini-2.5-flash");
+	assert.equal(shortenModelRef("a-very-long-provider-name-indeed-yes/model-x", 20), "\u2026-indeed-yes/model-x");
+	// Two references no single cut tells apart at 36 columns: those rows show the whole id, then the rest of the row.
+	const q6 = "qwen-token-plan-individual-cn/qwen3.6-flash";
+	const q8 = "qwen-token-plan-individual-cn/qwen3.8-flash";
+	const label = (ref: string) => `${ref} \u00b7 1M window \u00b7 no price \u00b7 holds this session`;
+	const rows = coldRowLines([{ label: "off", ref: "" }, { label: label(q6), ref: q6 }, { label: label(q8), ref: q8 }, { label: label(eu), ref: eu }, { label: label(us), ref: us }], 36);
+	assert.deepEqual(rows[0], ["off"]);
+	assert.deepEqual(rows[1], ["qwen-token-plan-individual-cn/qwen3.", "6-flash", "1M window \u00b7 no price \u00b7 holds this se"]);
+	assert.deepEqual(rows[2], ["qwen-token-plan-individual-cn/qwen3.", "8-flash", "1M window \u00b7 no price \u00b7 holds this se"]);
+	assert.deepEqual(rows[3], ["amazon-bedrock/eu.anth\u202620251001-v1:0"]);
+	assert.deepEqual(rows[4], ["amazon-bedrock/us.anth\u202620251001-v1:0"]);
+	for (const row of rows) for (const line of row) assert.ok(line.length <= 36, line);
+});
+
+// Blocker 2 and the price paragraph: what the README promises.
+test("round 2, the README: the output cap is passed to Pi and some older adapters don't send it; the price comparison is for cached compactions only", async () => {
+	const { readFileSync } = await import("node:fs");
+	const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+	const fit = readme.split("\n").find((line) => line.startsWith("- The conversation and the summary don't fit it.")) ?? "";
+	assert.match(fit, /That room is the output limit passed to Pi with the request; Pi's adapter sends it to the provider, except some adapters of older Pi versions, which leave it out/);
+	assert.match(fit, /A request the provider then rejects falls back as any failed reply does\./);
+	assert.doesNotMatch(readme, /so the request can't ask for more than the fit allowed/);
+	assert.match(fit, /`can't be used: output limit too small`/);
+	const card = readme.split("\n").find((line) => line.startsWith("**The card**")) ?? "";
+	assert.match(card, /^\*\*The card\*\* .*For a compaction read from the cache, its second line compares it with what Pi's would have cost/);
+	assert.match(card, /The comparison is for cached compactions only/);
 });

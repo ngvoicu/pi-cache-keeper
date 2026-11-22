@@ -82,7 +82,7 @@ The description under the row names the three cases in which the model writes th
 |---|---|---|
 | Its window | `model.contextWindow`, which is the keeper's model data where `modelData` is on and Pi's own value otherwise | `1M window`, `200k window`, `window unknown` |
 | Its price, or that it is a subscription | a subscription login (`accessVia` of `accessReader`: `"sub"`) reads `subscription`; else the model's prices at the size needed (`priceAt`), where it has any (`hasPrices`); else `no price` | `$0.30 in, $2.50 out per M`, `subscription`, `no price` |
-| Whether it can hold this session now | the fit rule of section 3, on the whole context as text (below) | `holds this session`, `too small now (needs about 150k)`, `can't be used: it declares no context window` |
+| Whether it can hold this session now | the fit rule of section 3, on the whole context as text (below) | `holds this session`, `too small now (needs about 150k)`, `can't be used: it declares no context window`, `can't be used: output limit too small` |
 
 "This session now" is measured once, when the list opens: the context as it stands (`ctx.sessionManager.buildSessionProjection().messages`), written as text the way Pi's summarizer writes it, and counted as in section 3. It is an upper bound: a compaction sends only the part before the messages it keeps. When the defaults are edited, the column still speaks of the session the menu was opened in, and says so in the list's header.
 
@@ -412,11 +412,13 @@ export function coldNeedTokens(requestTokens: number[]): number;
 /** Why a model can't write a summary this way whatever the session's size, or undefined. */
 export function coldUnusable(model: { api: string }): string | undefined;
 
-export type ColdFit = { fits: true; need: number; window: number; maxTokens: number } | { fits: false; why: string; need: number; window?: number };
+export type ColdFit = { fits: true; need: number; window: number; maxTokens: number } | { fits: false; why: string; need: number; window?: number; never?: true };
 
 /** The fit rule: a known window, and room for the summary beside the need. */
 /** `reserve`: the output thinking adds at the model's lowest level. `maxTokens` of a fit is the cap sent. */
 export function coldFit(model: { contextWindow: number; maxTokens: number }, need: number, reserve?: number): ColdFit;
+/** The one fit the list and the compaction use (section 10, round 2): the lowest thinking level, and coldFit with its reserve. */
+export function coldModelFit(model: Model<Api>, need: number): { fit: ColdFit; thinking: ThinkingLevel };
 
 /** One model of the menu's list. */
 export interface ColdChoice {
@@ -476,5 +478,14 @@ The owner's answers to section 9: **1. yes**, the picked model takes every fallb
 7. **`/cache-keeper` makes no prediction** of which model would compact: it shows the setting, the model, its window and its price or `subscription`, and says the choice is made at each compaction, from where Pi cuts. Section 5.
 8. **No comparison with the session's model** on the card: the picked model's own cost only. `sessionModelCost` is gone from the record.
 9. **The cost label is what the request recorded**: a recorded cost is shown as that cost (also through a route announced as a subscription); no cost on a subscription login reads `on a subscription`.
-10. **The picker in a narrow terminal** keeps the end of a model id that doesn't fit (`fitColdLine`), so two models of one provider stay distinct; tested at 40 and 60 columns.
+10. **The picker in a narrow terminal** keeps the end of a model id that doesn't fit (`fitColdLine`), so two models of one provider stay distinct; tested at 40 and 60 columns. Replaced in round 2 (below, 3).
+
+### Decided after the review (round 2)
+
+1. **One fit for the list and the compaction.** `coldModelFit(model, need)` is the only fit: it picks the thinking level the request is sent at (the model's lowest, `clampThinkingLevel(model, "off")`) and calls `coldFit` with what that level adds kept out of the cap. The list (`coldChoiceOf`) and the compaction (`coldSummary`) both call it, so they can't disagree. A model whose output limit, less that thinking, can never reach the summary's minimum (16k, or its whole limit where smaller) fails with `never` whatever the session's size, and the list shows it among the models that can't be used: `can't be used: output limit too small` (`OUTPUT_TOO_SMALL`). Cloudflare's `@cf/openai/gpt-oss-120b` is such a model: its limit is 16,384, and its lowest thinking level is low (2,048). `/cache-keeper` says the same of such a pick. The session's own model, which the compaction refuses, reads `can't be used: it is the session's own model` in the list. Tested in Pi's session runtime: the list's line and the compaction's decision agree for every model of Pi 1.6.0's and Pi 0.87.0's built-in catalogs (fixtures of them in `tests/fixtures`), for a small session and one of about 150k tokens.
+2. **The output cap is passed to Pi, not promised on the wire.** Pi's adapter sends `maxTokens` to the provider, except some adapters of older Pi versions, which leave it out (on Pi 0.87.0, `openai-codex-responses`). A request the provider then rejects falls back as any failed reply does. The README says so; nothing else changes.
+3. **The picker's rows at 40 and 60 columns.** A model id that doesn't fit is shortened in the middle (`shortenModelRef`): the provider, the start of the id, an ellipsis, the end of the id. The cut starts with a third of the id's room kept at its start, and moves either way until no other reference in the list matches that start and that end. Where no single cut tells two references apart (Pi 1.6.0's `qwen-token-plan-individual-cn/qwen3.6-flash` and `qwen3.8-flash`, and Vercel's three `gemini-*-flash-lite-batch`, at 40 columns), the rows that would read the same show the whole id over two lines or more, then the rest of the line (`coldRowLines`). The rule covers the whole list, so a row never reads like another, visible or not. The list is drawn by the extension (`coldModelList`, with Pi's select-list theme and keys), since Pi's select list draws one line per row. Tested in Pi's session runtime: at 40 and 60 columns, every model of Pi 1.6.0's and Pi 0.87.0's catalogs has a row that reads differently from every other, among them the stock Bedrock `eu.` and `us.` Claude Haiku 4.5.
+4. **The request count** counts only requests really dispatched: a request counts once its body is built (every adapter of Pi's passes it to `onPayload` just before sending), or once a reply comes that a provider wrote (a normal end, or tokens counted). A credential failure at request time is an error reply with no tokens and no body (as Pi 0.87.0's and 1.6.0's registries return it), and counts no request.
+5. **The price comparison in the README** is for cached compactions only: a summary by the cold compaction model shows that model's own recorded cost, with no comparison.
+6. **The expanded card's route** follows the cost line's rule: a recorded cost reads `(API key)`, also on a route announced as a subscription; no cost on a subscription reads `(subscription)`.
 

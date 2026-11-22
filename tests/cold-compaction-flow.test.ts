@@ -623,3 +623,37 @@ test("review 4a: the request carries the output cap the fit rule computed, less 
 		assert.ok(sent === budget - reserve || sent === Math.floor(0.8 * 16_384), `${label}: ${sent}`);
 	}
 });
+
+// ------------------------------------------------------------------- the review's findings (0.10.0, round 2)
+
+// The request count: only requests really dispatched count. Pi's registry resolves credentials at request time, and a
+// failure there ends the request in an error before anything is sent (no body built, no tokens); a request whose body
+// was built (the adapter's onPayload) and then failed was sent. The failure is as Pi's registry returns it in Pi 0.87.0 and
+// 1.6.0 for a provider without credentials: an error reply with no tokens, onPayload never called.
+test("round 2, the request count: a request-time credential failure counts no request; a request sent and then failed counts one", async (t) => {
+	const noKey = () => answer(undefined, { stopReason: "error", errorMessage: "Provider is not configured: google", usage: usageOf(0, 0) });
+	const sentThenFailed = async (call: Call) => {
+		await call.options.onPayload?.({ contents: [] }, call.model);
+		return answer(undefined, { stopReason: "error", errorMessage: "500 internal error", usage: usageOf(0, 0) });
+	};
+	for (const [label, coldAnswer, requests, why] of [
+		["no credentials at request time", noKey, 0, "its request failed: Provider is not configured: google"],
+		["sent, then failed", sentThenFailed, 1, "its request failed: 500 internal error"],
+	] as const) {
+		mock.timers.reset();
+		clock(t);
+		const h = harness({ coldAnswer });
+		expire();
+		assert.equal(await h.compaction("manual"), undefined, label);
+		const record = lastRecord();
+		assert.deepEqual([record.outcome, record.cold.skipped, record.cold.requests], ["fallback", why, requests], label);
+	}
+	// A split turn whose first request fails before leaving sends nothing more, and counts nothing.
+	mock.timers.reset();
+	clock(t);
+	const split = harness({ coldAnswer: noKey });
+	expire();
+	assert.equal(await split.compaction("manual", { preparation: splitPrep() }), undefined);
+	assert.equal(split.coldCalls().length, 1);
+	assert.equal(lastRecord().cold.requests, 0);
+});

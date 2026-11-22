@@ -1,6 +1,7 @@
 // The cold compaction model (design/cold-compaction-model.md): which model the user picked, whether it can write a
 // summary of this session, and how it is shown. No state: the handler in index.ts asks, Pi's own compact() writes.
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { clampThinkingLevel, type Api, type Model } from "@earendil-works/pi-ai";
 import { convertToLlm, serializeConversation, type SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 import { MIN_SUMMARY_TOKENS, summaryBudget } from "./config.ts";
 import { formatTokens, formatWindow } from "./trace.ts";
@@ -92,8 +93,14 @@ export function coldUnusable(model: { api: string }): string | undefined {
 	return undefined;
 }
 
-/** `maxTokens`: the output cap the request is sent with, the one the fit assumed. */
-export type ColdFit = { fits: true; need: number; window: number; maxTokens: number } | { fits: false; why: string; need: number; window?: number };
+/**
+ * `maxTokens`: the output cap the request is sent with, the one the fit assumed. `never`: the model can't hold any
+ * session (its output limit, less what thinking adds, is under the summary's minimum).
+ */
+export type ColdFit = { fits: true; need: number; window: number; maxTokens: number } | { fits: false; why: string; need: number; window?: number; never?: true };
+
+/** Why a model whose output limit can never leave room for a summary is refused, in the menu and in the record. */
+export const OUTPUT_TOO_SMALL = "output limit too small";
 
 /**
  * The fit rule: a known window, and room for the summary beside the need: the model's output limit, reduced so the
@@ -105,8 +112,19 @@ export function coldFit(model: { contextWindow: number; maxTokens: number }, nee
 	const window = model.contextWindow;
 	const room = (summaryBudget(model, need) ?? 0) - reserve;
 	const least = model.maxTokens > 0 ? Math.min(MIN_SUMMARY_TOKENS, model.maxTokens) : MIN_SUMMARY_TOKENS;
+	// Whatever the session's size: the output limit less the thinking can't reach the minimum.
+	if (model.maxTokens > 0 && model.maxTokens - reserve < least) return { fits: false, why: OUTPUT_TOO_SMALL, need, window, never: true };
 	if (room >= least) return { fits: true, need, window, maxTokens: room };
 	return { fits: false, why: `it needs about ${formatTokens(need)} tokens and its window is ${formatWindow(window)}`, need, window };
+}
+
+/**
+ * The one fit of a model for a need, used by the menu and by the compaction alike so they can't disagree: the thinking
+ * level the request is sent at (the lowest the model has) and the fit with what that level adds kept out of the cap.
+ */
+export function coldModelFit(model: Model<Api>, need: number): { fit: ColdFit; thinking: ReturnType<typeof clampThinkingLevel> } {
+	const thinking = clampThinkingLevel(model, "off");
+	return { fit: coldFit(model, need, thinkingReserve(thinking)), thinking };
 }
 
 /** One model of the menu's list. */
@@ -136,7 +154,7 @@ export function coldChoiceParts(choice: ColdChoice): string[] {
 	const parts = coldModelParts(choice);
 	if (choice.unusable) parts.push(`can't be used: ${choice.unusable}`);
 	else if (choice.fit?.fits) parts.push("holds this session");
-	else if (choice.fit && choice.fit.window === undefined) parts.push(`can't be used: ${choice.fit.why}`);
+	else if (choice.fit && (choice.fit.window === undefined || choice.fit.never)) parts.push(`can't be used: ${choice.fit.why}`);
 	else if (choice.fit) parts.push(`too small now (needs about ${formatTokens(choice.fit.need)})`);
 	return parts;
 }
@@ -151,17 +169,65 @@ export function coldChoiceLabel(choice: ColdChoice): string {
  * used; in each, subscription logins, then by input price (lowest first), then the ones without a price; names break ties.
  */
 export function orderColdChoices(choices: ColdChoice[]): ColdChoice[] {
-	const group = (c: ColdChoice) => (c.unusable || (c.fit && !c.fit.fits && c.fit.window === undefined) ? 2 : c.fit?.fits ? 0 : 1);
+	const group = (c: ColdChoice) => (c.unusable || (c.fit && !c.fit.fits && (c.fit.window === undefined || c.fit.never)) ? 2 : c.fit?.fits ? 0 : 1);
 	const cost = (c: ColdChoice) => (c.subscription ? -1 : (c.price?.input ?? Infinity));
 	return [...choices].sort((a, b) => group(a) - group(b) || cost(a) - cost(b) || (a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0));
 }
 
 /**
- * A menu line fitted to `width` columns. Where the model's reference doesn't fit, its end is kept (the part that tells
- * two models of one provider apart), after an ellipsis; otherwise the line is cut at its end.
+ * A model's reference shortened in the middle to `width` columns: the provider, the start of the id, an ellipsis, the end
+ * of the id. The cut is placed where no other reference of `refs` reads the same (a third of the id's room kept at its
+ * start where that is enough, the cut moved either way from there where not); where no single cut can, it stays at that
+ * third, and coldRowLines shows the whole reference.
  */
-export function fitColdLine(line: string, ref: string, width: number): string {
+export function shortenModelRef(ref: string, width: number, refs: readonly string[] = []): string {
+	if (ref.length <= width) return ref;
+	const slash = ref.indexOf("/") + 1;
+	const provider = ref.slice(0, slash);
+	const id = ref.slice(slash);
+	const room = width - provider.length - 1;
+	// A provider too long to keep: the end of the reference.
+	if (room < 2) return width <= 1 ? "…".slice(0, Math.max(0, width)) : `…${ref.slice(ref.length - (width - 1))}`;
+	const preferred = Math.round(room / 3);
+	const cut = (head: number) => [provider + id.slice(0, head), id.slice(id.length - (room - head))] as const;
+	const alone = (start: string, end: string) => !refs.some((other) => other !== ref && other.length >= start.length + end.length && other.startsWith(start) && other.endsWith(end));
+	for (let step = 0; step <= room; step++) {
+		for (const head of step === 0 ? [preferred] : [preferred + step, preferred - step]) {
+			if (head < 0 || head > room) continue;
+			const [start, end] = cut(head);
+			if (alone(start, end)) return `${start}…${end}`;
+		}
+	}
+	const [start, end] = cut(preferred);
+	return `${start}…${end}`;
+}
+
+/**
+ * A menu line fitted to `width` columns. Where the model's reference doesn't fit, the line is that reference shortened in
+ * the middle (shortenModelRef, against the other references of the list, `refs`); otherwise the line is cut at its end.
+ */
+export function fitColdLine(line: string, ref: string, width: number, refs: readonly string[] = []): string {
 	if (line.length <= width) return line;
 	if (ref.length <= width && line.startsWith(ref)) return line.slice(0, width);
-	return width <= 1 ? "…".slice(0, width) : `…${ref.slice(ref.length - (width - 1))}`;
+	return shortenModelRef(ref, width, refs);
+}
+
+/**
+ * The menu's rows at `width` columns, each as its lines: one line fitted by fitColdLine; or, for rows that would still
+ * read the same as another row of the list, the whole reference over as many lines as it takes, then the rest of the
+ * row cut to the width. `ref` is "" for a row that is no model (off, the default).
+ */
+export function coldRowLines(rows: readonly { label: string; ref: string }[], width: number): string[][] {
+	const columns = Math.max(1, width);
+	const refs = rows.map((row) => row.ref).filter(Boolean);
+	const lines = rows.map((row) => fitColdLine(row.label, row.ref, columns, refs));
+	const count = new Map<string, number>();
+	for (const line of lines) count.set(line, (count.get(line) ?? 0) + 1);
+	return rows.map((row, i) => {
+		if ((count.get(lines[i]) ?? 0) < 2 || !row.ref) return [lines[i]];
+		const full: string[] = [];
+		for (let at = 0; at < row.ref.length; at += columns) full.push(row.ref.slice(at, at + columns));
+		const rest = (row.label.startsWith(row.ref) ? row.label.slice(row.ref.length) : "").replace(/^ · /, "");
+		return rest ? [...full, rest.slice(0, columns)] : full;
+	});
 }

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
-import { calculateCost, clampThinkingLevel, contentText, type Api, type AssistantMessage, type Model, type Usage } from "@earendil-works/pi-ai";
+import { calculateCost, contentText, type Api, type AssistantMessage, type Model, type Usage } from "@earendil-works/pi-ai";
 import {
 	compact,
 	convertToLlm,
@@ -15,21 +15,20 @@ import {
 	type SessionBeforeCompactEvent,
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import { Container, fuzzyFilter, getKeybindings, Input, SelectList, SettingsList, Text, type Component, type SelectItem, type SettingItem } from "@earendil-works/pi-tui";
+import { Container, fuzzyFilter, getKeybindings, Input, SettingsList, Text, type Component, type SelectItem, type SettingItem } from "@earendil-works/pi-tui";
 import { cacheTier, hasExplicitPromptCache, isKimiOnMoonshot, lifetimeFor } from "./cache-state.ts";
 import {
 	coldChoiceLabel,
-	coldFit,
+	coldModelFit,
 	coldModelParts,
 	coldNeedTokens,
 	coldRequestTokens,
+	coldRowLines,
 	coldUnusable,
-	fitColdLine,
 	formatModelRef,
 	orderColdChoices,
 	parseModelRef,
 	summaryBody,
-	thinkingReserve,
 	type ColdChoice,
 } from "./cold-compaction.ts";
 import { cacheView, PeriodClock, startFacts, type CacheView, type StartFacts } from "./cache-clock.ts";
@@ -421,6 +420,54 @@ type Handed = { stop?: WarmStop; reason: string; handedOver: "evidence" | "let g
 
 /** A clock time for what the user reads: "14:02". */
 const hhmm = (at: number) => new Date(at).toTimeString().slice(0, 5);
+
+/**
+ * The cold compaction model's list, drawn as Pi's select list is (its theme, its keys, `maxVisible` rows around the
+ * selection), each row by coldRowLines: one line, a model id that doesn't fit shortened in the middle; or, where two rows
+ * would still read the same, the whole id over two lines or more.
+ */
+function coldModelList(items: SelectItem[], maxVisible: number, done: (value?: string) => void): Component & { handleInput: (data: string) => void } {
+	let selected = 0;
+	let cached: { width: number; rows: string[][] } | undefined;
+	const rowsAt = (width: number) => {
+		if (cached?.width !== width) cached = { width, rows: coldRowLines(items.map((item) => ({ label: item.label ?? item.value, ref: item.value === COLD_DEFAULT_PICK ? "" : item.value })), width) };
+		return cached.rows;
+	};
+	return {
+		render: (width: number) => {
+			const theme = getSelectListTheme();
+			if (items.length === 0) return [theme.noMatch("  No matching models")];
+			// As Pi's select list: a 2-column marker, and 2 columns kept free at the right.
+			const rows = rowsAt(Math.max(1, width - 4));
+			const start = Math.max(0, Math.min(selected - Math.floor(maxVisible / 2), items.length - maxVisible));
+			const end = Math.min(start + maxVisible, items.length);
+			const lines: string[] = [];
+			for (let i = start; i < end; i++) {
+				rows[i].forEach((text, at) => {
+					const line = `${at === 0 && i === selected ? "→ " : "  "}${text}`;
+					lines.push(i === selected ? theme.selectedText(line) : line);
+				});
+			}
+			if (start > 0 || end < items.length) lines.push(theme.scrollInfo(`  (${selected + 1}/${items.length})`.slice(0, Math.max(0, width - 2))));
+			return lines;
+		},
+		invalidate: () => {
+			cached = undefined;
+		},
+		handleInput: (data: string) => {
+			const keys = getKeybindings();
+			const last = items.length - 1;
+			if (keys.matches(data, "tui.select.up")) selected = selected === 0 ? last : selected - 1;
+			else if (keys.matches(data, "tui.select.down")) selected = selected === last ? 0 : selected + 1;
+			else if (keys.matches(data, "tui.select.pageUp")) selected = Math.max(0, selected - maxVisible);
+			else if (keys.matches(data, "tui.select.pageDown")) selected = Math.max(0, Math.min(last, selected + maxVisible));
+			else if (keys.matches(data, "tui.select.confirm")) {
+				const item = items[selected];
+				if (item) done(item.value);
+			} else if (keys.matches(data, "tui.select.cancel")) done();
+		},
+	};
+}
 
 export default function cacheKeeper(pi: ExtensionAPI) {
 	// The /cache-keeper-stop record in place when the process first loaded the extension stops nothing (stop-record.ts).
@@ -2185,7 +2232,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			...(model.contextWindow > 0 ? { window: model.contextWindow } : {}),
 			...(hasPrices(model) ? { price: priceAt(model.cost, need) } : {}),
 			subscription: accessVia(accessOf(model)) === "sub",
-			...(unusable ? { unusable } : need === undefined ? {} : { fit: coldFit(model, need) }),
+			// The fit the compaction itself uses (coldModelFit), so the two can't disagree.
+			...(unusable ? { unusable } : need === undefined ? {} : { fit: coldModelFit(model, need).fit }),
 		};
 	};
 	// A pick Pi can't use now: the model is gone, or its credentials are (the setting is kept).
@@ -2204,6 +2252,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		// No prediction: whether it writes a summary depends on the part Pi cuts off at that compaction.
 		const parts = coldModelParts(coldChoiceOf(model, undefined, accessReader(ctx)));
 		if (!(model.contextWindow > 0)) return `${ref}${mark} · ${parts.join(" · ")} · can't be used: it declares no context window`;
+		const never = coldModelFit(model, 0).fit;
+		if (!never.fits && never.never) return `${ref}${mark} · ${parts.join(" · ")} · can't be used: ${never.why}`;
 		return `${ref}${mark} · ${parts.join(" · ")} · whether it writes a summary is decided at each compaction, from the part Pi cuts off`;
 	};
 
@@ -2247,10 +2297,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		cold.via = accessVia(accessReader(ctx)(model));
 		cold.needTokens = coldNeedTokens(coldRequestTokens(preparation, event.customInstructions));
 		if (model.contextWindow > 0) cold.window = model.contextWindow;
-		const thinking = clampThinkingLevel(model, "off");
+		// The fit the menu shows (coldModelFit): the output cap is the one the fit assumed, passed with every request, less
+		// what the lowest thinking level adds.
+		const { fit, thinking } = coldModelFit(model, cold.needTokens);
 		cold.thinking = thinking;
-		// The output cap is the one the fit assumed, passed with every request, less what the lowest thinking level adds.
-		const fit = coldFit(model, cold.needTokens, thinkingReserve(thinking));
 		if (!fit.fits) return skip(fit.why);
 		cold.maxTokens = fit.maxTokens;
 		// Pi's credentials at request time, through the registry. Each reply is checked before Pi's summarizer sees it: one
@@ -2261,9 +2311,27 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const transport: StreamFn = (target, context, options) => {
 			if (signal.aborted) throw new Error(COMPACTION_ABORTED);
 			if (failure) throw new Error(failure);
-			cold.requests = (cold.requests ?? 0) + 1;
-			const stream = ctx.modelRegistry.streamSimple(target, context, { ...options, maxTokens: Math.min(options?.maxTokens ?? Infinity, fit.maxTokens) });
+			// Counted once it is really dispatched: its body was built (every adapter of Pi's hands it to onPayload just before
+			// sending), or a reply came that a provider wrote (a normal end, or tokens counted). A request that failed before
+			// leaving (no credentials at request time, say) is not counted.
+			let dispatched = false;
+			const sent = () => {
+				if (dispatched) return;
+				dispatched = true;
+				cold.requests = (cold.requests ?? 0) + 1;
+			};
+			const onPayload = options?.onPayload;
+			const stream = ctx.modelRegistry.streamSimple(target, context, {
+				...options,
+				maxTokens: Math.min(options?.maxTokens ?? Infinity, fit.maxTokens),
+				onPayload: (payload, model) => {
+					sent();
+					return onPayload?.(payload, model);
+				},
+			});
 			const checked = stream.result().then((reply) => {
+				const tokens = reply.usage ? reply.usage.input + reply.usage.output + reply.usage.cacheRead + reply.usage.cacheWrite : 0;
+				if ((reply.stopReason !== "error" && reply.stopReason !== "aborted") || tokens > 0) sent();
 				failure = replyFailure(reply);
 				if (failure) throw new Error(failure);
 				return reply;
@@ -2664,7 +2732,18 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			} catch {
 				// No models to offer: default and off stay.
 			}
-			const choices = orderColdChoices(models.filter((model) => !coldUnusable(model)).map((model) => coldChoiceOf(model, need, accessOf)));
+			// The session's own model is refused by the compaction (coldCandidate), so the list says so too.
+			const ownModel = (model: Model<Api>) => ctx.model?.provider === model.provider && ctx.model.id === model.id;
+			const choices = orderColdChoices(
+				models
+					.filter((model) => !coldUnusable(model))
+					.map((model): ColdChoice => {
+						const choice = coldChoiceOf(model, need, accessOf);
+						if (!ownModel(model)) return choice;
+						const { fit: _fit, ...rest } = choice;
+						return { ...rest, unusable: "it is the session's own model" };
+					}),
+			);
 			const items: SelectItem[] = [
 				...(scope === "session" ? [{ value: COLD_DEFAULT_PICK, label: `default (${valueLabel(COLD, defaultOf(COLD))})` }] : []),
 				{ value: "", label: "off" },
@@ -2672,15 +2751,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			];
 			const input = new Input();
 			input.focused = true;
-			let list: SelectList;
+			let list: Component & { handleInput: (data: string) => void };
 			const filter = () => {
 				const query = input.getValue().trim();
-				// A line too wide keeps the end of a model id that doesn't fit: the part that tells two models apart.
-				list = new SelectList(query ? fuzzyFilter(items, query, (item) => item.label) : items, 12, getSelectListTheme(), {
-					truncatePrimary: ({ text, maxWidth, item }) => fitColdLine(text, item.value === COLD_DEFAULT_PICK ? "" : item.value, maxWidth),
-				});
-				list.onSelect = (item) => done(item.value);
-				list.onCancel = () => done();
+				// A line too wide shortens a model id in the middle; rows that would still read the same show their ids in full.
+				list = coldModelList(query ? fuzzyFilter(items, query, (item) => item.label) : items, 12, done);
 			};
 			filter();
 			const size = need === undefined ? "its size is unknown" : `about ${formatTokens(need)} tokens as text`;

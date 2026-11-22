@@ -750,7 +750,7 @@ test("the cold compaction model's row, its list, its /cache-keeper lines and the
 
 // Findings 10 and 3 (review of 0.10.0, round 1): the picker's rows stay distinct in a narrow terminal, showing the end of
 // a model id that doesn't fit; and the row says what goes to the picked model's provider.
-test("review 10 and 3: at 40 and 60 columns the picker's rows keep the end of a long model id and stay distinct; the row's description names what is sent", { skip }, async () => {
+test("review 10 and 3: at 40 and 60 columns the picker's rows keep the provider, the start and the end of a long model id and stay distinct; the row's description names what is sent", { skip }, async () => {
 	writeDefaults({});
 	const result = await inWindow(async (w) => {
 		const registry = w.runtime.session.extensionRunner.createContext().modelRegistry;
@@ -772,7 +772,8 @@ test("review 10 and 3: at 40 and 60 columns the picker's rows keep the end of a 
 			assert.equal(rows.length, 2, `${width}: ${rows.join(" | ")}`);
 			assert.notEqual(rows[0].replace(/^→?\s*/, ""), rows[1].replace(/^→?\s*/, ""), `${width}: distinct`);
 			for (const row of rows) assert.ok(row.length <= width, `${width}: ${row}`);
-			assert.ok(rows.some((row) => row.includes("claude-sonnet-4-6")), `${width}: ${rows.join(" | ")}`);
+			for (const row of rows) assert.match(row, /^(→ | {2})amazon-bedrock\/anthrop/, `${width}: ${row}`);
+			assert.ok(rows.some((row) => row.includes("sonnet-4-6")), `${width}: ${rows.join(" | ")}`);
 			assert.ok(rows.some((row) => row.includes("20250929-v1:0")), `${width}: ${rows.join(" | ")}`);
 		}
 		menu.keys("\x1b");

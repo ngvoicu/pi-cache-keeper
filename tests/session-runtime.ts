@@ -82,6 +82,8 @@ export const writeDefaults = (cacheKeeper: Record<string, unknown>) =>
 interface Menu {
 	/** The menu as drawn, at 400 columns or the given width. */
 	text: (width?: number) => string;
+	/** The menu's lines as drawn at this width, with their styles (the selected row is styled). */
+	raw: (width: number) => string[];
 	/** Moves to the row with this label and presses Enter until its value reads `value`. */
 	set: (label: string, value: string) => void;
 	/** Presses Enter on the row with this label once. */
@@ -250,6 +252,7 @@ export async function inWindow(scenario: (w: Window) => Promise<void>, o: { pers
 			};
 			return {
 				text: (width) => lines(width).join("\n"),
+				raw: (width) => component.render(width),
 				press: (label) => {
 					goTo(label);
 					component.handleInput(" ");

@@ -451,7 +451,9 @@ export function traceDetails(record: CompactTrace): string[] {
 	if (response?.error) lines.push(`error: ${response.error}`);
 	if (mismatch?.captured !== undefined) lines.push(`last request had: ${mismatch.captured}`, `summary request had: ${mismatch.rebuilt ?? "(nothing)"}`);
 	if (cold) {
-		const via = cold.via === undefined ? "" : ` (${VIA_LABELS[cold.via]})`;
+		// The cost line's rule: a cost recorded is an API key's, also on a route announced as a subscription.
+		const shown = cold.via !== undefined && (cold.response?.usage.cost ?? 0) > 0 ? "api" : cold.via;
+		const via = shown === undefined ? "" : ` (${VIA_LABELS[shown]})`;
 		const size = cold.needTokens === undefined ? "" : `, about ${formatTokens(cold.needTokens)} tokens${cold.window ? ` of a ${formatWindow(cold.window)} window` : ""}`;
 		const parts = [
 			`cold model: ${cold.model}${via}`,

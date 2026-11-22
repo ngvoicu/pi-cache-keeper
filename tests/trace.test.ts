@@ -259,3 +259,31 @@ test("review 8 and 9: no comparison with the session's model; a recorded cost is
 	assert.equal(describeTrace(record("sub", 0)), `${time} /compact: summary by proxy/gpt-4o-mini, the prompt cache has expired: 60k in, 1k out, on a subscription, 1.0s, summary 17 chars`);
 	assert.equal(describeTrace(record("api", 0)), `${time} /compact: summary by proxy/gpt-4o-mini, the prompt cache has expired: 60k in, 1k out, no price, 1.0s, summary 17 chars`);
 });
+
+// Review of 0.10.0, round 2: the expanded card names the route by the cost line's rule: a cost recorded is an API key's
+// (also on a route announced as a subscription), no cost on a subscription is the subscription's.
+test("round 2, the card details: a cost recorded on a subscription route reads API key, as the cost line shows it; no cost reads subscription", () => {
+	const record = (via: "sub" | "api" | "sub or api", cost: number): CompactTrace & TraceRecord => ({
+		event: "compact",
+		trigger: "manual",
+		model: "anthropic/claude-haiku-5-5",
+		outcome: "cold",
+		reason: "the prompt cache has expired",
+		tokensBefore: 120_000,
+		cwd: "/",
+		at: "2026-11-22T13:48:54.000Z",
+		session: "s",
+		cold: { model: "proxy/gpt-4o-mini", via, requests: 1, response: { seconds: 1, usage: { input: 60_000, cacheRead: 0, cacheWrite: 0, output: 1_000, cost }, summaryChars: 17 } },
+	});
+	const route = (r: CompactTrace) => /^cold model: proxy\/gpt-4o-mini \(([^)]*)\)/.exec(traceDetails(r)[0])?.[1];
+	assert.match(describeTrace(record("sub", 0.0096)), /\$0\.0096/);
+	assert.equal(route(record("sub", 0.0096)), "API key", "a recorded cost on a subscription route");
+	assert.equal(route(record("sub or api", 0.0096)), "API key");
+	assert.equal(route(record("api", 0.0096)), "API key");
+	assert.match(describeTrace(record("sub", 0)), /on a subscription/);
+	assert.equal(route(record("sub", 0)), "subscription", "no cost on a subscription");
+	assert.equal(route(record("sub or api", 0)), "subscription or API key");
+	assert.equal(route(record("api", 0)), "API key");
+	// Skipped before a reply: the route as it was announced.
+	assert.equal(route({ ...record("sub", 0), outcome: "fallback", cold: { model: "proxy/gpt-4o-mini", via: "sub", skipped: "it returned no summary text" } }), "subscription");
+});
