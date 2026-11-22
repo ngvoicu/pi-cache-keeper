@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { isPlainObject } from "./cached-request.ts";
@@ -48,19 +48,6 @@ export const LEGACY_SETTINGS_KEY = "cachedCompaction";
 /** Which key the settings come from: `cacheKeeper`, else `cachedCompaction` when only that one is present. */
 export function settingsKeyInUse(settings: Record<string, unknown> = readSettings(settingsPath())): string {
 	return settings[SETTINGS_KEY] === undefined && settings[LEGACY_SETTINGS_KEY] !== undefined ? LEGACY_SETTINGS_KEY : SETTINGS_KEY;
-}
-
-/**
- * What changes whenever the global settings file is written (its modification and change times, size and inode), or
- * "none" without one: the defaults are read again only when it changed.
- */
-export function settingsStamp(): string {
-	try {
-		const stat = statSync(settingsPath());
-		return `${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}:${stat.ino}`;
-	} catch {
-		return "none";
-	}
 }
 
 export function loadConfig(): CacheKeeperConfig {

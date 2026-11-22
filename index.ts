@@ -44,7 +44,6 @@ import {
 	sameSessionSettings,
 	saveConfig,
 	SESSION_KEYS,
-	settingsStamp,
 	SESSION_SETTINGS_TYPE,
 	sessionSettingsOn,
 	SETTINGS_KEY,
@@ -399,26 +398,16 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// on the current branch, read at session_start and after /tree; the menu changes it and saves it when it closes).
 	let config = loadConfig();
 	let own: SessionSettings = {};
-	// The defaults as saved now: settings.json is read again whenever it changed since the last reading (another window, or
-	// another session of this process, may have saved them), at every decision, in the menu and in /cache-keeper. A file
-	// that can't be read leaves the last defaults read. cacheRetention and modelData keep their own path (`config`): a
-	// change of them is applied where it is made.
+	// The defaults as saved now: settings.json is read and parsed again at every decision that uses one (another window, or
+	// another session of this process, may have saved them), in the menu and in /cache-keeper. A file that can't be read
+	// or parsed leaves the last defaults that parsed. cacheRetention and modelData keep their own path (`config`): a change
+	// of them is applied where it is made.
 	let latest = config;
-	let latestStamp = settingsStamp();
 	const defaultsNow = (): CacheKeeperConfig => {
-		const stamp = settingsStamp();
-		if (stamp !== latestStamp) {
-			try {
-				const read = loadConfig();
-				if (read.compactAtPercent !== latest.compactAtPercent || read.compactAtTokens !== latest.compactAtTokens) {
-					fullStuck = false;
-					lastFullSkip = undefined;
-				}
-				latest = read;
-				latestStamp = stamp;
-			} catch {
-				// Read again at the next decision.
-			}
+		try {
+			latest = loadConfig();
+		} catch {
+			// The last defaults that parsed; read again at the next decision.
 		}
 		return latest;
 	};
@@ -437,7 +426,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// The last "full" skip reason logged, so a context that stays past the mark logs each reason once.
 	let lastFullSkip: string | undefined;
 	// Set when compacting "when full" left the context past the mark, so it is not retried after every turn.
-	let fullStuck = false;
+	let fullStuck: string | undefined;
 	let compactionTrigger: Trigger | undefined;
 	let decision: Extract<TraceRecord, { event: "compact" }> | undefined;
 	let traceError: string | undefined;
@@ -467,16 +456,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		return value;
 	};
 	const warmMinutes = (fresh = false) => keepWarmSetting(fresh)?.minutes ?? 0;
-	// This session's own values change (read from the branch, or set in the menu): keep-warm is read again at once, and
-	// compacting when full may try again, as after a change of the defaults.
+	// This session's own values change (read from the branch, or set in the menu): keep-warm is read again at once.
+	// Compacting when full tries again once the mark in effect changed, whichever layer changed it (see `fullStuck`).
 	const setOwn = (next: SessionSettings) => {
-		const full = own.compactAtPercent !== next.compactAtPercent || own.compactAtTokens !== next.compactAtTokens;
 		own = next;
 		keepWarmRead = undefined;
-		if (full) {
-			fullStuck = false;
-			lastFullSkip = undefined;
-		}
 	};
 	// The values saved on the current branch: what the menu compares with when it closes.
 	let ownSaved: SessionSettings = {};
@@ -1251,11 +1235,13 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		// compaction during the run, and session_before_compact still writes that summary from the cache.
 		if (!ctx.hasUI) return false;
 		const { compactAtPercent, compactAtTokens } = inEffect();
+		// The mark in effect: a compaction that left the context past it is not tried again until it changes.
+		const mark = `${compactAtPercent}:${compactAtTokens}`;
 		const threshold = ctx.model ? fullThreshold(ctx.model, compactAtPercent, compactAtTokens) : undefined;
 		const contextTokens = ctx.getContextUsage()?.tokens ?? undefined;
 		if (threshold === undefined || contextTokens === undefined || contextTokens < threshold) {
 			lastFullSkip = undefined;
-			fullStuck = false;
+			fullStuck = undefined;
 			return false;
 		}
 		const cap = compactAtTokens > 0 && threshold === compactAtTokens ? compactAtTokens : undefined;
@@ -1265,7 +1251,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			lastFullSkip = reason;
 			return false;
 		};
-		if (fullStuck) return skip("the last compaction left the context past the mark (raise compactAtPercent or compactAtTokens, or keep fewer recent tokens)");
+		if (fullStuck === mark) return skip("the last compaction left the context past the mark (raise compactAtPercent or compactAtTokens, or keep fewer recent tokens)");
 		let compactionOn: boolean;
 		try {
 			compactionOn = autoCompactionEnabled(ctx.isProjectTrusted() ? ctx.cwd : undefined);
@@ -1279,20 +1265,20 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		ownTrigger = "full";
 		stopTimer(ctx);
 		if (ctx.hasUI) {
-			const mark = cap === undefined ? `${compactAtPercent}% of the model's window` : `your ${formatTokens(cap)}-token cap`;
-			ctx.ui.notify(`The context holds ${formatTokens(contextTokens)} tokens, past ${mark}. Compacting now, while the cache is warm.`, "info");
+			const past = cap === undefined ? `${compactAtPercent}% of the model's window` : `your ${formatTokens(cap)}-token cap`;
+			ctx.ui.notify(`The context holds ${formatTokens(contextTokens)} tokens, past ${past}. Compacting now, while the cache is warm.`, "info");
 		}
 		ctx.compact({
 			onComplete: () => {
 				ownTrigger = undefined;
 				ifSessionAlive(() => {
 					const after = ctx.getContextUsage()?.tokens;
-					fullStuck = after !== undefined && after !== null && after >= threshold;
+					fullStuck = after !== undefined && after !== null && after >= threshold ? mark : undefined;
 				});
 			},
 			onError: () => {
 				ownTrigger = undefined;
-				fullStuck = true;
+				fullStuck = mark;
 				ifSessionAlive(() => {
 					if (ctx.isIdle()) startTimer(ctx);
 				});
@@ -1424,7 +1410,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// expiry; Pi is idle and nothing is queued; the last safe moment, from that expiry, has not passed; the payload's output limit is within the API's proven refresh limit. "hold": a
 	// passing reason, tried again per R2 (a cancelled refresh, by the run that cancelled it); "refuse": withheld for good,
 	// and warming ends for the period where it has not ended yet.
-	type GateVerdict = { pass: true } | { hold: "cancelled" | "busy" | "late" | "settling" | "out"; reason: string } | { refuse: string; ended?: Handed; stop?: WarmStop };
+	type GateVerdict = { pass: true; sendBy: number } | { hold: "cancelled" | "busy" | "late" | "settling" | "out"; reason: string } | { refuse: string; ended?: Handed; stop?: WarmStop };
 	const lastGate = (
 		ctx: ExtensionContext,
 		p: WarmPeriod & { fixed: NonNullable<WarmPeriod["fixed"]> },
@@ -1475,7 +1461,18 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (!payload) return { refuse: unbuilt ?? "the refresh payload could not be built" };
 		const cap = limitWithinCap(api, payload);
 		if ("reason" in cap) return { refuse: cap.reason };
-		return { pass: true };
+		return { pass: true, sendBy: view.sendBy };
+	};
+	// The check at the send itself: called by the refresh's transport (`fetch`) right before it hands the request on, with
+	// no wait between. Keep-warm still on, and the expiry the last gate read still under the time limit in effect, both
+	// read afresh (the session's own value, else the default as saved now). A change saved at the very instant the
+	// request leaves applies from the next refresh.
+	const sendCheck = (p: WarmPeriod, sendBy: number): { refuse: string; stop?: WarmStop } | undefined => {
+		const setting = keepWarmSetting(true);
+		if (!setting) return { refuse: "the settings could not be read" };
+		if (setting.minutes <= 0) return { refuse: "keep-warm was turned off" };
+		if (!wantsWarm(sendBy, p.idleSince, setting.minutes)) return { refuse: limitReason(), stop: "limit" };
+		return undefined;
 	};
 
 	// Keep-warm now reads off (in this window or another) in a period that started while it read on and was kept warm by
@@ -1549,6 +1546,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		// Its number in the period, once it leaves.
 		let refreshNo = 0;
 
+		// Set once the last gate passed: the expiry it read, for the check at the send, made once.
+		let passedFor: number | undefined;
+		let checkedAtSend = false;
 		const controller = new AbortController();
 		warming = controller;
 		// Its entry among the model's refreshes on their way, once it goes out (see REFRESH_HOLD_MAX_MS).
@@ -1557,6 +1557,32 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const started = Date.now();
 		// The level the cached request was sent with, as its payload shows it.
 		const thinkingLevel = payloadThinking(request.model.api, sent);
+		// It goes out once the last gate passed: reserved at the larger of its expected cost and what the last refresh really
+		// cost. `takeBack` undoes it where the check at the send stops it.
+		let leftFrom: { before: WarmPeriod["warm"]; after: WarmPeriod["warm"] } | undefined;
+		const goesOut = () => {
+			out = true;
+			// The moment it leaves is the one its hit, if it reports one, counts the period's expiry from.
+			const before = p.warm;
+			p.warm = leave(p.warm, refreshId, Date.now());
+			leftFrom = { before, after: p.warm };
+			open.set(refreshId, Date.now());
+			misses.inFlight.set(p.fixed.model, open);
+			reserved = reserveFor(budget, spending);
+			spending.spent += reserved;
+			spending.refreshes += 1;
+			refreshNo = spending.refreshes;
+		};
+		const takeBack = () => {
+			out = false;
+			if (leftFrom && p.warm === leftFrom.after) p.warm = leftFrom.before;
+			open.delete(refreshId);
+			if (open.size === 0 && misses.inFlight.get(p.fixed.model) === open) misses.inFlight.delete(p.fixed.model);
+			spending.spent -= reserved;
+			spending.refreshes -= 1;
+			reserved = 0;
+			refreshNo = 0;
+		};
 		void (async () => {
 			let response: AssistantMessage | undefined;
 			let error: string | undefined;
@@ -1594,17 +1620,29 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 								refusedStop = verdict.stop;
 								throw new Error(verdict.refuse);
 							}
-							// It goes out: reserved at the larger of its expected cost and what the last refresh really cost.
-							out = true;
-							// The moment it leaves is the one its hit, if it reports one, counts the period's expiry from.
-							p.warm = leave(p.warm, refreshId, Date.now());
-							open.set(refreshId, Date.now());
-							misses.inFlight.set(p.fixed.model, open);
-							reserved = reserveFor(budget, spending);
-							spending.spent += reserved;
-							spending.refreshes += 1;
-							refreshNo = spending.refreshes;
+							// The adapter sends the request after this returns: the check at the send is in `fetch`.
+							passedFor = verdict.sendBy;
+							goesOut();
 							return payload;
+						},
+						// The refresh's transport: the check at the send, then, with nothing awaited in between, the request leaves.
+						fetch: (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+							if (passedFor !== undefined && out && !checkedAtSend) {
+								checkedAtSend = true;
+								let last: ReturnType<typeof sendCheck>;
+								try {
+									last = sendCheck(p, passedFor);
+								} catch {
+									last = { refuse: "the session ended before the refresh went out" };
+								}
+								if (last) {
+									takeBack();
+									refused = last.refuse;
+									refusedStop = last.stop;
+									return Promise.reject(new Error(last.refuse));
+								}
+							}
+							return globalThis.fetch(input, init);
 						},
 					})
 					.result();
@@ -2367,10 +2405,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			// that reading (from another window, the countdown sees it when it reads next).
 			if (!running && ctx.isIdle() && ctx.model && timerRegime !== undefined && look(ctx).regime !== timerRegime) startTimer(ctx);
 		}
-		if (names.includes("compactAtPercent") || names.includes("compactAtTokens")) {
-			fullStuck = false;
-			lastFullSkip = undefined;
-		}
 	};
 
 	const DEFAULT_SUFFIX = " · default";
@@ -2542,7 +2576,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				try {
 					config = saveConfig(patch);
 					latest = config;
-					latestStamp = settingsStamp();
 				} catch (error) {
 					ctx.ui.notify(`pi-cache-keeper could not save the setting: ${error instanceof Error ? error.message : String(error)}`, "error");
 					return build(id);
