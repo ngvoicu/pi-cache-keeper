@@ -4,17 +4,20 @@
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { test } from "node:test";
-import { anthropic, flush, inWindow, settingsFile, skip, textAnswer, type Any } from "./session-runtime.ts";
+import { anthropic, dir, flush, inWindow, piMessages, settingsFile, skip, textAnswer, type Any } from "./session-runtime.ts";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const COLD_MODEL = { provider: "fixture-cold", id: "summarizer", name: "Summarizer", api: "anthropic-messages", baseUrl: "https://cold.invalid", reasoning: false, input: ["text"], contextWindow: 400_000, maxTokens: 32_000, cost: { input: 0.25, output: 1.25, cacheRead: 0.025, cacheWrite: 0.3 } };
 
 // Every other setting off, the cold model set, and Pi's compaction keeping little so there is something to summarize.
-const settings = () =>
+const settings = (pick = "fixture-cold/summarizer") =>
 	writeFileSync(
 		settingsFile,
 		JSON.stringify({
-			cacheKeeper: { compactAtPercent: 0, compactAtTokens: 0, compactBeforeExpiry: false, keepWarmMinutes: 0, modelData: false, cacheRetention: "short", coldCompactionModel: "fixture-cold/summarizer" },
+			cacheKeeper: { compactAtPercent: 0, compactAtTokens: 0, compactBeforeExpiry: false, keepWarmMinutes: 0, modelData: false, cacheRetention: "short", coldCompactionModel: pick },
 			compaction: { keepRecentTokens: 1 },
+			retry: { enabled: false },
 			cacheWarming: "idle",
 			packages: [],
 		}),
@@ -107,4 +110,73 @@ test("the same with the cold model failing: Pi's own compaction writes the entry
 	assert.equal(decision.outcome, "fallback");
 	assert.match(decision.cold.skipped, /^its request failed: /);
 	assert.deepEqual([result.event, result.by], ["result", "pi"]);
+});
+
+// Finding 1 (review of 0.10.0, round 1), as the reviewer reproduced it on both Pi versions: a gateway streams part of the
+// history's summary, then ends the reply aborted (or in an error) while the compaction's own signal is live. That is a
+// failure: the turn's prefix is not sent, and Pi's own compaction writes the entry.
+test("review 1: a split turn whose history reply streams text and then ends aborted or in an error: no prefix request, Pi's own compaction writes the entry", { skip: skip || !piMessages }, async () => {
+	for (const end of ["aborted", "error"] as const) {
+		settings("fixture/gateway");
+		const seen: Any = {};
+		const result = await inWindow(
+			async (w) => {
+				const s = w.runtime.session;
+				const manager = w.manager();
+				const registry = s.extensionRunner.createContext().modelRegistry;
+				const target = { ...s.model, api: "pi-messages", provider: "fixture", id: "gateway", baseUrl: "https://gateway.invalid" };
+				const find = registry.find.bind(registry);
+				const auth = registry.hasConfiguredAuth.bind(registry);
+				const stream = registry.streamSimple;
+				const usage = { input: 1500, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 1520, cost: { input: 0.005, output: 0.001, cacheRead: 0, cacheWrite: 0, total: 0.006 } };
+				const cold: string[] = [];
+				const native: string[] = [];
+				registry.find = (provider: string, id: string) => (provider === "fixture" && id === "gateway" ? target : find(provider, id));
+				registry.hasConfiguredAuth = (model: Any) => model === target || auth(model);
+				registry.streamSimple = (model: Any, context: Any, options: Any) => {
+					if (model !== target) return stream(model, context, options);
+					return piMessages.streamSimple(model, context, {
+						...options,
+						apiKey: "fixture",
+						fetch: async () => {
+							const first = cold.length === 0;
+							cold.push(JSON.stringify(context.messages).includes("prior implementation") ? "history" : "prefix");
+							const events = [
+								{ type: "start" },
+								{ type: "text_start", contentIndex: 0 },
+								{ type: "text_delta", contentIndex: 0, delta: first ? "Partial checkpoint from cancelled upstream" : "Completed checkpoint" },
+								first ? { type: "error", reason: end, errorMessage: "upstream cancelled", usage } : { type: "done", reason: "stop", usage },
+							];
+							return new Response(events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+						},
+					});
+				};
+				s.agent.streamFunction = (model: Any, context: Any, options: Any) => {
+					native.push(JSON.stringify(context.messages).includes("prior implementation") ? "history" : "prefix");
+					return anthropic.streamSimple(model, context, { ...options, apiKey: "sk-fixture", fetch: async () => textAnswer("Native Pi checkpoint") });
+				};
+				const user = (text: string) => ({ role: "user", timestamp: Date.now(), content: text });
+				const assistant = (text: string) => ({ role: "assistant", timestamp: Date.now(), content: [{ type: "text", text }], provider: s.model.provider, model: s.model.id, api: s.model.api, usage, stopReason: "stop" });
+				manager.appendMessage(user("Preserve the prior implementation detail"));
+				manager.appendMessage(assistant("A durable decision"));
+				manager.appendMessage(user("Current task and progress"));
+				manager.appendMessage(assistant("Newest kept answer"));
+				await s.compact();
+				await flush();
+				seen.cold = cold;
+				seen.native = native;
+				seen.entry = manager.getBranch().findLast((e: Any) => e.type === "compaction");
+				seen.record = readFileSync(join(dir, "cache-keeper.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line)).findLast((r: Any) => r.event === "compact");
+			},
+			{ realCompact: true },
+		);
+		assert.deepEqual(result.thrown, [], end);
+		assert.deepEqual(seen.cold, ["history"], `${end}: the prefix is not sent`);
+		assert.ok(seen.native.length > 0, `${end}: Pi's own compaction ran`);
+		assert.notEqual(seen.entry.fromHook, true, `${end}: not the extension's entry`);
+		assert.match(seen.entry.summary, /^Native Pi checkpoint/, end);
+		assert.equal(seen.record.outcome, "fallback", end);
+		assert.equal(seen.record.cold.requests, 1, end);
+		assert.match(seen.record.cold.skipped, end === "aborted" ? /^its request ended early \(aborted\)/ : /^its request failed: /, end);
+	}
 });

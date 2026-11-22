@@ -3,18 +3,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
 import {
-	COLD_CHARS_PER_TOKEN,
+	COLD_BYTES_PER_TOKEN,
+	COLD_PROMPT_BYTES,
 	coldChoiceLabel,
 	coldFit,
 	coldNeedTokens,
-	coldRequestChars,
+	coldRequestBytes,
 	coldUnusable,
+	fitColdLine,
 	formatModelRef,
 	orderColdChoices,
 	parseModelRef,
 	type ColdChoice,
 } from "../cold-compaction.ts";
-import { PI_PROMPT_CHARS } from "../cached-request.ts";
 
 const user = (text: string) => ({ role: "user" as const, content: [{ type: "text" as const, text }], timestamp: 1 });
 const assistant = (text: string) => ({
@@ -39,27 +40,33 @@ test("a model reference parses at the first slash and formats back; an id with s
 });
 
 // 2
-test("what would be sent: one request, two for a split turn; the previous summary and the instructions are counted; tool results are counted cut", () => {
+test("what would be sent: one request, two for a split turn, in UTF-8 bytes; the previous summary and the instructions are counted; tool results are counted cut", () => {
 	const history = [user("Read the file."), assistant("Reading."), toolResult("x".repeat(10_000))];
-	const one = coldRequestChars({ messagesToSummarize: history, turnPrefixMessages: [], isSplitTurn: false, previousSummary: undefined });
+	const one = coldRequestBytes({ messagesToSummarize: history, turnPrefixMessages: [], isSplitTurn: false, previousSummary: undefined });
 	assert.equal(one.length, 1);
-	assert.equal(one[0], asText(history) + PI_PROMPT_CHARS);
+	assert.equal(one[0], asText(history) + COLD_PROMPT_BYTES);
 	assert.ok(asText(history) < 3_000, "the 10,000-character tool result is counted cut to 2,000");
-	const withSummary = coldRequestChars({ messagesToSummarize: history, turnPrefixMessages: [], isSplitTurn: false, previousSummary: "s".repeat(500) }, "focus on tests");
+	const withSummary = coldRequestBytes({ messagesToSummarize: history, turnPrefixMessages: [], isSplitTurn: false, previousSummary: "s".repeat(500) }, "focus on tests");
 	assert.equal(withSummary[0], one[0] + 500 + "\n\nAdditional focus: ".length + "focus on tests".length);
 	const prefix = [user("Then the next."), assistant("On it.")];
-	const split = coldRequestChars({ messagesToSummarize: history, turnPrefixMessages: prefix, isSplitTurn: true, previousSummary: "s".repeat(500) });
-	assert.deepEqual(split, [one[0] + 500, asText(prefix) + PI_PROMPT_CHARS], "the history (with the previous summary), then the turn's prefix (without)");
+	const split = coldRequestBytes({ messagesToSummarize: history, turnPrefixMessages: prefix, isSplitTurn: true, previousSummary: "s".repeat(500) });
+	assert.deepEqual(split, [one[0] + 500, asText(prefix) + COLD_PROMPT_BYTES], "the history (with the previous summary), then the turn's prefix (without)");
 	// A split turn with no earlier history sends only the prefix.
-	assert.deepEqual(coldRequestChars({ messagesToSummarize: [], turnPrefixMessages: prefix, isSplitTurn: true, previousSummary: undefined }), [asText(prefix) + PI_PROMPT_CHARS]);
-	assert.equal(COLD_CHARS_PER_TOKEN, 3);
-	assert.equal(coldNeedTokens([3_000, 3_001]), 1_001, "the larger request, rounded up");
+	assert.deepEqual(coldRequestBytes({ messagesToSummarize: [], turnPrefixMessages: prefix, isSplitTurn: true, previousSummary: undefined }), [asText(prefix) + COLD_PROMPT_BYTES]);
+	assert.equal(COLD_BYTES_PER_TOKEN, 1);
+	// Counted in UTF-8 bytes: "é" is two, "中" three.
+	assert.equal(coldRequestBytes({ messagesToSummarize: [user("é中")], turnPrefixMessages: [], isSplitTurn: false, previousSummary: undefined })[0], "[User]: ".length + 5 + COLD_PROMPT_BYTES);
+	assert.equal(coldNeedTokens([3_000, 3_001]), 3_001, "the larger request");
 	assert.equal(coldNeedTokens([]), 0);
 });
 
 // 3
 test("the fit rule: fits, too small, window unknown, an output limit under 16k, and the larger of two requests decides", () => {
-	assert.deepEqual(coldFit({ contextWindow: 1_000_000, maxTokens: 65_536 }, 150_000), { fits: true, need: 150_000, window: 1_000_000 });
+	assert.deepEqual(coldFit({ contextWindow: 1_000_000, maxTokens: 65_536 }, 150_000), { fits: true, need: 150_000, window: 1_000_000, maxTokens: 65_536 });
+	assert.deepEqual(coldFit({ contextWindow: 200_000, maxTokens: 64_000 }, 170_000), { fits: true, need: 170_000, window: 200_000, maxTokens: 26_000 }, "the cap sent: what the window leaves");
+	const reserved = coldFit({ contextWindow: 200_000, maxTokens: 64_000 }, 170_000, 2_048);
+	assert.equal(reserved.fits ? reserved.maxTokens : undefined, 23_952, "less the thinking reserve");
+	assert.equal(coldFit({ contextWindow: 200_000, maxTokens: 64_000 }, 180_000, 2_048).fits, false, "16k of room, less 2k of thinking");
 	assert.deepEqual(coldFit({ contextWindow: 200_000, maxTokens: 64_000 }, 260_000), { fits: false, why: "it needs about 260k tokens and its window is 200k", need: 260_000, window: 200_000 });
 	// Room for the summary: 200k - 182k - 4k = 14k, under 16k.
 	assert.equal(coldFit({ contextWindow: 200_000, maxTokens: 64_000 }, 182_000).fits, false);
@@ -69,7 +76,7 @@ test("the fit rule: fits, too small, window unknown, an output limit under 16k, 
 	assert.equal(coldFit({ contextWindow: 128_000, maxTokens: 8_192 }, 110_000).fits, true);
 	assert.equal(coldFit({ contextWindow: 128_000, maxTokens: 8_192 }, 117_000).fits, false, "7k of room, under its 8k limit");
 	// Two requests: the larger decides.
-	const need = coldNeedTokens([300_000, 600_000]);
+	const need = coldNeedTokens([150_000, 200_000]);
 	assert.equal(need, 200_000);
 	assert.equal(coldFit({ contextWindow: 200_000, maxTokens: 32_000 }, need).fits, false);
 	assert.equal(coldFit({ contextWindow: 400_000, maxTokens: 32_000 }, need).fits, true);
@@ -102,4 +109,41 @@ test("the order of the list: the ones that hold this session first, subscription
 	const twin = { ...priced, ref: "a/gemini-2.5-flash" };
 	const order = orderColdChoices([virtual, small, free, priced, unknown, sub, cheap, twin]).map((c) => c.ref);
 	assert.deepEqual(order, ["openai-codex/gpt-5.5", "google/gemini-2.5-flash-lite", "a/gemini-2.5-flash", "google/gemini-2.5-flash", "ollama/qwen3", "anthropic/claude-haiku-4-5", "local/llama", "pi/auto"]);
+});
+
+// Finding 4b (review, round 1): dense text. Measured with OpenAI's tokenizers (gpt-tokenizer 3.4.0): the reviewer's
+// base64 attachment (221,872 characters) is 151,599 tokens in o200k_base; 20,000 rare CJK characters are 46,512 tokens in
+// cl100k_base (2.3 tokens a character). Counted in UTF-8 bytes, one token each, both are counted high.
+test("review 4b: dense text is counted high enough to be refused where it doesn't fit: the reviewer's base64, and CJK", async () => {
+	const { createHash } = await import("node:crypto");
+	const { coldRequestBytes } = await import("../cold-compaction.ts");
+	const blob = Buffer.concat(Array.from({ length: 2600 }, (_, i) => createHash("sha256").update(`capture ${i}`).digest())).toString("base64");
+	const base64 = coldNeedTokens(coldRequestBytes({ messagesToSummarize: [user(`This is the diagnostic attachment as base64:\n${blob}\n${blob}`)], turnPrefixMessages: [], isSplitTurn: false, previousSummary: undefined }));
+	assert.ok(base64 >= 151_599, `${base64}`);
+	assert.equal(coldFit({ contextWindow: 128_000, maxTokens: 16_384 }, base64).fits, false, "gpt-4o-mini's window: refused");
+	const rare = Array.from({ length: 20_000 }, (_, i) => String.fromCodePoint(0x4e00 + ((i * 7919) % 20_000))).join("");
+	const cjk = coldNeedTokens(coldRequestBytes({ messagesToSummarize: [user(rare)], turnPrefixMessages: [], isSplitTurn: false, previousSummary: undefined }));
+	assert.ok(cjk >= 46_512, `${cjk}`);
+	assert.equal(coldFit({ contextWindow: 50_000, maxTokens: 8_192 }, cjk).fits, false, "a 50k window can't hold 46k tokens of CJK");
+});
+
+// Finding 3 (review, round 1): the README says plainly what reaches the picked model's provider.
+test("review 3: the README's privacy note names the shell output sent in full and, on older Pi, the thinking", async () => {
+	const { readFileSync } = await import("node:fs");
+	const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+	const note = readme.split("\n").find((line) => line.startsWith("**Where your conversation goes.**")) ?? "";
+	assert.match(note, /full output of shell commands you ran with `!`/);
+	assert.match(note, /on Pi before 1\.2, the assistant's thinking/);
+});
+
+// Finding 10 (review, round 1): a line too wide for the terminal keeps the end of a model id that doesn't fit.
+test("review 10: fitting a menu line keeps the end of a long model id, and cuts the rest of a line whose id fits", () => {
+	const a = "amazon-bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0";
+	const b = "amazon-bedrock/anthropic.claude-sonnet-4-6";
+	const line = (ref: string) => `${ref} · 1M window · $3.30 in, $16.50 out per M · holds this session`;
+	assert.equal(fitColdLine(line(a), a, 36), `…${a.slice(-35)}`);
+	assert.equal(fitColdLine(line(b), b, 36), `…${b.slice(-35)}`);
+	assert.notEqual(fitColdLine(line(a), a, 36), fitColdLine(line(b), b, 36));
+	assert.equal(fitColdLine(line("google/gemini-2.5-flash"), "google/gemini-2.5-flash", 36), "google/gemini-2.5-flash · 1M window ");
+	assert.equal(fitColdLine("off", "", 36), "off");
 });

@@ -351,7 +351,7 @@ test("each case decided before sending: nothing is returned, no request is sent,
 		["a model Pi no longer lists", { cold: "google/gemini-9" }, "Pi no longer lists it"],
 		["no credentials", { noAuth: ["google"] }, "Pi has no credentials for google"],
 		["no window", { models: [opus(), { ...gemini(), contextWindow: 0 }] }, "it declares no context window"],
-		["too small", { models: [opus(), { ...gemini(), contextWindow: 4_000, maxTokens: 2_000 }] }, "it needs about 1k tokens and its window is 4k"],
+		["too small", { models: [opus(), { ...gemini(), contextWindow: 4_000, maxTokens: 2_000 }] }, "it needs about 4k tokens and its window is 4k"],
 		["a virtual model", { models: [opus(), { ...gemini(), api: "pi-virtual" }] }, "it is a virtual model"],
 		["through pi-claude-bridge", { models: [opus(), { ...gemini(), api: "claude-bridge" }] }, "it runs through pi-claude-bridge"],
 	];
@@ -371,9 +371,9 @@ test("each case decided before sending: nothing is returned, no request is sent,
 test("each failure after sending: a thrown error, an error answer, the output limit, a tool call, an empty text; nothing is returned, one request was sent, the reason is recorded", async (t) => {
 	const cases: [string, Options["coldAnswer"], string][] = [
 		["thrown", () => Promise.reject(new Error("socket hang up")), "its request failed: socket hang up"],
-		["error answer", () => answer(undefined, { stopReason: "error", errorMessage: "401 invalid key" }), "its request failed: Summarization failed: 401 invalid key"],
-		["output limit", () => answer("half a summ", { stopReason: "length" }), "its request failed: Summarization failed: generation hit the token cap and the summary is incomplete"],
-		["tool call", () => answer(undefined, { stopReason: "toolUse", content: [{ type: "toolCall", id: "x", name: "read", arguments: {} }] }), "its request failed: Summarization attempted to call a tool"],
+		["error answer", () => answer(undefined, { stopReason: "error", errorMessage: "401 invalid key" }), "its request failed: 401 invalid key"],
+		["output limit", () => answer("half a summ", { stopReason: "length" }), "the summary hit the output limit"],
+		["tool call", () => answer(undefined, { stopReason: "toolUse", content: [{ type: "toolCall", id: "x", name: "read", arguments: {} }] }), "the model called a tool instead of writing the summary"],
 		["empty", () => answer("  "), "it returned no summary text"],
 	];
 	for (const [label, coldAnswer, why] of cases) {
@@ -538,5 +538,88 @@ test("trigger 3, the conversation doesn't fit the session's model: a switch to a
 	assert.equal(await tiny.compaction("overflow"), undefined);
 	assert.equal(tiny.calls.length, 0);
 	const record = lastRecord();
-	assert.deepEqual([record.outcome, record.cold.skipped, record.cold.window], ["fallback", "it needs about 1k tokens and its window is 8k", 8_000]);
+	assert.deepEqual([record.outcome, record.cold.skipped, record.cold.window], ["fallback", "it needs about 4k tokens and its window is 8k", 8_000]);
+});
+
+// ------------------------------------------------------------------- the review's findings (0.10.0, round 1)
+
+const splitPrep = () => preparation({ isSplitTurn: true, turnPrefixMessages: [{ role: "user", content: [{ type: "text", text: "Now the tests." }], timestamp: 20 }] });
+
+// Finding 1: a reply that doesn't end in a normal stop is a failure, whatever it carries, and nothing more is sent.
+test("review 1: a reply that ends aborted (the local signal live), in an error or at the output limit, after partial text, is a failure: no prefix request, Pi's own compaction", async (t) => {
+	const cases: [string, Record<string, unknown>, RegExp][] = [
+		["aborted upstream", { stopReason: "aborted", errorMessage: "upstream cancelled" }, /^its request ended early \(aborted\): upstream cancelled$/],
+		["error after text", { stopReason: "error", errorMessage: "stream reset" }, /^its request failed: stream reset$/],
+		["output limit", { stopReason: "length" }, /^the summary hit the output limit$/],
+	];
+	for (const [label, end, why] of cases) {
+		mock.timers.reset();
+		clock(t);
+		const h = harness({ coldAnswer: (_call, n) => (n === 1 ? answer("Partial checkpoint from cancelled upstream", end) : answer("Completed prefix")) });
+		expire();
+		assert.equal(await h.compaction("manual", { preparation: splitPrep() }), undefined, label);
+		assert.equal(h.coldCalls().length, 1, `${label}: the prefix is not sent`);
+		const record = lastRecord();
+		assert.equal(record.outcome, "fallback", label);
+		assert.match(record.cold.skipped, why, label);
+		assert.equal(record.cold.requests, 1, `${label}: the requests really sent`);
+	}
+});
+
+// Finding 2: emptiness is checked after the file lists are taken out.
+test("review 2: a reply holding only file lists is no summary: Pi's own compaction runs", async (t) => {
+	clock(t);
+	const h = harness({ coldAnswer: () => answer("<read-files>\na.ts\n</read-files>\n\n<modified-files>\nb.ts\n</modified-files>") });
+	expire();
+	assert.equal(await h.compaction("manual"), undefined);
+	assert.deepEqual([lastRecord().outcome, lastRecord().cold.skipped], ["fallback", "it returned no summary text"]);
+});
+
+// Finding 6: a split turn whose history summary is empty sends no prefix; the record counts what was really sent.
+test("review 6: an empty history summary on a split turn stops before the prefix; an Esc during the first request is a cancel that counts one request", async (t) => {
+	clock(t);
+	const h = harness({ coldAnswer: (_call, n) => answer(n === 1 ? "  " : "A complete prefix") });
+	expire();
+	assert.equal(await h.compaction("manual", { preparation: splitPrep() }), undefined);
+	assert.equal(h.coldCalls().length, 1);
+	assert.deepEqual([lastRecord().outcome, lastRecord().cold.skipped, lastRecord().cold.requests], ["fallback", "it returned no summary text", 1]);
+
+	mock.timers.reset();
+	clock(t);
+	const esc = new AbortController();
+	const h2 = harness({
+		coldAnswer: () => {
+			esc.abort();
+			return answer("Partial", { stopReason: "aborted" });
+		},
+	});
+	expire();
+	assert.deepEqual(await h2.compaction("manual", { signal: esc.signal, preparation: splitPrep() }), { cancel: true });
+	assert.equal(h2.coldCalls().length, 1);
+	assert.deepEqual([lastRecord().outcome, lastRecord().cold.requests], ["cancelled", 1]);
+});
+
+// Finding 4a: the output cap the fit rule assumed is the one passed with the request.
+test("review 4a: the request carries the output cap the fit rule computed, less the thinking a model that can't turn it off adds", async (t) => {
+	const { coldFit, coldNeedTokens, coldRequestBytes } = await import("../cold-compaction.ts");
+	const need = coldNeedTokens(coldRequestBytes(preparation() as Any));
+	for (const [label, model, reserve] of [
+		["thinking off", { ...gemini(), contextWindow: 200_000, maxTokens: 200_000 }, 0],
+		["lowest level low", { ...gemini(), contextWindow: 200_000, maxTokens: 200_000, thinkingLevelMap: { off: null, minimal: null } }, 2_048],
+	] as const) {
+		mock.timers.reset();
+		clock(t);
+		const h = harness({ models: [opus(), model] });
+		expire();
+		assert.ok((await h.compaction("manual")).compaction, label);
+		const fit = coldFit(model as Any, need);
+		assert.equal(fit.fits, true);
+		const budget = 200_000 - need - 4_000;
+		// Never above the cap the fit assumed; Pi 1.x passes none of its own, so it is that cap; Pi 0.87.0 passes a lower one
+		// (0.8 of reserveTokens), which stays.
+		const sent = h.coldCalls()[0].options.maxTokens;
+		assert.equal(typeof sent, "number", label);
+		assert.ok(sent <= budget - reserve, `${label}: ${sent}`);
+		assert.ok(sent === budget - reserve || sent === Math.floor(0.8 * 16_384), `${label}: ${sent}`);
+	}
 });

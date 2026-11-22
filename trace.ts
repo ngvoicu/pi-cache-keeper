@@ -31,11 +31,11 @@ export interface ColdTrace {
 	/** The fit rule's two numbers, where it got that far. */
 	needTokens?: number;
 	window?: number;
-	/** 1, or 2 for a split turn. */
+	/** The requests really sent: 1, or 2 for a split turn; 0 where nothing left. */
 	requests?: number;
+	/** The output cap the requests were sent with, the one the fit rule assumed. */
+	maxTokens?: number;
 	response?: { seconds: number; usage: TraceUsage; summaryChars: number };
-	/** What the same tokens cost at the session model's prices, when both models have prices. */
-	sessionModelCost?: number;
 	skipped?: string;
 }
 
@@ -321,19 +321,8 @@ const deltaText = (ratio: number) =>
 	: ratio < 2 ? `${Math.round(100 * (ratio - 1))}% more`
 	: `${ratio.toFixed(1)}× as much`;
 
-/**
- * The line under a compaction: a cached one against Pi's compaction; one the cold model wrote against the same request at
- * the session model's prices, only where both models have prices and the cold model's request was paid for in money.
- */
+/** The line under a cached compaction: against Pi's compaction. A summary the cold model wrote has none: its own cost is on its line. */
 export function comparison(record: CompactTrace): { text: string; ratio: number } | undefined {
-	if (record.outcome === "cold") {
-		const { cold } = record;
-		const cost = cold?.response?.usage.cost ?? 0;
-		const theirs = cold?.sessionModelCost ?? 0;
-		if (!cold || cold.via === "sub" || cost <= 0 || theirs <= 0) return undefined;
-		const ratio = cost / theirs;
-		return { text: `vs ${record.model}: ${deltaText(ratio)}, ${formatCost(cost)} instead of ~${formatCost(theirs)} for the same request`, ratio };
-	}
 	const { piEstimate, response } = record;
 	if (record.outcome !== "cached" || !piEstimate || !response) return undefined;
 	const { usage } = response;
@@ -387,7 +376,9 @@ export function describeTrace(record: TraceRecord): string {
 			const cold = record.cold;
 			if (record.outcome === "cold" && cold?.response) {
 				const { usage, seconds, summaryChars } = cold.response;
-				const cost = cold.via === "sub" ? "on a subscription" : usage.cost > 0 ? formatCost(usage.cost) : "no price";
+				// What the requests recorded: a cost is shown as that cost (also through a route announced as a subscription);
+				// none, on a subscription login, is the subscription's.
+				const cost = usage.cost > 0 ? formatCost(usage.cost) : cold.via === "sub" ? "on a subscription" : "no price";
 				const sent = usage.input + usage.cacheRead + usage.cacheWrite;
 				return `${time} ${what}: summary by ${cold.model}, ${record.reason}: ${formatTokens(sent)} in, ${formatTokens(usage.output)} out, ${cost}, ${seconds.toFixed(1)}s, summary ${summaryChars} chars`;
 			}

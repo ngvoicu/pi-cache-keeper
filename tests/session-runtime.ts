@@ -32,6 +32,8 @@ const sessionModule = await load("pi-coding-agent/dist/core/session-manager.js")
 const catalog = await load("pi-ai/dist/models.generated.js");
 const anthropic = await load("pi-ai/dist/api/anthropic-messages.js");
 const transcript = await load("pi-ai/dist/utils/transcript.js");
+/** Pi's own pi-messages adapter: a provider that streams Pi's events, which can end a reply in any way. */
+export const piMessages = await load("pi-ai/dist/api/pi-messages.js");
 // Pi's settings menu draws with Pi's theme.
 const themeModule = await load("pi-coding-agent/dist/modes/interactive/theme/theme.js");
 themeModule?.initTheme("dark", false);
@@ -78,8 +80,8 @@ export const writeDefaults = (cacheKeeper: Record<string, unknown>) =>
 	writeFileSync(settingsFile, JSON.stringify({ cacheKeeper: { modelData: false, cacheRetention: "short", compactAtPercent: 0, ...cacheKeeper }, cacheWarming: "idle", packages: [] }));
 
 interface Menu {
-	/** The menu as drawn. */
-	text: () => string;
+	/** The menu as drawn, at 400 columns or the given width. */
+	text: (width?: number) => string;
 	/** Moves to the row with this label and presses Enter until its value reads `value`. */
 	set: (label: string, value: string) => void;
 	/** Presses Enter on the row with this label once. */
@@ -239,7 +241,7 @@ export async function inWindow(scenario: (w: Window) => Promise<void>, o: { pers
 			const current = shown as { component: Any; done: Promise<void> } | undefined;
 			assert.ok(current, "the settings menu");
 			const { component, done } = current;
-			const lines = () => component.render(400).map(plain);
+			const lines = (width = 400) => component.render(width).map(plain);
 			const selected = () => lines().find((line: string) => line.startsWith("→"));
 			const row = (label: string) => lines().find((line: string) => line.replace(/^→?\s*/, "").startsWith(label));
 			const goTo = (label: string) => {
@@ -247,7 +249,7 @@ export async function inWindow(scenario: (w: Window) => Promise<void>, o: { pers
 				assert.ok(selected()?.replace(/^→\s*/, "").startsWith(label), `the row ${label}`);
 			};
 			return {
-				text: () => lines().join("\n"),
+				text: (width) => lines(width).join("\n"),
 				press: (label) => {
 					goTo(label);
 					component.handleInput(" ");

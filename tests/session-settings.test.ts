@@ -639,7 +639,10 @@ const coldModels = (w: Any) => {
 	registry.find = (provider: string, id: string) => listed.find((m) => m.provider === provider && m.id === id) ?? find(provider, id);
 	registry.hasConfiguredAuth = (model: Any) => listed.includes(model) || auth(model);
 };
-const GEMINI_LINE = /^cold compaction: google\/gemini-2\.5-flash · 1\.05M window · \$0\.30 in, \$2\.50 out per M · holds this session$/;
+// What /cache-keeper says of the picked model: the setting, the model, its window and price; no prediction (review 7).
+const DECIDED = "whether it writes a summary is decided at each compaction, from the part Pi cuts off";
+const GEMINI_LINE = `cold compaction: google/gemini-2.5-flash · 1.05M window · $0.30 in, $2.50 out per M · ${DECIDED}`;
+const NOT_CACHED = "the cold compaction model writes the summary where it can, else Pi's compaction";
 
 // Design 0.10.0, test 7.
 test("the cold compaction model: a session's own value wins over the default, its off wins over a default model, the default is read as saved now, and back to the defaults drops it", { skip }, async () => {
@@ -648,7 +651,7 @@ test("the cold compaction model: a session's own value wins over the default, it
 		async (w) => {
 			coldModels(w);
 			await w.answer();
-			assert.match(lineOf(await w.status(), "cold compaction:") ?? "", GEMINI_LINE, "the default, as saved");
+			assert.equal(lineOf(await w.status(), "cold compaction:"), GEMINI_LINE, "the default, as saved");
 			// Off for this session over a default model: the list's second line.
 			let menu = await w.menu();
 			assert.match(menu.text(), /\n {2}Compact a cold cache with +google\/gemini-2\.5-flash · default\n/);
@@ -666,7 +669,7 @@ test("the cold compaction model: a session's own value wins over the default, it
 			menu = await w.menu();
 			menu.press("Back to the defaults");
 			await menu.close();
-			assert.match(lineOf(await w.status(), "cold compaction:") ?? "", /^cold compaction: acme\/tiny · 8k window · \$0\.05 in, \$0\.10 out per M · (holds this session|too small now)/);
+			assert.equal(lineOf(await w.status(), "cold compaction:"), `cold compaction: acme/tiny · 8k window · $0.05 in, $0.10 out per M · ${DECIDED}`);
 			// A session's own model over the default, picked by typing.
 			menu = await w.menu();
 			menu.press(COLD);
@@ -699,11 +702,11 @@ test("the cold compaction model's row, its list, its /cache-keeper lines and the
 		assert.match(menu.text(), /\n {2}Or once it holds +[^\n]+\n {2}Compact a cold cache with +off · default\n {2}Compact before the cache expires/, "after Or once it holds");
 		menu.press(COLD);
 		const list = menu.text().split("\n");
-		assert.match(list.find((line) => line.startsWith("Compact a cold cache with,")) ?? "", /^Compact a cold cache with, in this session · "holds this session" speaks of this session now \(about \d+ tokens as text\)$/);
+		assert.match(list.find((line) => line.startsWith("Compact a cold cache with,")) ?? "", /^Compact a cold cache with, in this session · "holds this session" speaks of this session now \(about \d+k? tokens as text\)$/);
 		const lines = list.filter((line) => /^(→ )?\s*(default|off|google|acme|local|pi\/|anthropic)/.test(line)).map((line) => line.replace(/^→?\s*/, ""));
 		assert.deepEqual(lines.slice(0, 2), ["default (off)", "off"]);
 		assert.ok(lines.includes("google/gemini-2.5-flash · 1.05M window · $0.30 in, $2.50 out per M · holds this session"), lines.join("\n"));
-		assert.ok(lines.some((line) => /^acme\/tiny · 8k window · \$0\.05 in, \$0\.10 out per M · too small now \(needs about \d+\)$/.test(line)), lines.join("\n"));
+		assert.ok(lines.some((line) => /^acme\/tiny · 8k window · \$0\.05 in, \$0\.10 out per M · too small now \(needs about \d+k?\)$/.test(line)), lines.join("\n"));
 		assert.ok(lines.includes("local/llama · window unknown · no price · can't be used: it declares no context window"), lines.join("\n"));
 		assert.ok(!lines.some((line) => line.startsWith("pi/auto")), "a virtual model is not offered");
 		// The models that hold this session come first.
@@ -722,16 +725,16 @@ test("the cold compaction model's row, its list, its /cache-keeper lines and the
 		// /cache-keeper: the line, and the next compaction on a cold cache (none since the session's model last answered
 		// is still warm: the cached path; a model switch makes it cold).
 		let status = await w.status();
-		assert.match(lineOf(status, "cold compaction:") ?? "", GEMINI_LINE);
+		assert.equal(lineOf(status, "cold compaction:"), GEMINI_LINE);
 		assert.match(lineOf(status, "next compaction:") ?? "", /^next compaction: cached path;/);
 		const session = w.runtime.session;
 		const original = session.model;
 		session.agent.state.model = { ...original, id: "claude-sonnet-4-5" };
 		status = await w.status();
-		assert.equal(lineOf(status, "next compaction:"), "next compaction: google/gemini-2.5-flash, because the model changed since the last request");
+		assert.equal(lineOf(status, "next compaction:"), `next compaction: not from the cache, because the model changed since the last request; ${NOT_CACHED}`);
 		saveConfig({ coldCompactionModel: "local/llama" });
 		status = await w.status();
-		assert.equal(lineOf(status, "next compaction:"), "next compaction: Pi's compaction, because the model changed since the last request; local/llama can't: it declares no context window");
+		assert.equal(lineOf(status, "next compaction:"), `next compaction: not from the cache, because the model changed since the last request; ${NOT_CACHED}`);
 		assert.equal(lineOf(status, "cold compaction:"), "cold compaction: local/llama · window unknown · no price · can't be used: it declares no context window");
 		session.agent.state.model = original;
 		// A pick Pi can't use now is kept, and marked on the row and in /cache-keeper.
@@ -741,6 +744,42 @@ test("the cold compaction model's row, its list, its /cache-keeper lines and the
 		assert.match(menu.text(), /\n {2}Compact a cold cache with +google\/gemini-9 · not available now · default\n/);
 		await menu.close();
 		assert.equal(JSON.parse(settingsText()).cacheKeeper.coldCompactionModel, "google/gemini-9");
+	});
+	assert.deepEqual(result.thrown, []);
+});
+
+// Findings 10 and 3 (review of 0.10.0, round 1): the picker's rows stay distinct in a narrow terminal, showing the end of
+// a model id that doesn't fit; and the row says what goes to the picked model's provider.
+test("review 10 and 3: at 40 and 60 columns the picker's rows keep the end of a long model id and stay distinct; the row's description names what is sent", { skip }, async () => {
+	writeDefaults({});
+	const result = await inWindow(async (w) => {
+		const registry = w.runtime.session.extensionRunner.createContext().modelRegistry;
+		const long = [
+			{ ...GEMINI, provider: "amazon-bedrock", id: "anthropic.claude-sonnet-4-5-20250929-v1:0", contextWindow: 200_000, cost: { input: 3.3, output: 16.5, cacheRead: 0.33, cacheWrite: 4.125 } },
+			{ ...GEMINI, provider: "amazon-bedrock", id: "anthropic.claude-sonnet-4-6", contextWindow: 1_000_000, cost: { input: 3.3, output: 16.5, cacheRead: 0.33, cacheWrite: 4.125 } },
+		];
+		registry.getAvailable = () => long;
+		registry.find = (provider: string, id: string) => long.find((m) => m.provider === provider && m.id === id);
+		registry.hasConfiguredAuth = () => true;
+		await w.answer();
+		const menu = await w.menu();
+		menu.press(COLD);
+		for (const width of [40, 60]) {
+			const rows = menu
+				.text(width)
+				.split("\n")
+				.filter((line) => /amazon-bedrock|claude-sonnet|…/.test(line) && !line.startsWith("Compact a cold"));
+			assert.equal(rows.length, 2, `${width}: ${rows.join(" | ")}`);
+			assert.notEqual(rows[0].replace(/^→?\s*/, ""), rows[1].replace(/^→?\s*/, ""), `${width}: distinct`);
+			for (const row of rows) assert.ok(row.length <= width, `${width}: ${row}`);
+			assert.ok(rows.some((row) => row.includes("claude-sonnet-4-6")), `${width}: ${rows.join(" | ")}`);
+			assert.ok(rows.some((row) => row.includes("20250929-v1:0")), `${width}: ${rows.join(" | ")}`);
+		}
+		menu.keys("\x1b");
+		const description = menu.text();
+		assert.match(description, /full output of shell commands you ran with !/);
+		assert.match(description, /on Pi before 1\.2, the assistant's thinking/);
+		await menu.close();
 	});
 	assert.deepEqual(result.thrown, []);
 });

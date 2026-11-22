@@ -195,22 +195,21 @@ test("a cold compaction's words: a summary with prices, on a subscription, witho
 		cwd: "/",
 		at,
 		session: "s",
-		cold: { model: "google/gemini-2.5-flash", via: "api", thinking: "off", needTokens: 148_000, window: 1_000_000, requests: 1, response: { seconds: 12.3, usage, summaryChars: 5120 }, sessionModelCost: 0.82, ...over },
+		cold: { model: "google/gemini-2.5-flash", via: "api", thinking: "off", needTokens: 148_000, window: 1_000_000, requests: 1, response: { seconds: 12.3, usage, summaryChars: 5120 }, ...over },
 	});
 	const priced = cold();
 	assert.equal(describeTrace(priced), `${time} /compact: summary by google/gemini-2.5-flash, the prompt cache has expired: 148k in, 3k out, $0.052, 12.3s, summary 5120 chars`);
-	assert.equal(comparison(priced)?.text, "vs anthropic/claude-opus-4-5: 94% less, $0.052 instead of ~$0.82 for the same request");
+	assert.equal(comparison(priced), undefined, "the picked model's own cost only (review 8)");
 	assert.deepEqual(traceDetails(priced), ["cold model: google/gemini-2.5-flash (API key), thinking off, about 148k tokens of a 1M window, 1 request"]);
 
-	const sub = cold({ via: "sub", requests: 2, thinking: "minimal" });
+	const sub = cold({ via: "sub", requests: 2, thinking: "minimal", response: { seconds: 12.3, usage: { ...usage, cost: 0 }, summaryChars: 5120 } });
 	assert.equal(describeTrace(sub), `${time} /compact: summary by google/gemini-2.5-flash, the prompt cache has expired: 148k in, 3k out, on a subscription, 12.3s, summary 5120 chars`);
-	assert.equal(comparison(sub), undefined, "no dollars to compare on a subscription");
+	assert.equal(comparison(sub), undefined);
 	assert.deepEqual(traceDetails(sub), ["cold model: google/gemini-2.5-flash (subscription), thinking minimal, about 148k tokens of a 1M window, 2 requests"]);
 
-	const free = cold({ response: { seconds: 2, usage: { ...usage, cost: 0 }, summaryChars: 900 }, sessionModelCost: undefined });
+	const free = cold({ response: { seconds: 2, usage: { ...usage, cost: 0 }, summaryChars: 900 } });
 	assert.equal(describeTrace(free), `${time} /compact: summary by google/gemini-2.5-flash, the prompt cache has expired: 148k in, 3k out, no price, 2.0s, summary 900 chars`);
-	assert.equal(comparison(free), undefined, "only when both models have prices");
-	assert.equal(comparison(cold({ sessionModelCost: undefined })), undefined, "the session's model without prices");
+	assert.equal(comparison(free), undefined);
 
 	const skipped = [
 		"it is a virtual model",
@@ -236,4 +235,27 @@ test("a cold compaction's words: a summary with prices, on a subscription, witho
 	assert.deepEqual(traceDetails(plain), []);
 	// An abort during the cold request is a cancel.
 	assert.equal(describeTrace({ ...cold({ response: undefined, skipped: "the compaction was aborted" }), outcome: "cancelled", reason: "the compaction was aborted" }), `${time} /compact: cancelled, the compaction was aborted`);
+});
+
+// Findings 8 and 9 (review, round 1): the card shows the picked model's own cost only, labelled from what the request
+// recorded.
+test("review 8 and 9: no comparison with the session's model; a recorded cost is shown as that cost, also through a subscription route; no cost on a subscription reads subscription", () => {
+	const at = "2026-11-22T13:48:54.000Z";
+	const time = new Date(at).toLocaleTimeString([], { hourCycle: "h23", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+	const record = (via: "sub" | "api", cost: number): CompactTrace & TraceRecord => ({
+		event: "compact",
+		trigger: "manual",
+		model: "anthropic/claude-haiku-5-5",
+		outcome: "cold",
+		reason: "the prompt cache has expired",
+		tokensBefore: 120_000,
+		cwd: "/",
+		at,
+		session: "s",
+		cold: { model: "proxy/gpt-4o-mini", via, requests: 2, response: { seconds: 1, usage: { input: 60_000, cacheRead: 0, cacheWrite: 0, output: 1_000, cost }, summaryChars: 17 } },
+	});
+	assert.equal(comparison(record("api", 0.0192)), undefined, "no line against the session's model");
+	assert.equal(describeTrace(record("sub", 0.0096)), `${time} /compact: summary by proxy/gpt-4o-mini, the prompt cache has expired: 60k in, 1k out, $0.0096, 1.0s, summary 17 chars`);
+	assert.equal(describeTrace(record("sub", 0)), `${time} /compact: summary by proxy/gpt-4o-mini, the prompt cache has expired: 60k in, 1k out, on a subscription, 1.0s, summary 17 chars`);
+	assert.equal(describeTrace(record("api", 0)), `${time} /compact: summary by proxy/gpt-4o-mini, the prompt cache has expired: 60k in, 1k out, no price, 1.0s, summary 17 chars`);
 });

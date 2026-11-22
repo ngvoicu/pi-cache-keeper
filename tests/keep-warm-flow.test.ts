@@ -4746,3 +4746,43 @@ test("stop, the last gate: the one reading that sees a new stop decides; a faili
 		}
 	}
 });
+
+// Finding 5 (review of 0.10.0, round 1): an unknown lifetime is never cold. A period kept warm on a declared lifetime
+// that then can't be read any more (the expiry is unknown): /compact tries the cached path on the session's model, and
+// the cold compaction model gets nothing.
+test("review 5: a declared lifetime that disappears in a keep-warm period: the cached path is tried, not the cold compaction model", async (t) => {
+	t.after(() => mock.timers.reset());
+	clock();
+	fresh({ coldCompactionModel: "scratch/target", modelData: false, compactAtPercent: 0, compactAtTokens: 0, compactBeforeExpiry: false });
+	const h = harness({ lifetime: 1800, ui: true, model: NO_BREAKDOWN, cost: WITH_WRITE });
+	const target = { ...h.model, provider: "scratch", id: "target" };
+	const requests: string[] = [];
+	Object.assign(h.ctx.modelRegistry, {
+		find: () => target,
+		hasConfiguredAuth: () => true,
+		streamSimple: (m: { provider: string; api: string; id: string }, _context: unknown, o: { onPayload?: (p: unknown) => unknown }) => {
+			requests.push(m.provider);
+			const result = (async () => {
+				if (m.provider !== "scratch") await o.onPayload?.({ ...h.sent, messages: [...(h.sent as { messages: unknown[] }).messages, { role: "user", content: "Summarize." }] });
+				return { role: "assistant", api: m.api, provider: m.provider, model: m.id, content: [{ type: "text", text: "A full checkpoint" }], stopReason: "stop", usage: h.usage(), timestamp: Date.now() };
+			})();
+			return { result: () => result };
+		},
+	});
+	h.emit("agent_settled");
+	await h.idle(10_000);
+	delete (h.model as { promptCache?: unknown }).promptCache;
+	await h.idle(15_000);
+	assert.match(await h.command("cache-keeper"), /cache: lifetime unknown, so no countdown/);
+	const result = (await h.emit("session_before_compact", {
+		reason: "manual",
+		signal: new AbortController().signal,
+		branchEntries: [...h.branch],
+		preparation: { tokensBefore: 600_007, firstKeptEntryId: "u", messagesToSummarize: [{ role: "user", content: "earlier user text", timestamp: 0 }], turnPrefixMessages: [], isSplitTurn: false, fileOps: { read: new Set(), written: new Set(), edited: new Set() }, settings: { reserveTokens: 16_384, keepRecentTokens: 20_000 } },
+	})) as { compaction?: { summary: string } } | undefined;
+	const record = allTraces().filter((r) => r.event === "compact").at(-1);
+	assert.ok(!requests.includes("scratch"), `the cold model was asked: ${requests.join(", ")}`);
+	assert.ok(requests.length > 0, "the session's model was asked");
+	assert.equal(record.outcome, "cached", `${record.outcome}: ${record.reason}`);
+	assert.match(result?.compaction?.summary ?? "", /^A full checkpoint/);
+});

@@ -17,7 +17,21 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Container, fuzzyFilter, getKeybindings, Input, SelectList, SettingsList, Text, type Component, type SelectItem, type SettingItem } from "@earendil-works/pi-tui";
 import { cacheTier, hasExplicitPromptCache, isKimiOnMoonshot, lifetimeFor } from "./cache-state.ts";
-import { coldChoiceLabel, coldChoiceParts, coldFit, coldNeedTokens, coldRequestChars, coldUnusable, formatModelRef, orderColdChoices, parseModelRef, type ColdChoice } from "./cold-compaction.ts";
+import {
+	coldChoiceLabel,
+	coldFit,
+	coldModelParts,
+	coldNeedTokens,
+	coldRequestBytes,
+	coldUnusable,
+	fitColdLine,
+	formatModelRef,
+	orderColdChoices,
+	parseModelRef,
+	summaryBody,
+	thinkingReserve,
+	type ColdChoice,
+} from "./cold-compaction.ts";
 import { cacheView, PeriodClock, startFacts, type CacheView, type StartFacts } from "./cache-clock.ts";
 import { written } from "./lifetime-evidence.ts";
 import {
@@ -2114,9 +2128,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 	});
 
-	const checkCachedPath = (ctx: ExtensionContext, entries: SessionEntry[], model: Model<Api> | undefined): CachedPath | { reason: string } => checkRequestPath(ctx, entries, model, captured);
+	// For a compaction a cache whose expiry is unknown is not cold: the cached path is tried (a keep-warm refresh is never
+	// sent on one).
+	const checkCachedPath = (ctx: ExtensionContext, entries: SessionEntry[], model: Model<Api> | undefined): CachedPath | { reason: string } => checkRequestPath(ctx, entries, model, captured, true);
 	// The same check for a given request: a keep-warm period checks the request of its own answer.
-	const checkRequestPath = (ctx: ExtensionContext, entries: SessionEntry[], model: Model<Api> | undefined, request: CapturedRequest | undefined): CachedPath | { reason: string } => {
+	const checkRequestPath = (ctx: ExtensionContext, entries: SessionEntry[], model: Model<Api> | undefined, request: CapturedRequest | undefined, unknownTried = false): CachedPath | { reason: string } => {
 		if (!request) return { reason: "no request since the session started or compacted, or since the model or branch changed" };
 		if (model?.provider !== request.model.provider || model.id !== request.model.id) return { reason: "the model changed since the last request" };
 		let prefix: CachedPrefix | undefined;
@@ -2130,7 +2146,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const cache = look(ctx, { model: request.model, entries });
 		if (!cache.cached) return { reason: "the last request did not use the prompt cache" };
 		// A taken period's cache whose expiry is unknown: nothing is sent on it.
-		if (cache.unknown) return { reason: `the prompt cache's expiry is unknown: ${cache.unknown}` };
+		if (cache.unknown && !unknownTried) return { reason: `the prompt cache's expiry is unknown: ${cache.unknown}` };
 		if (cache.sendBy !== undefined && Date.now() >= cache.sendBy) return { reason: "the prompt cache has expired" };
 		return { request, prefix, trailing: trailing.messages, cache };
 	};
@@ -2155,7 +2171,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const coldSessionNeed = (ctx: ExtensionContext): number | undefined => {
 		try {
 			const messages = ctx.sessionManager.buildSessionProjection().messages;
-			return coldNeedTokens(coldRequestChars({ messagesToSummarize: messages, turnPrefixMessages: [], isSplitTurn: false, previousSummary: undefined }));
+			return coldNeedTokens(coldRequestBytes({ messagesToSummarize: messages, turnPrefixMessages: [], isSplitTurn: false, previousSummary: undefined }));
 		} catch {
 			return undefined;
 		}
@@ -2172,14 +2188,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			...(unusable ? { unusable } : need === undefined ? {} : { fit: coldFit(model, need) }),
 		};
 	};
-	// Whether the cold model named by `ref` could write this session's summary now, and why not: what /cache-keeper says.
-	const coldNow = (ctx: ExtensionContext, ref: string, need = coldSessionNeed(ctx)): { model?: Model<Api>; why?: string } => {
-		const candidate = coldCandidate(ctx, ref);
-		if ("why" in candidate) return { why: candidate.why };
-		if (need === undefined) return { model: candidate.model };
-		const fit = coldFit(candidate.model, need);
-		return fit.fits ? { model: candidate.model } : { model: candidate.model, why: fit.why };
-	};
 	// A pick Pi can't use now: the model is gone, or its credentials are (the setting is kept).
 	const coldUnavailable = (ctx: ExtensionContext, ref: string): boolean => {
 		const parsed = parseModelRef(ref);
@@ -2192,7 +2200,23 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (!ref) return `off${mark}: when the cache can't be read, Pi's compaction writes the summary on this session's model`;
 		const candidate = coldCandidate(ctx, ref);
 		if ("why" in candidate) return `${ref}${mark} · ${coldUnavailable(ctx, ref) ? "not available now" : "can't be used"}: ${candidate.why}`;
-		return `${ref}${mark} · ${coldChoiceParts(coldChoiceOf(candidate.model, coldSessionNeed(ctx), accessReader(ctx))).join(" · ")}`;
+		const { model } = candidate;
+		// No prediction: whether it writes a summary depends on the part Pi cuts off at that compaction.
+		const parts = coldModelParts(coldChoiceOf(model, undefined, accessReader(ctx)));
+		if (!(model.contextWindow > 0)) return `${ref}${mark} · ${parts.join(" · ")} · can't be used: it declares no context window`;
+		return `${ref}${mark} · ${parts.join(" · ")} · whether it writes a summary is decided at each compaction, from the part Pi cuts off`;
+	};
+
+	// Why a reply of the cold compaction model is no summary, or undefined: anything but a normal stop (an error, an abort,
+	// the output limit, a tool call, whatever text came before it), or no text once the file lists are taken out.
+	const replyFailure = (reply: AssistantMessage): string | undefined => {
+		if (reply.stopReason === "toolUse" || reply.content.some((block) => block.type === "toolCall")) return "the model called a tool instead of writing the summary";
+		if (reply.stopReason === "length") return "the summary hit the output limit";
+		if (reply.stopReason === "aborted") return `its request ended early (aborted)${reply.errorMessage ? `: ${reply.errorMessage}` : ""}`;
+		if (reply.stopReason === "error") return `its request failed: ${reply.errorMessage ?? "unknown error"}`;
+		if (reply.stopReason !== "stop") return `its request ended with ${reply.stopReason}`;
+		if (!summaryBody(contentText(reply.content))) return "it returned no summary text";
+		return undefined;
 	};
 
 	// The summary by the cold compaction model, where the cached path can't write it: Pi's own compact() with the picked
@@ -2221,25 +2245,31 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if ("why" in candidate) return skip(candidate.why);
 		const { model } = candidate;
 		cold.via = accessVia(accessReader(ctx)(model));
-		const requests = coldRequestChars(preparation, event.customInstructions);
-		cold.requests = requests.length;
-		cold.needTokens = coldNeedTokens(requests);
+		cold.needTokens = coldNeedTokens(coldRequestBytes(preparation, event.customInstructions));
 		if (model.contextWindow > 0) cold.window = model.contextWindow;
-		const fit = coldFit(model, cold.needTokens);
-		if (!fit.fits) return skip(fit.why);
 		const thinking = clampThinkingLevel(model, "off");
 		cold.thinking = thinking;
-		// Pi's credentials at request time, through the registry; each answer's text is kept to tell an empty summary.
-		const texts: string[] = [];
+		// The output cap is the one the fit assumed, passed with every request, less what the lowest thinking level adds.
+		const fit = coldFit(model, cold.needTokens, thinkingReserve(thinking));
+		if (!fit.fits) return skip(fit.why);
+		cold.maxTokens = fit.maxTokens;
+		// Pi's credentials at request time, through the registry. Each reply is checked before Pi's summarizer sees it: one
+		// that doesn't end in a normal stop, or holds no summary once the file lists are taken out, is a failure, and nothing
+		// more is sent (a split turn's prefix included).
+		let failure: string | undefined;
+		cold.requests = 0;
 		const transport: StreamFn = (target, context, options) => {
-			// Nothing is sent after an abort (a split turn's second request).
 			if (signal.aborted) throw new Error(COMPACTION_ABORTED);
-			const stream = ctx.modelRegistry.streamSimple(target, context, options);
-			stream.result().then(
-				(answer) => texts.push(contentText(answer.content).trim()),
-				() => {},
-			);
-			return stream;
+			if (failure) throw new Error(failure);
+			cold.requests = (cold.requests ?? 0) + 1;
+			const stream = ctx.modelRegistry.streamSimple(target, context, { ...options, maxTokens: Math.min(options?.maxTokens ?? Infinity, fit.maxTokens) });
+			const checked = stream.result().then((reply) => {
+				failure = replyFailure(reply);
+				if (failure) throw new Error(failure);
+				return reply;
+			});
+			checked.catch(() => {});
+			return { result: () => checked } as unknown as ReturnType<StreamFn>;
 		};
 		const started = Date.now();
 		let result: Awaited<ReturnType<typeof compact>>;
@@ -2249,15 +2279,15 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			result = await compact(preparation, model, undefined, undefined, event.customInstructions, signal, thinking, transport);
 		} catch (error) {
 			if (signal.aborted) return cancel();
-			return skip(`its request failed: ${error instanceof Error ? error.message : String(error)}`);
+			return skip(failure ?? `its request failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 		if (signal.aborted) return cancel();
-		if (texts.length === 0 || texts.some((text) => !text)) return skip("it returned no summary text");
+		// Checked again on the whole: no summary once the file lists are taken out is no summary.
+		const body = summaryBody(result.summary);
+		if (!body) return skip("it returned no summary text");
 		const checkpoint = checkpointSummary(result.summary, preparation.fileOps, getLatestCompactionEntry(event.branchEntries)?.details);
 		const usage: Usage = result.usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
-		cold.response = { seconds: (Date.now() - started) / 1000, usage: traceUsage(usage), summaryChars: result.summary.replace(/<(read-files|modified-files)>[\s\S]*?<\/\1>/g, "").trim().length };
-		const session = ctx.model;
-		if (session && hasPrices(session) && hasPrices(model)) cold.sessionModelCost = calculateCost(session, { ...usage, cost: { ...usage.cost } }).total;
+		cold.response = { seconds: (Date.now() - started) / 1000, usage: traceUsage(usage), summaryChars: body.length };
 		decision = trace(ctx, { ...base, outcome: "cold", cold });
 		return {
 			compaction: {
@@ -2616,7 +2646,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		// The cold compaction model's row: Enter opens a list of the models instead of stepping through values.
 		const COLD = "coldCompactionModel";
 		const coldText =
-			"When the cached path can't write a compaction's summary (the cache is cold, this session's model refuses the summary, or the conversation no longer fits it), this model writes it with Pi's own summarizer, and the session goes on with its own model; where it can't either, Pi's own compaction runs as before. With a cold compaction model set, the part of the conversation being summarized is sent to that model's provider: your messages, the assistant's answers, the tool calls and the first 2,000 characters of each tool result, the previous summary, and any /compact instructions.";
+			"When the cached path can't write a compaction's summary (the cache is cold, this session's model refuses the summary, or the conversation no longer fits it), this model writes it with Pi's own summarizer, and the session goes on with its own model; where it can't either, Pi's own compaction runs as before. What goes to that model's provider is the part of the conversation being summarized, as Pi's summarizer writes it out: your messages in full, with the full output of shell commands you ran with !; the assistant's answers and its tool calls with their arguments; the first 2,000 characters of each tool result; the previous summary; any /compact instructions; and, on Pi before 1.2, the assistant's thinking.";
 		const coldValue = (ref: string) => `${valueLabel(COLD, ref)}${ref && coldUnavailable(ctx, ref) ? " · not available now" : ""}`;
 		const coldList = (_current: string, done: (value?: string) => void): Component => {
 			// "This session now" is measured once, when the list opens.
@@ -2639,7 +2669,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			let list: SelectList;
 			const filter = () => {
 				const query = input.getValue().trim();
-				list = new SelectList(query ? fuzzyFilter(items, query, (item) => item.label) : items, 12, getSelectListTheme());
+				// A line too wide keeps the end of a model id that doesn't fit: the part that tells two models apart.
+				list = new SelectList(query ? fuzzyFilter(items, query, (item) => item.label) : items, 12, getSelectListTheme(), {
+					truncatePrimary: ({ text, maxWidth, item }) => fitColdLine(text, item.value === COLD_DEFAULT_PICK ? "" : item.value, maxWidth),
+				});
 				list.onSelect = (item) => done(item.value);
 				list.onCancel = () => done();
 			};
@@ -2972,12 +3005,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				cache = `${left} (lifetime ${formatDuration(state.lifetime.ms)}, ${state.lifetime.source})${why}`;
 			}
 			const check = checkCachedPath(ctx, entries, model);
-			const coldRef = inEffect().coldCompactionModel;
-			const cold = "reason" in check && coldRef ? coldNow(ctx, coldRef) : undefined;
 			const next = "reason" in check
-				? cold && !cold.why
-					? `${coldRef}, because ${check.reason}`
-					: `Pi's compaction, because ${check.reason}${cold?.why ? `; ${coldRef} can't: ${cold.why}` : ""}`
+				? inEffect().coldCompactionModel
+					? `not from the cache, because ${check.reason}; the cold compaction model writes the summary where it can, else Pi's compaction`
+					: `Pi's compaction, because ${check.reason}`
 				: `cached path; last request ${formatDuration(Date.now() - check.request.at)} ago with ${check.request.transcript.length} messages, ${check.trailing.length} since. The request prefix is checked when it runs.`;
 			const stopped = stopNote();
 			let log: string[];
