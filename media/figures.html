@@ -103,17 +103,20 @@ cache warm · 59m left · long 1h<span class="dim"> (in use)</span> · <span cla
 
 <figure id="settings-menu">
 <div class="term"><div class="bar"><i></i><i></i><i></i><span>pi · /cache-keeper-settings</span></div>
-<pre><span class="acc">pi-cache-keeper</span> <span class="dim">saved to cacheKeeper in ~/.pi/agent/settings.json</span>
-<span class="acc">→ </span><span class="acc">Compact when the context is     </span>  <span class="acc">90%</span>
-  Or once it holds                  <span class="mut">off</span>
-  Compact before the cache expires  <span class="mut">on</span>
-  Keep the cache warm when idle     <span class="mut">2 h</span>
-  Before expiry, only from          <span class="mut">140k</span>
-  Cache retention                   <span class="mut">long</span>
-  Model data from providers.dev     <span class="mut">on</span>
+<pre><span class="acc">pi-cache-keeper</span> · editing this session <span class="dim">· its own values are saved in the session; every other follows the defaults</span>
+<span class="acc">→ </span><span class="acc">Editing                         </span>  <span class="acc">this session</span>
+  Compact when the context is       <span class="mut">90% · default</span>
+  Or once it holds                  <span class="mut">off · default</span>
+  Compact before the cache expires  <span class="mut">on · default</span>
+  Keep the cache warm when idle     <span class="mut">4 h · this session</span>
+  Before expiry, only from          <span class="mut">140k · default</span>
+  Back to the defaults              <span class="mut">drop 1 own value</span>
+  Cache retention · all sessions    <span class="mut">long</span>
+  Model data · all sessions         <span class="mut">on</span>
 
-<span class="dim">  After a turn, once the context fills this share of the model's window, compact from the warm cache so the summary</span>
-<span class="dim">  still fits beside it. Now at 90%: 900k of 1000k on anthropic/claude-opus-5-5, leaving 96k for the summary.</span>
+<span class="dim">  The warming and compaction values you pick below hold for this session only, saved in it: after a resume, and in a</span>
+<span class="dim">  fork made after them. Every value marked default follows the defaults, also when they change later. Enter edits the</span>
+<span class="dim">  defaults for all sessions instead.</span>
 
 <span class="dim">  Enter/Space to change · Esc to cancel</span></pre></div>
 </figure>
@@ -170,12 +173,12 @@ cache warm · 59m left · long 1h<span class="dim"> (in use)</span> · <span cla
  <span class="dim">next compaction: cached path; last request 4 s ago with 185 messages, 1 since. The request prefix is checked when it</span>
  <span class="dim">runs.</span>
  <span class="dim">when full: at 90%: 900k of 1000k on anthropic/claude-opus-5-5, leaving 96k for the summary</span>
- <span class="dim">keep warm: up to 2 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; so far $0 spent, a</span>
- <span class="dim">miss costs $2.36</span>
+ <span class="dim">keep warm (this session): up to 4 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; so</span>
+ <span class="dim">far $0 spent, a miss costs $2.36</span>
  <span class="dim">before expiry: on, from 140k tokens of context · retention long</span>
  <span class="dim">model data: claude-subscription/claude-opus-5-5: window 1,000,000, short cache 1 h, long cache 1 h</span>
  <span class="dim">(https://providers.dev, checked 180 min ago; /cache-keeper-refresh fetches it again)</span>
- <span class="dim">settings: /cache-keeper-settings</span>
+ <span class="dim">settings: this session's own: keepWarmMinutes 4 h (default 2 h); every other follows the defaults · /cache-keeper-settings</span>
  <span class="dim">log: ~/.pi/agent/cache-keeper.jsonl</span>
  
  <span class="dim">This session:</span>

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-22
+
+### Added
+- **Settings per session, over the defaults** — A session can now set its own `compactAtPercent`, `compactAtTokens`, `compactBeforeExpiry`, `minContextTokens` and `keepWarmMinutes`. Its own value wins for each key it set; every other key follows the defaults, also a default changed later. The defaults stay where they were (`cacheKeeper` in `~/.pi/agent/settings.json`, same keys, same values), so a session that sets nothing of its own works exactly as in 0.7.0. A session's own values are saved in the session itself, as a `cache-keeper-settings` entry (never sent to the model, never written to `settings.json`, drawn as one dim line in the transcript): they hold after a resume and in a fork or clone made after them, and the latest such entry on the current branch decides, so `/tree` to a point before a change, or `/fork` from a message before it, gives the values in force there. An entry holding anything else (a global-only key, an unknown key, a bad value) is read without it. `cacheRetention` (the process-wide `PI_CACHE_RETENTION`) and `modelData` (Pi's `models.json`) stay the same for every session.
+- **Keep-warm per session** — Each idle period uses its session's own `keepWarmMinutes` where it set one; who warms a period, the budget and stopping are unchanged, and `/cache-keeper-stop` still stops every window. Changed during an idle period, a session's value takes effect as a change of the default does (switched off: warming ends for the period; switched on: from the next message). A default saved in another window no longer reaches a session that set its own value.
+- **`npm run check`** runs the type check and the tests.
+
+### Changed
+- **`/cache-keeper-settings` opens on this session** — Its header says which layer is edited. Each warming and compaction row shows its value and whether it is the session's own (`4 h · this session`) or the default (`2 h · default`); the `default` value drops the session's own value for that row, and "Back to the defaults" drops all of them. The session's values are saved in the session when the menu closes. The first row, "Editing", switches to the defaults for all sessions, edited and saved as before. Cache retention and model data are marked `all sessions`. Outside the TUI, the listing shows both layers: each value with `[default]` or `[this session; default …]`, and a line naming the session's own values.
+- **`/cache-keeper` marks this session's own settings** — `when full`, `keep warm` and `before expiry` say `(this session)` where a value of the session's own decides them, and the `settings` line lists those values beside the defaults they replace (`settings: the defaults (this session has none of its own)` without any). The footer shows the values in effect, as before.
+
 ## [0.7.0] - 2026-11-22
 
 ### Added

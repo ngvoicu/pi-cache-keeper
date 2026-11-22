@@ -26,7 +26,7 @@ Then run `/reload` (Pi loads extensions only at startup or on `/reload`). It nee
 ### Moving from pi-cached-compaction
 
 - Remove pi-cached-compaction first: `pi list` shows the address you installed it from, and `pi remove <that address>` removes it. With both loaded, both would compact and both would show a countdown.
-- Your settings carry over: while `~/.pi/agent/settings.json` has no `cacheKeeper` key, pi-cache-keeper reads the old `cachedCompaction` key as it is. The settings menu saves to `cacheKeeper` (starting from what it read) and leaves `cachedCompaction` alone; from then on `cacheKeeper` is the one that counts.
+- Your settings carry over: while `~/.pi/agent/settings.json` has no `cacheKeeper` key, pi-cache-keeper reads the old `cachedCompaction` key as it is. The settings menu saves the defaults to `cacheKeeper` (starting from what it read) and leaves `cachedCompaction` alone; from then on `cacheKeeper` is the one that counts.
 - The commands are `/cache-keeper` and `/cache-keeper-settings` instead of `/cached-compaction` and `/cached-compaction-settings`.
 - The log is `~/.pi/agent/cache-keeper.jsonl`; the old `cached-compaction.jsonl` is left where it is and not read. Cards from earlier compactions still show in old sessions.
 
@@ -110,8 +110,8 @@ A part that fits again once a larger one has gone comes back, and room left over
 
 | Command | What it does |
 |---|---|
-| `/cache-keeper` | shows the cache right now, whether the next compaction would read it, the settings in effect, the model data in use, and this session's log |
-| `/cache-keeper-settings` | opens the settings menu; outside the TUI it lists the settings |
+| `/cache-keeper` | shows the cache right now, whether the next compaction would read it, the settings in effect (marking the ones this session set for itself), the model data in use, and this session's log |
+| `/cache-keeper-settings` | opens the settings menu on this session's settings, with the defaults for all sessions one step away; outside the TUI it lists both (see [Settings](#settings)) |
 | `/cache-keeper-warm` | starts keeping the cache warm again for the models two refreshes in a row without a hit left to Pi's own warming, and clears every model's count of them; it takes effect at the latest from your next message (an idle period already running whose own warming had not ended is kept warm again at once), sends nothing and doesn't turn keep-warm on; it does not lift a `/cache-keeper-stop` (see [Keeping the cache warm](#keeping-the-cache-warm)) |
 | `/cache-keeper-stop` | stops keeping idle caches warm in every Pi window that uses the same settings, until the next message you send each window: the extension sends no further refresh and Pi's own idle warming is told to stop when it next asks; compacting before expiry still runs; it changes no setting and can't be taken back (see [Stopping it in every window](#stopping-it-in-every-window)) |
 | `/cache-keeper-refresh` | fetches the model data from providers.dev now, puts it into Pi's `models.json`, and says how many models changed and what the current model got (see [Model data](#model-data-from-providersdev)) |
@@ -119,31 +119,40 @@ A part that fits again once a larger one has gone comes back, and room left over
 
 **`/cache-keeper`**:
 
-![The output of /cache-keeper: "pi-cache-keeper · anthropic/claude-opus-5-5. cache: 59m left (lifetime 60 min, declared by the model). next compaction: cached path; last request 4 s ago with 185 messages, 1 since. The request prefix is checked when it runs. when full: at 90%: 900k of 1000k on anthropic/claude-opus-5-5, leaving 96k for the summary. keep warm: up to 2 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; so far $0 spent, a miss costs $2.36. before expiry: on, from 140k tokens of context · retention long. model data: claude-subscription/claude-opus-5-5: window 1,000,000, short cache 1 h, long cache 1 h (https://providers.dev, checked 180 min ago; /cache-keeper-refresh fetches it again). settings: /cache-keeper-settings. log: ~/.pi/agent/cache-keeper.jsonl. This session: 15:05:52 compact when full: cached, 99% of 904k from cache, 5k out, 41.6s, summary 9840 chars. vs Pi's compaction: 75% less, $0.59 instead of ~$2.4 (it sends ~451k tokens, none from cache). 15:06:34 saved, 903k tokens summarized. 16:36:52 kept the cache warm, idle 57 min: 99% of 411k from cache, 1 out, $0.21; $0.21 of $2.36 (one cache miss) spent."](media/status-command.png)
+![The output of /cache-keeper: "pi-cache-keeper · anthropic/claude-opus-5-5. cache: 59m left (lifetime 60 min, declared by the model). next compaction: cached path; last request 4 s ago with 185 messages, 1 since. The request prefix is checked when it runs. when full: at 90%: 900k of 1000k on anthropic/claude-opus-5-5, leaving 96k for the summary. keep warm (this session): up to 4 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; so far $0 spent, a miss costs $2.36. before expiry: on, from 140k tokens of context · retention long. model data: claude-subscription/claude-opus-5-5: window 1,000,000, short cache 1 h, long cache 1 h (https://providers.dev, checked 180 min ago; /cache-keeper-refresh fetches it again). settings: this session's own: keepWarmMinutes 4 h (default 2 h); every other follows the defaults · /cache-keeper-settings. log: ~/.pi/agent/cache-keeper.jsonl. This session: 15:05:52 compact when full: cached, 99% of 904k from cache, 5k out, 41.6s, summary 9840 chars. vs Pi's compaction: 75% less, $0.59 instead of ~$2.4 (it sends ~451k tokens, none from cache). 15:06:34 saved, 903k tokens summarized. 16:36:52 kept the cache warm, idle 57 min: 99% of 411k from cache, 1 out, $0.21; $0.21 of $2.36 (one cache miss) spent."](media/status-command.png)
+
+A line whose value this session set for itself says `(this session)`, and the `settings` line lists those values beside the defaults they replace; without any, it reads `settings: the defaults (this session has none of its own)`.
 
 The `model data` line names the providers.dev entry that describes the model and what it gave. When a guess is in use it says which values are the smaller of the login's and the API key's, and which were not used; when another kind of credential answered, it gives that one's values too.
 
 **`/cache-keeper-settings`**:
 
-![The settings menu: "pi-cache-keeper saved to cacheKeeper in ~/.pi/agent/settings.json". Rows: Compact when the context is 90%, Or once it holds off, Compact before the cache expires on, Keep the cache warm when idle 2 h, Before expiry, only from 140k, Cache retention long, Model data from providers.dev on. Under them, the description of the selected row: "After a turn, once the context fills this share of the model's window, compact from the warm cache so the summary still fits beside it. Now at 90%: 900k of 1000k on anthropic/claude-opus-5-5, leaving 96k for the summary." Then "Enter/Space to change · Esc to cancel".](media/settings-menu.png)
+![The settings menu: "pi-cache-keeper · editing this session · its own values are saved in the session; every other follows the defaults". Rows: Editing: this session; Compact when the context is 90% · default; Or once it holds off · default; Compact before the cache expires on · default; Keep the cache warm when idle 4 h · this session; Before expiry, only from 140k · default; Back to the defaults: drop 1 own value; Cache retention · all sessions long; Model data · all sessions on. Under them, the description of the selected row: "The warming and compaction values you pick below hold for this session only, saved in it: after a resume, and in a fork made after them. Every value marked default follows the defaults, also when they change later. Enter edits the defaults for all sessions instead." Then "Enter/Space to change · Esc to cancel".](media/settings-menu.png)
 
-Each row maps to a setting below. The menu describes the selected row, and for "Compact when the context is" it works out where that falls on the current model.
+Each row maps to a setting below. The menu opens on this session: the first row, "Editing", switches it to the defaults for all sessions and back. The menu describes the selected row, and for "Compact when the context is" it works out where that falls on the current model.
 
 The figures on this page are the extension's own output, from a run of the current code with sample sessions and sample providers.dev values.
 
 ## Settings
 
-Run `/cache-keeper-settings` to change them in a menu; changes are saved to the `cacheKeeper` key in `~/.pi/agent/settings.json` and apply right away. You can also edit that key by hand. When there is no `cacheKeeper` key, the `cachedCompaction` key of pi-cached-compaction is read instead, unchanged. Project settings files don't apply to it, and an unknown key is an error.
+Settings come in two layers:
 
-| Setting | Menu | Default | What it does |
-|---|---|---|---|
-| `compactAtPercent` | Compact when the context is | `90` | after a turn, compact once the context fills this share of the model's window; `0` turns it off |
-| `compactAtTokens` | Or once it holds | `0` | also compact once the context holds this many tokens, on any model, whichever comes first; `0` turns it off |
-| `compactBeforeExpiry` | Compact before the cache expires | `true` | compact 20 s before the cache expires, when idle |
-| `minContextTokens` | Before expiry, only from | `140000` | the smallest context compacted before the cache expires; keeping the cache warm doesn't use it |
-| `keepWarmMinutes` | Keep the cache warm when idle | `0` | keep the cache warm up to this many minutes after Pi goes idle (up to 1440; the menu offers 30 min, 1, 2, 3, 4, 6, 8, 12 and 24 h); it stops once refreshing has cost as much as one cache miss, and while it is on the extension is the only warmer of an idle cache it can refresh; `0` turns it off |
-| `cacheRetention` | Cache retention | `"long"` | ask for the longer cache in interactive sessions (2× writes on Anthropic and Kimi); `"short"` keeps Pi's default |
-| `modelData` | Model data from providers.dev | `true` | read each model's input window, cache lifetimes and prices from providers.dev and put them into Pi's `models.json`; `false` takes them out again |
+- **The defaults**, for every session: the `cacheKeeper` key in `~/.pi/agent/settings.json`. A session that sets nothing of its own uses them, exactly as before 0.8.0. You can also edit that key by hand. When there is no `cacheKeeper` key, the `cachedCompaction` key of pi-cached-compaction is read instead, unchanged. Project settings files don't apply to it, and an unknown key is an error.
+- **A session's own values**, for that session only: `compactAtPercent`, `compactAtTokens`, `compactBeforeExpiry`, `minContextTokens` and `keepWarmMinutes`. Each value a session sets wins there; every other setting follows the defaults, also a default changed later. They are saved in the session itself, as a `cache-keeper-settings` entry (never sent to the model, and never written to `settings.json`), so they hold when you resume the session, and in a fork or clone made after them. The latest such entry on the branch you are on decides: `/tree` to a point before the change, or `/fork` from a message before it, gives the values in force there. In a new session they are saved with its first answer, when Pi writes the session's file.
+
+`cacheRetention` and `modelData` are the same for every session, and a session can't set them: the retention works through `PI_CACHE_RETENTION`, which holds for the whole Pi process, and the model data is written into Pi's `models.json`, which every session reads. The menu marks them `all sessions`.
+
+Run `/cache-keeper-settings` to change them in a menu. It opens on **this session**: each warming and compaction row shows its value and whether it is the session's own (`4 h · this session`) or the default (`2 h · default`); Enter steps through the values, the `default` one dropping the session's own value for that row. "Back to the defaults" drops all of them at once. The session's own values apply right away and are saved in the session when the menu closes. Enter on the first row, "Editing", switches to the **defaults for all sessions**: there, changes are saved to `cacheKeeper` in `~/.pi/agent/settings.json` and apply right away, in this session wherever it has no value of its own. Outside the TUI the command lists both layers: each value with `[default]` or `[this session; default …]`.
+
+| Setting | Menu | Default | Per session | What it does |
+|---|---|---|---|---|
+| `compactAtPercent` | Compact when the context is | `90` | yes | after a turn, compact once the context fills this share of the model's window; `0` turns it off |
+| `compactAtTokens` | Or once it holds | `0` | yes | also compact once the context holds this many tokens, on any model, whichever comes first; `0` turns it off |
+| `compactBeforeExpiry` | Compact before the cache expires | `true` | yes | compact 20 s before the cache expires, when idle |
+| `minContextTokens` | Before expiry, only from | `140000` | yes | the smallest context compacted before the cache expires; keeping the cache warm doesn't use it |
+| `keepWarmMinutes` | Keep the cache warm when idle | `0` | yes | keep the cache warm up to this many minutes after Pi goes idle (up to 1440; the menu offers 30 min, 1, 2, 3, 4, 6, 8, 12 and 24 h); it stops once refreshing has cost as much as one cache miss, and while it is on the extension is the only warmer of an idle cache it can refresh; `0` turns it off |
+| `cacheRetention` | Cache retention | `"long"` | no | ask for the longer cache in interactive sessions (2× writes on Anthropic and Kimi); `"short"` keeps Pi's default |
+| `modelData` | Model data from providers.dev | `true` | no | read each model's input window, cache lifetimes and prices from providers.dev and put them into Pi's `models.json`; `false` takes them out again |
 
 ```json
 {
@@ -153,6 +162,8 @@ Run `/cache-keeper-settings` to change them in a menu; changes are saved to the 
 }
 ```
 
+A session's own `keepWarmMinutes` works as the default does: each idle period of that session is kept warm for up to its value, under the same rules (who warms a period, the budget, stopping), and `/cache-keeper-stop` still stops every window. Changed during an idle period, it takes effect as a change of the default would: switched off, warming ends for the period; switched on, from your next message.
+
 ## Common tasks
 
 | Want | Do |
@@ -160,6 +171,11 @@ Run `/cache-keeper-settings` to change them in a menu; changes are saved to the 
 | See the cache now and this session's compactions | `/cache-keeper` |
 | See why a compaction didn't use the cache | expand its card with ctrl+o |
 | Change the settings from Pi | `/cache-keeper-settings` |
+| Keep this session warm for 4 h, and no other | `/cache-keeper-settings`, then "Keep the cache warm when idle" to `4 h · this session` |
+| Compact one big session earlier than the others | `/cache-keeper-settings`, then "Compact when the context is" (or "Or once it holds") to a value marked `this session` |
+| Change a setting for every session | `/cache-keeper-settings`, Enter on "Editing" (defaults for all sessions), then the row |
+| Put this session back on the defaults | `/cache-keeper-settings`, then "Back to the defaults" |
+| See which settings this session set itself | `/cache-keeper`: the lines marked `(this session)` and the `settings` line |
 | Compact earlier or later on big models | change "Compact when the context is" (`compactAtPercent`) |
 | Keep the context under a fixed size on every model | set "Or once it holds" (`compactAtTokens`) |
 | Stop compacting before the cache expires | `"compactBeforeExpiry": false` in [Settings](#settings) |
