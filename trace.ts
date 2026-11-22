@@ -329,6 +329,11 @@ export function formatTokens(count: number): string {
 	return count >= 1000 ? `${Math.round(count / 1000)}k` : String(count);
 }
 
+/** A context window: "1M", "1.05M", "200k". */
+export function formatWindow(tokens: number): string {
+	return tokens >= 1_000_000 ? `${Number((tokens / 1_000_000).toPrecision(3))}M` : formatTokens(tokens);
+}
+
 export function formatDuration(ms: number): string {
 	return ms >= 120_000 ? `${Math.round(ms / 60_000)} min` : `${Math.round(ms / 1000)} s`;
 }

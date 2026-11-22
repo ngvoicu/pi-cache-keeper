@@ -14,7 +14,8 @@ import {
 const CONTEXT_FREE_ENTRY_TYPES = new Set(["custom", "label", "session_info", "usage", "thinking_level_change"]);
 const MESSAGE_ARRAY_KEYS = ["messages", "input"] as const;
 const OUTPUT_LIMIT_KEYS = new Set(["max_tokens", "max_output_tokens", "max_completion_tokens"]);
-const PI_PROMPT_CHARS = 1_200;
+/** Pi's summarizer prompt around the conversation (its system prompt and checkpoint format), in characters. */
+export const PI_PROMPT_CHARS = 1_200;
 
 export type Payload = Record<string, unknown>;
 
