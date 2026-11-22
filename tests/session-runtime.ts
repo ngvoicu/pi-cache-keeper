@@ -76,6 +76,8 @@ interface Menu {
 	press: (label: string) => void;
 	/** Closes the menu (Escape). */
 	close: () => Promise<void>;
+	/** Sends keys as typed (a list opened from a row takes them). */
+	keys: (data: string) => void;
 }
 
 interface Window {
@@ -247,6 +249,9 @@ export async function inWindow(scenario: (w: Window) => Promise<void>, o: { pers
 					await done;
 					await opened;
 				},
+				keys: (data) => {
+					for (const key of data.match(/\x1b\[[A-D]|[\s\S]/g) ?? []) component.handleInput(key);
+				},
 			};
 		},
 		footer: () => lastStatus,
@@ -275,6 +280,7 @@ export const settingsText = () => readFileSync(settingsFile, "utf8");
 export const KEEP_WARM = "Keep the cache warm when idle";
 export const FULL = "Compact when the context is";
 export const EXPIRY = "Compact before the cache expires";
+export const COLD = "Compact a cold cache with";
 export const NO_OWN = "settings: the defaults (this session has none of its own) · /cache-keeper-settings";
 export const OWN = "settings: this session's own: compactAtPercent 80% (default off), keepWarmMinutes 4 h (default off); every other follows the defaults · /cache-keeper-settings";
 export const lineOf = (text: string, start: string) => text.split("\n").find((line) => line.startsWith(start));

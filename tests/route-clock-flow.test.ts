@@ -300,7 +300,8 @@ async function session(s: Setup) {
 		assert.ok(menu, "Pi's settings menu");
 		// The menu opens on this session: the first row switches it to the defaults for all sessions.
 		menu.handleInput(" ");
-		for (let i = 0; i < 4; i++) menu.handleInput("\x1b[B");
+		// Past compacting when full, its cap, the cold compaction model (0.10.0) and compacting before expiry.
+		for (let i = 0; i < 5; i++) menu.handleInput("\x1b[B");
 		for (let i = 0; i < 24 && JSON.parse(readFileSync(join(dir, "settings.json"), "utf8")).cacheKeeper.keepWarmMinutes !== 0; i++) menu.handleInput(" ");
 		assert.equal(JSON.parse(readFileSync(join(dir, "settings.json"), "utf8")).cacheKeeper.keepWarmMinutes, 0);
 	};

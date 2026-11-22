@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { EXPIRY, flush, FULL, inWindow, KEEP_WARM, lineOf, NO_OWN, OWN, ownEntries, ownOf, settingsText, skip, writeDefaults, type Any } from "./session-runtime.ts";
+import { COLD, EXPIRY, flush, FULL, inWindow, KEEP_WARM, lineOf, NO_OWN, OWN, ownEntries, ownOf, settingsText, skip, writeDefaults, type Any } from "./session-runtime.ts";
 
 const {
 	GLOBAL_ONLY_KEYS,
@@ -268,9 +268,10 @@ test("outside the TUI, /cache-keeper-settings lists both layers", { skip }, asyn
 		assert.match(lines[1], /^compactAtPercent: 0 \[default\] · compactAtTokens: 400000 \[this session; default 0\] \(at the 400k-token cap/);
 		assert.equal(lines[2], "compactBeforeExpiry: true [default] · minContextTokens: 140000 [default]");
 		assert.match(lines[3], /^keepWarmMinutes: 240 \[this session; default 120\] \(up to 4 h after Pi goes idle/);
-		assert.equal(lines[4], "cacheRetention: short (all sessions)");
-		assert.match(lines[5], /^modelData: false \(all sessions\) \(off\)$/);
-		assert.equal(lines[6], "This session's own: compactAtTokens 400k tokens (default off), keepWarmMinutes 4 h (default 2 h); every other setting follows the defaults.");
+		assert.equal(lines[4], `coldCompactionModel: "" [default] (off: when the cache can't be read, Pi's compaction writes the summary on this session's model)`);
+		assert.equal(lines[5], "cacheRetention: short (all sessions)");
+		assert.match(lines[6], /^modelData: false \(all sessions\) \(off\)$/);
+		assert.equal(lines[7], "This session's own: compactAtTokens 400k tokens (default off), keepWarmMinutes 4 h (default 2 h); every other setting follows the defaults.");
 	}, { mode: "rpc", persisted: true });
 	assert.deepEqual(result.thrown, []);
 });
@@ -620,4 +621,126 @@ test("a change of a default the session overrides does not try compacting when f
 	assert.deepEqual([seen.first, seen.unchanged, seen.changedDefault], [1, 1, 1]);
 	assert.match(seen.status, /^when full: at the 150k-token cap \(this session\) on /);
 	assert.equal(seen.changedOwn, 2, "the cap in effect changed: tried again");
+});
+
+// ------------------------------------------------------------------------------------------- the cold compaction model
+
+// The models a test's registry lists, with credentials: the picked model's list is Pi's available models.
+const GEMINI = { provider: "google", id: "gemini-2.5-flash", api: "google-generative-ai", contextWindow: 1_048_576, maxTokens: 65_536, reasoning: true, input: ["text"], cost: { input: 0.3, output: 2.5, cacheRead: 0.03, cacheWrite: 0 } };
+const TINY = { ...GEMINI, provider: "acme", id: "tiny", contextWindow: 8_000, maxTokens: 4_000, cost: { input: 0.05, output: 0.1, cacheRead: 0, cacheWrite: 0 } };
+const NO_WINDOW = { ...GEMINI, provider: "local", id: "llama", contextWindow: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+const VIRTUAL = { ...GEMINI, provider: "pi", id: "auto", api: "pi-virtual" };
+const coldModels = (w: Any) => {
+	const registry = w.runtime.session.extensionRunner.createContext().modelRegistry;
+	const listed = [GEMINI, TINY, NO_WINDOW, VIRTUAL];
+	const find = registry.find.bind(registry);
+	const auth = registry.hasConfiguredAuth.bind(registry);
+	registry.getAvailable = () => [...listed, w.runtime.session.model];
+	registry.find = (provider: string, id: string) => listed.find((m) => m.provider === provider && m.id === id) ?? find(provider, id);
+	registry.hasConfiguredAuth = (model: Any) => listed.includes(model) || auth(model);
+};
+const GEMINI_LINE = /^cold compaction: google\/gemini-2\.5-flash · 1\.05M window · \$0\.30 in, \$2\.50 out per M · holds this session$/;
+
+// Design 0.10.0, test 7.
+test("the cold compaction model: a session's own value wins over the default, its off wins over a default model, the default is read as saved now, and back to the defaults drops it", { skip }, async () => {
+	writeDefaults({ coldCompactionModel: "google/gemini-2.5-flash" });
+	const result = await inWindow(
+		async (w) => {
+			coldModels(w);
+			await w.answer();
+			assert.match(lineOf(await w.status(), "cold compaction:") ?? "", GEMINI_LINE, "the default, as saved");
+			// Off for this session over a default model: the list's second line.
+			let menu = await w.menu();
+			assert.match(menu.text(), /\n {2}Compact a cold cache with +google\/gemini-2\.5-flash · default\n/);
+			menu.press(COLD);
+			menu.keys("\x1b[B\r");
+			assert.match(menu.text(), /\n→ Compact a cold cache with +off · this session\n/);
+			await menu.close();
+			assert.deepEqual(ownOf(w.manager()), { settings: { coldCompactionModel: "" } });
+			assert.equal(lineOf(await w.status(), "cold compaction:"), "cold compaction: off (this session): when the cache can't be read, Pi's compaction writes the summary on this session's model");
+			// A default changed in another window: this session's off still wins.
+			saveConfig({ coldCompactionModel: "acme/tiny" });
+			assert.match(lineOf(await w.status(), "cold compaction:") ?? "", /^cold compaction: off \(this session\)/);
+			assert.match(lineOf(await w.status(), "settings:") ?? "", /coldCompactionModel off \(default acme\/tiny\)/);
+			// Back to the defaults: the default as saved now.
+			menu = await w.menu();
+			menu.press("Back to the defaults");
+			await menu.close();
+			assert.match(lineOf(await w.status(), "cold compaction:") ?? "", /^cold compaction: acme\/tiny · 8k window · \$0\.05 in, \$0\.10 out per M · (holds this session|too small now)/);
+			// A session's own model over the default, picked by typing.
+			menu = await w.menu();
+			menu.press(COLD);
+			menu.keys("gemini\r");
+			assert.match(menu.text(), /\n→ Compact a cold cache with +google\/gemini-2\.5-flash · this session\n/);
+			await menu.close();
+			assert.deepEqual(ownOf(w.manager()), { settings: { coldCompactionModel: "google/gemini-2.5-flash" } });
+			assert.match(lineOf(await w.status(), "cold compaction:") ?? "", /^cold compaction: google\/gemini-2\.5-flash \(this session\) · 1\.05M window/);
+			// The list's first line drops it again.
+			menu = await w.menu();
+			menu.press(COLD);
+			menu.keys("\r");
+			assert.match(menu.text(), /\n→ Compact a cold cache with +acme\/tiny · default\n/);
+			await menu.close();
+			assert.deepEqual(ownOf(w.manager()), { settings: {} });
+		},
+		{ persisted: true },
+	);
+	assert.deepEqual(result.thrown, []);
+	assert.equal(JSON.parse(settingsText()).cacheKeeper.coldCompactionModel, "acme/tiny", "the session's values never went into settings.json");
+});
+
+// Design 0.10.0, test 8.
+test("the cold compaction model's row, its list, its /cache-keeper lines and the next compaction; a pick Pi can't use now is kept and marked", { skip }, async () => {
+	writeDefaults({});
+	const result = await inWindow(async (w) => {
+		coldModels(w);
+		await w.answer();
+		let menu = await w.menu();
+		assert.match(menu.text(), /\n {2}Or once it holds +[^\n]+\n {2}Compact a cold cache with +off · default\n {2}Compact before the cache expires/, "after Or once it holds");
+		menu.press(COLD);
+		const list = menu.text().split("\n");
+		assert.match(list.find((line) => line.startsWith("Compact a cold cache with,")) ?? "", /^Compact a cold cache with, in this session · "holds this session" speaks of this session now \(about \d+ tokens as text\)$/);
+		const lines = list.filter((line) => /^(→ )?\s*(default|off|google|acme|local|pi\/|anthropic)/.test(line)).map((line) => line.replace(/^→?\s*/, ""));
+		assert.deepEqual(lines.slice(0, 2), ["default (off)", "off"]);
+		assert.ok(lines.includes("google/gemini-2.5-flash · 1.05M window · $0.30 in, $2.50 out per M · holds this session"), lines.join("\n"));
+		assert.ok(lines.some((line) => /^acme\/tiny · 8k window · \$0\.05 in, \$0\.10 out per M · too small now \(needs about \d+\)$/.test(line)), lines.join("\n"));
+		assert.ok(lines.includes("local/llama · window unknown · no price · can't be used: it declares no context window"), lines.join("\n"));
+		assert.ok(!lines.some((line) => line.startsWith("pi/auto")), "a virtual model is not offered");
+		// The models that hold this session come first.
+		assert.ok(lines.findIndex((line) => line.includes("holds this session")) < lines.findIndex((line) => line.startsWith("local/llama")));
+		menu.keys("\x1b");
+		// The defaults: no default line in the list.
+		menu.press("Editing");
+		menu.press(COLD);
+		assert.match(menu.text(), /\nCompact a cold cache with, by default · "holds this session" speaks of the session this menu was opened in/);
+		assert.match(menu.text(), /\n→? *off\n/);
+		assert.doesNotMatch(menu.text(), /default \(/);
+		menu.keys("gemini\r");
+		assert.match(menu.text(), /\n→ Compact a cold cache with +google\/gemini-2\.5-flash\n/);
+		await menu.close();
+		assert.equal(JSON.parse(settingsText()).cacheKeeper.coldCompactionModel, "google/gemini-2.5-flash");
+		// /cache-keeper: the line, and the next compaction on a cold cache (none since the session's model last answered
+		// is still warm: the cached path; a model switch makes it cold).
+		let status = await w.status();
+		assert.match(lineOf(status, "cold compaction:") ?? "", GEMINI_LINE);
+		assert.match(lineOf(status, "next compaction:") ?? "", /^next compaction: cached path;/);
+		const session = w.runtime.session;
+		const original = session.model;
+		session.agent.state.model = { ...original, id: "claude-sonnet-4-5" };
+		status = await w.status();
+		assert.equal(lineOf(status, "next compaction:"), "next compaction: google/gemini-2.5-flash, because the model changed since the last request");
+		saveConfig({ coldCompactionModel: "local/llama" });
+		status = await w.status();
+		assert.equal(lineOf(status, "next compaction:"), "next compaction: Pi's compaction, because the model changed since the last request; local/llama can't: it declares no context window");
+		assert.equal(lineOf(status, "cold compaction:"), "cold compaction: local/llama · window unknown · no price · can't be used: it declares no context window");
+		session.agent.state.model = original;
+		// A pick Pi can't use now is kept, and marked on the row and in /cache-keeper.
+		saveConfig({ coldCompactionModel: "google/gemini-9" });
+		assert.equal(lineOf(await w.status(), "cold compaction:"), "cold compaction: google/gemini-9 · not available now: Pi no longer lists it");
+		menu = await w.menu();
+		assert.match(menu.text(), /\n {2}Compact a cold cache with +google\/gemini-9 · not available now · default\n/);
+		await menu.close();
+		assert.equal(JSON.parse(settingsText()).cacheKeeper.coldCompactionModel, "google/gemini-9");
+	});
+	assert.deepEqual(result.thrown, []);
 });

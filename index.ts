@@ -6,6 +6,7 @@ import {
 	convertToLlm,
 	getLastAssistantUsage,
 	getLatestCompactionEntry,
+	getSelectListTheme,
 	getSettingsListTheme,
 	keyHint,
 	type ExtensionAPI,
@@ -14,9 +15,9 @@ import {
 	type SessionBeforeCompactEvent,
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import { Container, SettingsList, Text, type SettingItem } from "@earendil-works/pi-tui";
+import { Container, fuzzyFilter, getKeybindings, Input, SelectList, SettingsList, Text, type Component, type SelectItem, type SettingItem } from "@earendil-works/pi-tui";
 import { cacheTier, hasExplicitPromptCache, isKimiOnMoonshot, lifetimeFor } from "./cache-state.ts";
-import { coldFit, coldNeedTokens, coldRequestChars, coldUnusable, parseModelRef } from "./cold-compaction.ts";
+import { coldChoiceLabel, coldChoiceParts, coldFit, coldNeedTokens, coldRequestChars, coldUnusable, formatModelRef, orderColdChoices, parseModelRef, type ColdChoice } from "./cold-compaction.ts";
 import { cacheView, PeriodClock, startFacts, type CacheView, type StartFacts } from "./cache-clock.ts";
 import { written } from "./lifetime-evidence.ts";
 import {
@@ -347,6 +348,9 @@ const LEGACY_CARD_TYPE = "cached-compaction";
 const PREFIX_MISMATCH = "pi-cache-keeper: request prefix differs from the cached request";
 const BRIDGE_API = "claude-bridge";
 const COMPACTION_ABORTED = "the compaction was aborted";
+const COLD_ROW_LABEL = "Compact a cold cache with";
+/** The cold model list's first line, editing a session: drop its own value. Never a model reference (it has no slash). */
+const COLD_DEFAULT_PICK = "default";
 const FORK_REQUEST_HEADER = "x-claude-bridge-fork";
 const EXPIRY_LEAD_MS = 20_000;
 const RETENTION_MARKER = "PI_CACHE_KEEPER_RETENTION";
@@ -799,10 +803,12 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const renderCard: Parameters<typeof pi.registerEntryRenderer<{ records: TraceRecord[] }>>[1] = (entry, { expanded }, theme) => {
 		const records = entry.data?.records;
 		if (!records?.length) return undefined;
-		const lines = [`${theme.fg("accent", "cached compaction")}${expanded ? "" : `  ${theme.fg("muted", "(")}${keyHint("app.tools.expand", "for details")}${theme.fg("muted", ")")}`}`];
+		const cold = records.some((record) => record.event === "compact" && record.outcome === "cold");
+		const lines = [`${theme.fg("accent", cold ? "cold compaction" : "cached compaction")}${expanded ? "" : `  ${theme.fg("muted", "(")}${keyHint("app.tools.expand", "for details")}${theme.fg("muted", ")")}`}`];
 		for (const record of records) {
 			const line = describeTrace(record);
-			const missed = record.event === "failed" || (record.event === "compact" && (record.outcome !== "cached" || record.response?.usage.cacheRead === 0));
+			// A summary the cold model wrote is not a warning: nothing went wrong.
+			const missed = record.event === "failed" || (record.event === "compact" && record.outcome !== "cold" && (record.outcome !== "cached" || record.response?.usage.cacheRead === 0));
 			lines.push(missed ? theme.fg("warning", line) : line);
 			const versus = record.event === "compact" ? comparison(record) : undefined;
 			if (versus) {
@@ -2143,6 +2149,52 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		return { model };
 	};
 
+	// What this session would send a cold model now, in tokens: the context as it stands, as text the way Pi's summarizer
+	// writes it (an upper bound: a compaction sends only the part before the messages it keeps). Undefined where the
+	// session can't be read.
+	const coldSessionNeed = (ctx: ExtensionContext): number | undefined => {
+		try {
+			const messages = ctx.sessionManager.buildSessionProjection().messages;
+			return coldNeedTokens(coldRequestChars({ messagesToSummarize: messages, turnPrefixMessages: [], isSplitTurn: false, previousSummary: undefined }));
+		} catch {
+			return undefined;
+		}
+	};
+	// One model as the menu and /cache-keeper show it: its window, its price at the size needed or that it is a
+	// subscription, and whether it holds this session now.
+	const coldChoiceOf = (model: Model<Api>, need: number | undefined, accessOf: (model: Model<Api>) => Access): ColdChoice => {
+		const unusable = coldUnusable(model);
+		return {
+			ref: formatModelRef(model),
+			...(model.contextWindow > 0 ? { window: model.contextWindow } : {}),
+			...(hasPrices(model) ? { price: priceAt(model.cost, need) } : {}),
+			subscription: accessVia(accessOf(model)) === "sub",
+			...(unusable ? { unusable } : need === undefined ? {} : { fit: coldFit(model, need) }),
+		};
+	};
+	// Whether the cold model named by `ref` could write this session's summary now, and why not: what /cache-keeper says.
+	const coldNow = (ctx: ExtensionContext, ref: string, need = coldSessionNeed(ctx)): { model?: Model<Api>; why?: string } => {
+		const candidate = coldCandidate(ctx, ref);
+		if ("why" in candidate) return { why: candidate.why };
+		if (need === undefined) return { model: candidate.model };
+		const fit = coldFit(candidate.model, need);
+		return fit.fits ? { model: candidate.model } : { model: candidate.model, why: fit.why };
+	};
+	// A pick Pi can't use now: the model is gone, or its credentials are (the setting is kept).
+	const coldUnavailable = (ctx: ExtensionContext, ref: string): boolean => {
+		const parsed = parseModelRef(ref);
+		const model = parsed && ctx.modelRegistry.find(parsed.provider, parsed.id);
+		return !model || !ctx.modelRegistry.hasConfiguredAuth(model);
+	};
+	const coldNote = (ctx: ExtensionContext): string => {
+		const ref = inEffect().coldCompactionModel;
+		const mark = ownMark("coldCompactionModel");
+		if (!ref) return `off${mark}: when the cache can't be read, Pi's compaction writes the summary on this session's model`;
+		const candidate = coldCandidate(ctx, ref);
+		if ("why" in candidate) return `${ref}${mark} · ${coldUnavailable(ctx, ref) ? "not available now" : "can't be used"}: ${candidate.why}`;
+		return `${ref}${mark} · ${coldChoiceParts(coldChoiceOf(candidate.model, coldSessionNeed(ctx), accessReader(ctx))).join(" · ")}`;
+	};
+
 	// The summary by the cold compaction model, where the cached path can't write it: Pi's own compact() with the picked
 	// model, beside the session (its model and thinking level are not touched). Nothing returned is Pi's own compaction; a
 	// cancel is only for the user's abort. `base` is the compaction's record with the cached path's reason.
@@ -2489,7 +2541,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const settingsListing = (ctx: ExtensionContext): string => {
 		const layer = (name: SessionKey) => {
 			const mine = own[name];
-			const shown = (value: SessionValue) => (typeof value === "string" ? JSON.stringify(value) : String(value));
+			const shown = (value: SessionValue) => (value === "" ? '""' : String(value));
 			return mine === undefined ? `${shown(defaultOf(name))} [default]` : `${shown(mine)} [this session; default ${shown(defaultOf(name))}]`;
 		};
 		return [
@@ -2497,6 +2549,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			`compactAtPercent: ${layer("compactAtPercent")} · compactAtTokens: ${layer("compactAtTokens")} (${fullNote(ctx.model)})`,
 			`compactBeforeExpiry: ${layer("compactBeforeExpiry")} · minContextTokens: ${layer("minContextTokens")}`,
 			`keepWarmMinutes: ${layer("keepWarmMinutes")} (${keepWarmNote(ctx.model)})`,
+			`coldCompactionModel: ${layer("coldCompactionModel")} (${coldNote(ctx)})`,
 			`cacheRetention: ${config.cacheRetention} (all sessions)`,
 			`modelData: ${config.modelData} (all sessions) (${dataNote(ctx)})`,
 			ownKeys().length > 0 ? `This session's own: ${describeOwn(own, true)}; every other setting follows the defaults.` : "This session has no settings of its own: every setting follows the defaults.",
@@ -2560,6 +2613,84 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				describe: () => "The smallest context compacted before the cache expires; smaller sessions are cheap to write again, so they are left to cool. Keeping the cache warm doesn't use it: its budget grows and shrinks with the context.",
 			},
 		];
+		// The cold compaction model's row: Enter opens a list of the models instead of stepping through values.
+		const COLD = "coldCompactionModel";
+		const coldText =
+			"When the cached path can't write a compaction's summary (the cache is cold, this session's model refuses the summary, or the conversation no longer fits it), this model writes it with Pi's own summarizer, and the session goes on with its own model; where it can't either, Pi's own compaction runs as before. With a cold compaction model set, the part of the conversation being summarized is sent to that model's provider: your messages, the assistant's answers, the tool calls and the first 2,000 characters of each tool result, the previous summary, and any /compact instructions.";
+		const coldValue = (ref: string) => `${valueLabel(COLD, ref)}${ref && coldUnavailable(ctx, ref) ? " · not available now" : ""}`;
+		const coldList = (_current: string, done: (value?: string) => void): Component => {
+			// "This session now" is measured once, when the list opens.
+			const need = coldSessionNeed(ctx);
+			const accessOf = accessReader(ctx);
+			let models: Model<Api>[] = [];
+			try {
+				models = ctx.modelRegistry.getAvailable();
+			} catch {
+				// No models to offer: default and off stay.
+			}
+			const choices = orderColdChoices(models.filter((model) => !coldUnusable(model)).map((model) => coldChoiceOf(model, need, accessOf)));
+			const items: SelectItem[] = [
+				...(scope === "session" ? [{ value: COLD_DEFAULT_PICK, label: `default (${valueLabel(COLD, defaultOf(COLD))})` }] : []),
+				{ value: "", label: "off" },
+				...choices.map((choice) => ({ value: choice.ref, label: coldChoiceLabel(choice) })),
+			];
+			const input = new Input();
+			input.focused = true;
+			let list: SelectList;
+			const filter = () => {
+				const query = input.getValue().trim();
+				list = new SelectList(query ? fuzzyFilter(items, query, (item) => item.label) : items, 12, getSelectListTheme());
+				list.onSelect = (item) => done(item.value);
+				list.onCancel = () => done();
+			};
+			filter();
+			const size = need === undefined ? "its size is unknown" : `about ${formatTokens(need)} tokens as text`;
+			const header =
+				scope === "session"
+					? `Compact a cold cache with, in this session · "holds this session" speaks of this session now (${size})`
+					: `Compact a cold cache with, by default · "holds this session" speaks of the session this menu was opened in (${size})`;
+			const keys = ["tui.select.up", "tui.select.down", "tui.select.pageUp", "tui.select.pageDown", "tui.select.confirm", "tui.select.cancel"] as const;
+			return {
+				render: (width: number) => [...new Text(header, 0, 0).render(width), ...input.render(width), ...list.render(width), ...new Text("Type to search · Enter picks · Esc goes back", 0, 0).render(width)],
+				invalidate: () => {
+					input.invalidate();
+					list.invalidate();
+				},
+				handleInput: (data: string) => {
+					const bindings = getKeybindings();
+					if (keys.some((key) => bindings.matches(data, key))) list.handleInput(data);
+					else {
+						input.handleInput(data);
+						filter();
+					}
+				},
+			};
+		};
+		const coldRow = (): SettingItem => {
+			const fallback = defaultOf(COLD) as string;
+			const mine = own[COLD];
+			if (scope === "defaults") {
+				return {
+					id: COLD,
+					label: COLD_ROW_LABEL,
+					currentValue: coldValue(fallback),
+					description: `${coldText}${mine === undefined ? "" : ` This session has its own value (${valueLabel(COLD, mine)}), which wins in it.`}`,
+					submenu: coldList,
+				};
+			}
+			return {
+				id: COLD,
+				label: COLD_ROW_LABEL,
+				currentValue: mine === undefined ? `${coldValue(fallback)}${DEFAULT_SUFFIX}` : `${coldValue(mine)}${OWN_SUFFIX}`,
+				description: `${coldText} ${mine === undefined ? `This session follows the default (${valueLabel(COLD, fallback)}).` : `This session's own value; the default is ${valueLabel(COLD, fallback)}.`}`,
+				submenu: coldList,
+			};
+		};
+		// After "Or once it holds".
+		const withColdRow = (rows: SettingItem[]) => {
+			const at = rows.findIndex((row) => row.id === "compactAtTokens") + 1;
+			return [...rows.slice(0, at), coldRow(), ...rows.slice(at)];
+		};
 		const retentionText = "long asks for the longer cache in interactive sessions (2× the write price on Anthropic and Kimi); short keeps Pi's default. Applies from the next request.";
 		const dataText = `Once a day, read each model's input window, cache lifetimes and prices from ${DATA_SOURCE} (a public API: no key, and nothing about your sessions is sent) and put them into ~/.pi/agent/models.json: the window replaces Pi's, lifetimes and prices fill what Pi has none for, and values you set there yourself are never touched. The footer shows the current model's values and marks a guess. off takes these values out again.`;
 		const ALL_SESSIONS = "The same for every session (a session can't set its own): a change here changes the default.";
@@ -2610,7 +2741,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			const drop = count > 0 ? `drop ${count} own value${count === 1 ? "" : "s"}` : "nothing to drop";
 			return [
 				scopeItem(),
-				...rows,
+				...withColdRow(rows),
 				{ id: "reset", label: "Back to the defaults", currentValue: drop, values: [drop], description: "Drops this session's own values: every setting follows the defaults again, here and in what you resume or fork from here on." },
 				...globalItems(true),
 			];
@@ -2627,7 +2758,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					description: `${describe()}${mine === undefined ? "" : ` This session has its own value (${valueLabel(name, mine)}), which wins in it.`}`,
 				};
 			});
-			return [scopeItem(), ...rows, ...globalItems(false)];
+			return [scopeItem(), ...withColdRow(rows), ...globalItems(false)];
 		};
 		// The value a row's label stands for.
 		const parse = (name: CycledKey, label: string, current: SessionValue) => choicesOf(name, current).find((value) => valueLabel(name, value) === label);
@@ -2660,6 +2791,20 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					const dropped = ownKeys();
 					setOwn({});
 					afterChange(ctx, dropped);
+					return build(id);
+				}
+				if (id === COLD) {
+					// The list's pick: a model, off (""), or the default (this session drops its own value).
+					const picked = value === COLD_DEFAULT_PICK ? undefined : value;
+					try {
+						if (scope === "session") setOwn(withSessionValue(own, COLD, picked));
+						else if (picked !== undefined) {
+							config = saveConfig({ coldCompactionModel: picked });
+							latest = config;
+						}
+					} catch (error) {
+						ctx.ui.notify(`pi-cache-keeper could not set it: ${error instanceof Error ? error.message : String(error)}`, "error");
+					}
 					return build(id);
 				}
 				const name = ROWS.find((row) => row.name === id)?.name;
@@ -2730,7 +2875,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	};
 
 	pi.registerCommand("cache-keeper-settings", {
-		description: "Change pi-cache-keeper's settings: compact when full, compact before expiry, keep the cache warm, cache retention, model data",
+		description: "Change pi-cache-keeper's settings: compact when full, the cold compaction model, compact before expiry, keep the cache warm, cache retention, model data",
 		handler: async (_args, ctx) => openSettings(ctx),
 	});
 
@@ -2827,8 +2972,12 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				cache = `${left} (lifetime ${formatDuration(state.lifetime.ms)}, ${state.lifetime.source})${why}`;
 			}
 			const check = checkCachedPath(ctx, entries, model);
+			const coldRef = inEffect().coldCompactionModel;
+			const cold = "reason" in check && coldRef ? coldNow(ctx, coldRef) : undefined;
 			const next = "reason" in check
-				? `Pi's compaction, because ${check.reason}`
+				? cold && !cold.why
+					? `${coldRef}, because ${check.reason}`
+					: `Pi's compaction, because ${check.reason}${cold?.why ? `; ${coldRef} can't: ${cold.why}` : ""}`
 				: `cached path; last request ${formatDuration(Date.now() - check.request.at)} ago with ${check.request.transcript.length} messages, ${check.trailing.length} since. The request prefix is checked when it runs.`;
 			const stopped = stopNote();
 			let log: string[];
@@ -2848,6 +2997,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					`cache: ${cache}`,
 					`next compaction: ${next}`,
 					`when full: ${fullNote(model, true)}`,
+					`cold compaction: ${coldNote(ctx)}`,
 					`keep warm${ownMark("keepWarmMinutes")}: ${keepWarmNote(model)}`,
 					...(stopped ? [`stopped: ${stopped}`] : []),
 					`before expiry: ${expiryNote(true)} · retention ${model?.api === BRIDGE_API ? "set by Claude Code" : (process.env.PI_CACHE_RETENTION ?? "short")}`,
