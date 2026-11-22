@@ -537,6 +537,8 @@ The extension is built and checked for Pi with this extension and a provider ext
 - A window without a countdown shows a stop in its footer only when it next reads the record (Pi's warming asks, Pi goes idle, `/cache-keeper`); what it sends is checked against the record every time.
 - A stop record that can't be read (damaged by hand or by the disk) stops the extension's refreshes in every window until `/cache-keeper-stop` writes it again.
 - A run another extension starts with a custom message does not end a stop, so a window that only such runs keep busy stays unwarmed until you send it a message.
+- A `/reload` while warming is stopped can, rarely, undo part of the stop: if Pi's own warming comes due while Pi is loading the extensions, that one refresh goes out; and if a message of yours has not brought an answer yet (another extension handled it, or its run sent nothing), the reload lifts the stop before the next answer.
+- A refresh that settles while a `/reload` is under way, or after `/new` replaced its session, may leave no saved line in the session. The log (`cache-keeper.jsonl`) keeps its record.
 
 ## Origins and credit
 
