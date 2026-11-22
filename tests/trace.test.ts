@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { comparison, describeTrace, noticeOf, stopLabel, SWITCHED_OFF, type TraceRecord, type WarmTrace, formatCacheStatus, formatRemaining, type CompactTrace, type TraceUsage } from "../trace.ts";
+import { comparison, describeTrace, noticeOf, stopLabel, SWITCHED_OFF, traceDetails, type TraceRecord, type WarmTrace, formatCacheStatus, formatRemaining, type CompactTrace, type TraceUsage } from "../trace.ts";
 
 const cached = (usage: Partial<TraceUsage>, piEstimate: CompactTrace["piEstimate"]): CompactTrace => ({
 	event: "compact",
@@ -178,4 +178,62 @@ test("the log reads the two new records: a session left to Pi, and a period hand
 	const time = new Date(at).toLocaleTimeString([], { hourCycle: "h23", hour: "2-digit", minute: "2-digit", second: "2-digit" });
 	assert.equal(describeTrace({ event: "warm", action: "left", reason: "the cache lifetime is unknown", secondsLeft: 0, at, session: "s" }), `${time} keep-warm: left to Pi's own warming, the cache lifetime is unknown`);
 	assert.equal(describeTrace({ event: "warm", action: "skip", handedOver: "evidence", reason: "the route changed", secondsLeft: 2400, at, session: "s" }), `${time} cache expires in 2400s: left to Pi's own warming from now, the route changed`);
+});
+
+// Design 0.10.0, test 23: the words of a cold compaction, on the card and in /cache-keeper's log.
+test("a cold compaction's words: a summary with prices, on a subscription, without prices; a fallback with each kind of skipped", () => {
+	const at = "2026-11-22T13:48:54.000Z";
+	const time = new Date(at).toLocaleTimeString([], { hourCycle: "h23", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+	const usage: TraceUsage = { input: 148_000, cacheRead: 0, cacheWrite: 0, output: 3_000, cost: 0.052 };
+	const cold = (over: Partial<NonNullable<CompactTrace["cold"]>> = {}): CompactTrace & TraceRecord => ({
+		event: "compact",
+		trigger: "manual",
+		model: "anthropic/claude-opus-4-5",
+		outcome: "cold",
+		reason: "the prompt cache has expired",
+		tokensBefore: 412_000,
+		cwd: "/",
+		at,
+		session: "s",
+		cold: { model: "google/gemini-2.5-flash", via: "api", thinking: "off", needTokens: 148_000, window: 1_000_000, requests: 1, response: { seconds: 12.3, usage, summaryChars: 5120 }, sessionModelCost: 0.82, ...over },
+	});
+	const priced = cold();
+	assert.equal(describeTrace(priced), `${time} /compact: summary by google/gemini-2.5-flash, the prompt cache has expired: 148k in, 3k out, $0.052, 12.3s, summary 5120 chars`);
+	assert.equal(comparison(priced)?.text, "vs anthropic/claude-opus-4-5: 94% less, $0.052 instead of ~$0.82 for the same request");
+	assert.deepEqual(traceDetails(priced), ["cold model: google/gemini-2.5-flash (API key), thinking off, about 148k tokens of a 1M window, 1 request"]);
+
+	const sub = cold({ via: "sub", requests: 2, thinking: "minimal" });
+	assert.equal(describeTrace(sub), `${time} /compact: summary by google/gemini-2.5-flash, the prompt cache has expired: 148k in, 3k out, on a subscription, 12.3s, summary 5120 chars`);
+	assert.equal(comparison(sub), undefined, "no dollars to compare on a subscription");
+	assert.deepEqual(traceDetails(sub), ["cold model: google/gemini-2.5-flash (subscription), thinking minimal, about 148k tokens of a 1M window, 2 requests"]);
+
+	const free = cold({ response: { seconds: 2, usage: { ...usage, cost: 0 }, summaryChars: 900 }, sessionModelCost: undefined });
+	assert.equal(describeTrace(free), `${time} /compact: summary by google/gemini-2.5-flash, the prompt cache has expired: 148k in, 3k out, no price, 2.0s, summary 900 chars`);
+	assert.equal(comparison(free), undefined, "only when both models have prices");
+	assert.equal(comparison(cold({ sessionModelCost: undefined })), undefined, "the session's model without prices");
+
+	const skipped = [
+		"it is a virtual model",
+		"it runs through pi-claude-bridge",
+		"it is the session's own model",
+		"Pi no longer lists it",
+		"Pi has no credentials for google",
+		"it declares no context window",
+		"it needs about 260k tokens and its window is 200k",
+		"its request failed: Summarization failed: 429 rate limited",
+		"it returned no summary text",
+	];
+	for (const why of skipped) {
+		const record = { ...cold({ response: undefined, skipped: why }), outcome: "fallback" as const };
+		assert.equal(describeTrace(record), `${time} /compact: Pi's compaction, the prompt cache has expired; google/gemini-2.5-flash did not write the summary: ${why}`);
+		assert.equal(comparison(record), undefined);
+	}
+	// Skipped before the fit rule: only what was known.
+	assert.deepEqual(traceDetails({ ...cold({ response: undefined, skipped: "Pi no longer lists it", via: undefined, thinking: undefined, needTokens: undefined, window: undefined, requests: undefined }), outcome: "fallback" }), ["cold model: google/gemini-2.5-flash"]);
+	// The fallback's own line when no cold model was set is as before.
+	const plain = { ...cold(), outcome: "fallback" as const, cold: undefined };
+	assert.equal(describeTrace(plain), `${time} /compact: Pi's compaction, the prompt cache has expired`);
+	assert.deepEqual(traceDetails(plain), []);
+	// An abort during the cold request is a cancel.
+	assert.equal(describeTrace({ ...cold({ response: undefined, skipped: "the compaction was aborted" }), outcome: "cancelled", reason: "the compaction was aborted" }), `${time} /compact: cancelled, the compaction was aborted`);
 });

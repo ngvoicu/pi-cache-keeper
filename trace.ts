@@ -18,11 +18,33 @@ export interface TraceUsage {
 	cost: number;
 }
 
+/**
+ * The cold compaction model's part of a compaction's record: present whenever one was set and the cached path did not
+ * write the summary. `response` when it wrote it, `skipped` (why) when it did not.
+ */
+export interface ColdTrace {
+	/** "provider/id", as set. */
+	model: string;
+	via?: "sub" | "api" | "sub or api";
+	/** The thinking level sent. */
+	thinking?: string;
+	/** The fit rule's two numbers, where it got that far. */
+	needTokens?: number;
+	window?: number;
+	/** 1, or 2 for a split turn. */
+	requests?: number;
+	response?: { seconds: number; usage: TraceUsage; summaryChars: number };
+	/** What the same tokens cost at the session model's prices, when both models have prices. */
+	sessionModelCost?: number;
+	skipped?: string;
+}
+
 export interface CompactTrace {
 	event: "compact";
 	trigger: Trigger;
 	model: string;
-	outcome: "cached" | "fallback" | "cancelled";
+	/** "cached": the cached path wrote the summary; "cold": the cold compaction model did; "fallback": Pi's own compaction ran. */
+	outcome: "cached" | "cold" | "fallback" | "cancelled";
 	reason?: string;
 	mismatch?: { captured?: string; rebuilt?: string };
 	tokensBefore: number;
@@ -33,6 +55,7 @@ export interface CompactTrace {
 	request?: { thinking: string; bridgeFork: boolean; toolChoiceNone: boolean; sharedPrefix: boolean };
 	response?: { stopReason: string; seconds: number; usage: TraceUsage; summaryChars: number; error?: string };
 	piEstimate?: { input: number; cost: number };
+	cold?: ColdTrace;
 }
 
 export interface ResultTrace {
@@ -292,17 +315,31 @@ function formatCost(cost: number): string {
 	return `$${Number(cost.toPrecision(2))}`;
 }
 
+const deltaText = (ratio: number) =>
+	ratio <= 0.95 ? `${Math.round(100 * (1 - ratio))}% less`
+	: ratio < 1.05 ? "about the same"
+	: ratio < 2 ? `${Math.round(100 * (ratio - 1))}% more`
+	: `${ratio.toFixed(1)}× as much`;
+
+/**
+ * The line under a compaction: a cached one against Pi's compaction; one the cold model wrote against the same request at
+ * the session model's prices, only where both models have prices and the cold model's request was paid for in money.
+ */
 export function comparison(record: CompactTrace): { text: string; ratio: number } | undefined {
+	if (record.outcome === "cold") {
+		const { cold } = record;
+		const cost = cold?.response?.usage.cost ?? 0;
+		const theirs = cold?.sessionModelCost ?? 0;
+		if (!cold || cold.via === "sub" || cost <= 0 || theirs <= 0) return undefined;
+		const ratio = cost / theirs;
+		return { text: `vs ${record.model}: ${deltaText(ratio)}, ${formatCost(cost)} instead of ~${formatCost(theirs)} for the same request`, ratio };
+	}
 	const { piEstimate, response } = record;
 	if (record.outcome !== "cached" || !piEstimate || !response) return undefined;
 	const { usage } = response;
 	const priced = piEstimate.cost > 0;
 	const ratio = priced ? usage.cost / piEstimate.cost : (usage.input + usage.cacheWrite) / piEstimate.input;
-	const delta =
-		ratio <= 0.95 ? `${Math.round(100 * (1 - ratio))}% less`
-		: ratio < 1.05 ? "about the same"
-		: ratio < 2 ? `${Math.round(100 * (ratio - 1))}% more`
-		: `${ratio.toFixed(1)}× as much`;
+	const delta = deltaText(ratio);
 	const text = priced
 		? `vs Pi's compaction: ${delta}, ${formatCost(usage.cost)} instead of ~${formatCost(piEstimate.cost)} (it sends ~${formatTokens(piEstimate.input)} tokens, none from cache)`
 		: `vs Pi's compaction: ${delta}, ${formatTokens(usage.input + usage.cacheWrite)} tokens not from cache instead of ~${formatTokens(piEstimate.input)}`;
@@ -347,10 +384,18 @@ export function describeTrace(record: TraceRecord): string {
 				const { usage, seconds, summaryChars } = record.response;
 				return `${time} ${what}: cached, ${cacheShare(usage)}, ${seconds.toFixed(1)}s, summary ${summaryChars} chars`;
 			}
+			const cold = record.cold;
+			if (record.outcome === "cold" && cold?.response) {
+				const { usage, seconds, summaryChars } = cold.response;
+				const cost = cold.via === "sub" ? "on a subscription" : usage.cost > 0 ? formatCost(usage.cost) : "no price";
+				const sent = usage.input + usage.cacheRead + usage.cacheWrite;
+				return `${time} ${what}: summary by ${cold.model}, ${record.reason}: ${formatTokens(sent)} in, ${formatTokens(usage.output)} out, ${cost}, ${seconds.toFixed(1)}s, summary ${summaryChars} chars`;
+			}
 			const then = record.outcome === "fallback" ? "Pi's compaction" : "cancelled";
 			const usage = record.response?.usage;
 			const spent = usage && usage.input + usage.cacheRead + usage.cacheWrite > 0 ? ` (the summary request used ${cacheShare(usage)}, ${formatCost(usage.cost)})` : "";
-			return `${time} ${what}: ${then}, ${record.reason}${spent}`;
+			const coldNote = record.outcome === "fallback" && cold?.skipped ? `; ${cold.model} did not write the summary: ${cold.skipped}` : "";
+			return `${time} ${what}: ${then}, ${record.reason}${spent}${coldNote}`;
 		}
 		case "result":
 			return record.by === "pi"
@@ -390,9 +435,11 @@ export function describeTrace(record: TraceRecord): string {
 	}
 }
 
+const VIA_LABELS: Record<NonNullable<ColdTrace["via"]>, string> = { sub: "subscription", api: "API key", "sub or api": "subscription or API key" };
+
 export function traceDetails(record: CompactTrace): string[] {
 	const lines: string[] = [];
-	const { cache, lastRequest, request, response, mismatch } = record;
+	const { cache, lastRequest, request, response, mismatch, cold } = record;
 	if (cache) {
 		const lifetime = cache.lifetimeSeconds === undefined ? "lifetime unknown" : `lifetime ${formatDuration(cache.lifetimeSeconds * 1000)} (${cache.source})`;
 		const left = cache.expiresInSeconds === undefined ? "" : `, ${formatDuration(cache.expiresInSeconds * 1000)} left`;
@@ -412,5 +459,15 @@ export function traceDetails(record: CompactTrace): string[] {
 	}
 	if (response?.error) lines.push(`error: ${response.error}`);
 	if (mismatch?.captured !== undefined) lines.push(`last request had: ${mismatch.captured}`, `summary request had: ${mismatch.rebuilt ?? "(nothing)"}`);
+	if (cold) {
+		const via = cold.via === undefined ? "" : ` (${VIA_LABELS[cold.via]})`;
+		const size = cold.needTokens === undefined ? "" : `, about ${formatTokens(cold.needTokens)} tokens${cold.window ? ` of a ${formatWindow(cold.window)} window` : ""}`;
+		const parts = [
+			`cold model: ${cold.model}${via}`,
+			...(cold.thinking === undefined ? [] : [`thinking ${cold.thinking}`]),
+		];
+		const requests = cold.requests === undefined ? "" : `, ${cold.requests} request${cold.requests === 1 ? "" : "s"}`;
+		lines.push(`${parts.join(", ")}${size}${requests}`);
+	}
 	return lines;
 }
