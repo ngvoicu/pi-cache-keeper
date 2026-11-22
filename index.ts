@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { calculateCost, contentText, type Api, type AssistantMessage, type Model, type Usage } from "@earendil-works/pi-ai";
+import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
+import { calculateCost, clampThinkingLevel, contentText, type Api, type AssistantMessage, type Model, type Usage } from "@earendil-works/pi-ai";
 import {
+	compact,
 	convertToLlm,
 	getLastAssistantUsage,
 	getLatestCompactionEntry,
@@ -10,10 +11,12 @@ import {
 	type ExtensionAPI,
 	type ExtensionCommandContext,
 	type ExtensionContext,
+	type SessionBeforeCompactEvent,
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { Container, SettingsList, Text, type SettingItem } from "@earendil-works/pi-tui";
 import { cacheTier, hasExplicitPromptCache, isKimiOnMoonshot, lifetimeFor } from "./cache-state.ts";
+import { coldFit, coldNeedTokens, coldRequestChars, coldUnusable, parseModelRef } from "./cold-compaction.ts";
 import { cacheView, PeriodClock, startFacts, type CacheView, type StartFacts } from "./cache-clock.ts";
 import { written } from "./lifetime-evidence.ts";
 import {
@@ -68,6 +71,7 @@ import {
 	TRACE_PATH_LABEL,
 	stopLabel,
 	traceDetails,
+	type ColdTrace,
 	type CompactTrace,
 	type TimerContext,
 	type TraceEvent,
@@ -342,6 +346,7 @@ const REFRESH_LINE_TYPE = "cache-keeper-refresh";
 const LEGACY_CARD_TYPE = "cached-compaction";
 const PREFIX_MISMATCH = "pi-cache-keeper: request prefix differs from the cached request";
 const BRIDGE_API = "claude-bridge";
+const COMPACTION_ABORTED = "the compaction was aborted";
 const FORK_REQUEST_HEADER = "x-claude-bridge-fork";
 const EXPIRY_LEAD_MS = 20_000;
 const RETENTION_MARKER = "PI_CACHE_KEEPER_RETENTION";
@@ -2124,6 +2129,95 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		return { request, prefix, trailing: trailing.messages, cache };
 	};
 
+	// The cold compaction model named by `ref`, if this session can hand it a summary now (before anything is measured):
+	// not the session's own model, listed by Pi, of an API that can take the request, and with credentials.
+	const coldCandidate = (ctx: ExtensionContext, ref: string): { model: Model<Api> } | { why: string } => {
+		const parsed = parseModelRef(ref);
+		if (!parsed) return { why: "it is not a model reference" };
+		if (ctx.model?.provider === parsed.provider && ctx.model.id === parsed.id) return { why: "it is the session's own model" };
+		const model = ctx.modelRegistry.find(parsed.provider, parsed.id);
+		if (!model) return { why: "Pi no longer lists it" };
+		const unusable = coldUnusable(model);
+		if (unusable) return { why: unusable };
+		if (!ctx.modelRegistry.hasConfiguredAuth(model)) return { why: `Pi has no credentials for ${model.provider}` };
+		return { model };
+	};
+
+	// The summary by the cold compaction model, where the cached path can't write it: Pi's own compact() with the picked
+	// model, beside the session (its model and thinking level are not touched). Nothing returned is Pi's own compaction; a
+	// cancel is only for the user's abort. `base` is the compaction's record with the cached path's reason.
+	const coldSummary = async (ctx: ExtensionContext, event: SessionBeforeCompactEvent, base: CompactTrace) => {
+		const ref = inEffect().coldCompactionModel;
+		if (!ref) {
+			decision = trace(ctx, { ...base, outcome: "fallback" });
+			return undefined;
+		}
+		const cold: ColdTrace = { model: ref };
+		const skip = (why: string) => {
+			cold.skipped = why;
+			decision = trace(ctx, { ...base, outcome: "fallback", cold });
+			return undefined;
+		};
+		const cancel = () => {
+			cold.skipped = COMPACTION_ABORTED;
+			decision = trace(ctx, { ...base, outcome: "cancelled", reason: COMPACTION_ABORTED, cold });
+			return { cancel: true };
+		};
+		const { preparation, signal } = event;
+		if (signal.aborted) return cancel();
+		const candidate = coldCandidate(ctx, ref);
+		if ("why" in candidate) return skip(candidate.why);
+		const { model } = candidate;
+		cold.via = accessVia(accessReader(ctx)(model));
+		const requests = coldRequestChars(preparation, event.customInstructions);
+		cold.requests = requests.length;
+		cold.needTokens = coldNeedTokens(requests);
+		if (model.contextWindow > 0) cold.window = model.contextWindow;
+		const fit = coldFit(model, cold.needTokens);
+		if (!fit.fits) return skip(fit.why);
+		const thinking = clampThinkingLevel(model, "off");
+		cold.thinking = thinking;
+		// Pi's credentials at request time, through the registry; each answer's text is kept to tell an empty summary.
+		const texts: string[] = [];
+		const transport: StreamFn = (target, context, options) => {
+			// Nothing is sent after an abort (a split turn's second request).
+			if (signal.aborted) throw new Error(COMPACTION_ABORTED);
+			const stream = ctx.modelRegistry.streamSimple(target, context, options);
+			stream.result().then(
+				(answer) => texts.push(contentText(answer.content).trim()),
+				() => {},
+			);
+			return stream;
+		};
+		const started = Date.now();
+		let result: Awaited<ReturnType<typeof compact>>;
+		try {
+			// No API key of the extension's own, no headers, no retry policy (one attempt), and no session id: Pi's summarizer
+			// gives the request a routing id of its own and asks for no cache.
+			result = await compact(preparation, model, undefined, undefined, event.customInstructions, signal, thinking, transport);
+		} catch (error) {
+			if (signal.aborted) return cancel();
+			return skip(`its request failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		if (signal.aborted) return cancel();
+		if (texts.length === 0 || texts.some((text) => !text)) return skip("it returned no summary text");
+		const checkpoint = checkpointSummary(result.summary, preparation.fileOps, getLatestCompactionEntry(event.branchEntries)?.details);
+		const usage: Usage = result.usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+		cold.response = { seconds: (Date.now() - started) / 1000, usage: traceUsage(usage), summaryChars: result.summary.replace(/<(read-files|modified-files)>[\s\S]*?<\/\1>/g, "").trim().length };
+		const session = ctx.model;
+		if (session && hasPrices(session) && hasPrices(model)) cold.sessionModelCost = calculateCost(session, { ...usage, cost: { ...usage.cost } }).total;
+		decision = trace(ctx, { ...base, outcome: "cold", cold });
+		return {
+			compaction: {
+				summary: checkpoint.summary,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				usage,
+				details: { readFiles: checkpoint.readFiles, modifiedFiles: checkpoint.modifiedFiles },
+			},
+		};
+	};
+
 	pi.on("session_before_compact", async (event, ctx) => {
 		// Before expiry, Pi's own compaction would pay full price for nothing urgent, so a failed cached path cancels;
 		// when full, Pi's compaction is still wanted.
@@ -2140,10 +2234,15 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			cwd: ctx.cwd,
 			sessionFile: ctx.sessionManager.getSessionFile(),
 		};
-		const fallBack = (reason: string, mismatch?: PrefixMismatch) => {
+		// Where the cached path can't write the summary: before expiry, the compaction is cancelled; else the cold compaction
+		// model writes it where one is set and can, and Pi's own compaction runs where it can't (the one rule of 0.10.0).
+		const fallBack = async (reason: string, mismatch?: PrefixMismatch) => {
 			const diff = mismatch?.captured === undefined ? undefined : { captured: mismatch.captured, rebuilt: mismatch.rebuilt };
-			decision = trace(ctx, { ...record, outcome: fromExpiry ? "cancelled" : "fallback", reason, mismatch: diff });
-			return fromExpiry ? { cancel: true } : undefined;
+			if (fromExpiry) {
+				decision = trace(ctx, { ...record, outcome: "cancelled", reason, mismatch: diff });
+				return { cancel: true };
+			}
+			return coldSummary(ctx, event, { ...record, reason, mismatch: diff });
 		};
 		if (event.reason === "overflow") return fallBack("the last request overflowed the context window");
 		const check = checkCachedPath(ctx, event.branchEntries, ctx.model);
@@ -2256,7 +2355,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 
 		if (expiredAtGate) return fallBack(expiredAtGate);
 		if (response.stopReason === "aborted") {
-			decision = trace(ctx, { ...record, outcome: "cancelled", reason: "the compaction was aborted" });
+			decision = trace(ctx, { ...record, outcome: "cancelled", reason: COMPACTION_ABORTED });
 			return { cancel: true };
 		}
 		if (mismatch) return fallBack(mismatch.reason, mismatch);
