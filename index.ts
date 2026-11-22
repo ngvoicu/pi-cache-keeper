@@ -137,6 +137,11 @@ import { agentDirLabel, covers, firstSaid, noteMessage, readStop, rememberLoad, 
 import { answerToPi, end, leave, mayLeave, onAgainst, settle, WAITING, warmer, type Warmer, type WarmPhase } from "./warm-period.ts";
 import { formatFooter, lifetimesView, priceAt, sentView, tierInUse, type Countdown, type DataView, type FooterView, type KeepWarmView, type PriceView } from "./footer.ts";
 
+/** A session's own value of a setting. */
+type SessionValue = number | boolean | string;
+/** The settings whose menu row steps through its values on Enter (the cold compaction model opens a list instead). */
+type CycledKey = Exclude<SessionKey, "coldCompactionModel">;
+
 interface CapturedRequest {
 	transcript: AgentMessage[];
 	payload?: Payload;
@@ -2353,7 +2358,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	};
 
 	// A session's own value, as the menu and the transcript say it.
-	const valueLabel = (name: SessionKey, value: number | boolean): string => {
+	const valueLabel = (name: SessionKey, value: SessionValue): string => {
+		if (name === "coldCompactionModel") return value === "" ? "off" : String(value);
 		if (name === "compactAtPercent") return percentLabel(value as number);
 		if (name === "compactAtTokens") return capLabel(value as number);
 		if (name === "compactBeforeExpiry") return value ? "on" : "off";
@@ -2361,12 +2367,12 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		return keepWarmLabel(value as number);
 	};
 	// The default as saved now: keep-warm is read afresh (a change in another window holds here too), the others as loaded.
-	const defaultOf = (name: SessionKey): number | boolean => defaultsNow()[name];
+	const defaultOf = (name: SessionKey): SessionValue => defaultsNow()[name];
 	const ownKeys = (values: SessionSettings = own) => SESSION_KEYS.filter((name) => values[name] !== undefined);
 	// "keepWarmMinutes 4 h (default off), compactAtPercent 80% (default 90%)".
 	const describeOwn = (values: SessionSettings, withDefaults: boolean) =>
 		ownKeys(values)
-			.map((name) => `${name} ${valueLabel(name, values[name] as number | boolean)}${withDefaults ? ` (default ${valueLabel(name, defaultOf(name))})` : ""}`)
+			.map((name) => `${name} ${valueLabel(name, values[name] as SessionValue)}${withDefaults ? ` (default ${valueLabel(name, defaultOf(name))})` : ""}`)
 			.join(", ");
 	// " (this session)" after what one of the session's own values decides.
 	const ownMark = (name: SessionKey) => (own[name] !== undefined ? " (this session)" : "");
@@ -2384,7 +2390,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const settingsListing = (ctx: ExtensionContext): string => {
 		const layer = (name: SessionKey) => {
 			const mine = own[name];
-			const shown = (value: number | boolean) => String(value);
+			const shown = (value: SessionValue) => (typeof value === "string" ? JSON.stringify(value) : String(value));
 			return mine === undefined ? `${shown(defaultOf(name))} [default]` : `${shown(mine)} [this session; default ${shown(defaultOf(name))}]`;
 		};
 		return [
@@ -2421,12 +2427,12 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		}
 		// The menu opens on this session; the defaults are one Enter away, on the first row.
 		let scope: "session" | "defaults" = "session";
-		const choicesOf = (name: SessionKey, current: number | boolean): (number | boolean)[] => {
+		const choicesOf = (name: CycledKey, current: SessionValue): (number | boolean)[] => {
 			if (name === "compactBeforeExpiry") return [true, false];
 			const offered = { compactAtPercent: COMPACT_AT_PERCENTS, compactAtTokens: COMPACT_AT_TOKEN_CHOICES, minContextTokens: MIN_CONTEXT_CHOICES, keepWarmMinutes: KEEP_WARM_CHOICES }[name];
 			return [...new Set([...offered, current as number])].sort((a, b) => a - b);
 		};
-		const ROWS: { name: SessionKey; label: string; describe: () => string }[] = [
+		const ROWS: { name: CycledKey; label: string; describe: () => string }[] = [
 			{
 				name: "compactAtPercent",
 				label: "Compact when the context is",
@@ -2491,7 +2497,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				// Enter steps from the default as it would from that value in the defaults: to the next one up (the other one, for
 				// on and off), so raising a value never passes through off on its way.
 				const all = choicesOf(name, mine ?? fallback);
-				const choices = typeof fallback === "boolean" ? [!fallback, fallback] : [...all.filter((value) => (value as number) > fallback), ...all.filter((value) => (value as number) <= fallback)];
+				const choices = typeof fallback === "boolean" ? [!fallback, fallback] : [...all.filter((value) => (value as number) > (fallback as number)), ...all.filter((value) => (value as number) <= (fallback as number))];
 				const defaultValue = `${valueLabel(name, fallback)}${DEFAULT_SUFFIX}`;
 				return {
 					id: name,
@@ -2525,7 +2531,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			return [scopeItem(), ...rows, ...globalItems(false)];
 		};
 		// The value a row's label stands for.
-		const parse = (name: SessionKey, label: string, current: number | boolean) => choicesOf(name, current).find((value) => valueLabel(name, value) === label);
+		const parse = (name: CycledKey, label: string, current: SessionValue) => choicesOf(name, current).find((value) => valueLabel(name, value) === label);
 
 		await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
 			const container = new Container();
@@ -2557,7 +2563,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					afterChange(ctx, dropped);
 					return build(id);
 				}
-				const name = SESSION_KEYS.find((key) => key === id);
+				const name = ROWS.find((row) => row.name === id)?.name;
 				if (scope === "session" && name) {
 					const mine = own[name];
 					const picked = value.endsWith(OWN_SUFFIX) ? parse(name, value.slice(0, -OWN_SUFFIX.length), mine ?? defaultOf(name)) : undefined;

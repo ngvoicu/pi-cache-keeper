@@ -15,9 +15,23 @@ export interface CacheKeeperConfig {
 	keepWarmMinutes: number;
 	/** Read each model's input window, cache lifetimes and prices from providers.dev and put them into pi's models.json. */
 	modelData: boolean;
+	/**
+	 * The model (`"provider/modelId"`) that writes a compaction's summary where the cached path can't (a cold cache, a
+	 * summary the session's model refuses, a conversation that doesn't fit it); `""` is off.
+	 */
+	coldCompactionModel: string;
 }
 
-const DEFAULTS: CacheKeeperConfig = { cacheRetention: "long", compactBeforeExpiry: true, minContextTokens: 140_000, compactAtPercent: 90, compactAtTokens: 0, keepWarmMinutes: 0, modelData: true };
+const DEFAULTS: CacheKeeperConfig = {
+	cacheRetention: "long",
+	compactBeforeExpiry: true,
+	minContextTokens: 140_000,
+	compactAtPercent: 90,
+	compactAtTokens: 0,
+	keepWarmMinutes: 0,
+	modelData: true,
+	coldCompactionModel: "",
+};
 
 /** The values `/cache-keeper-settings` offers for compactAtPercent; 0 is "off". */
 export const COMPACT_AT_PERCENTS = [0, 50, 60, 70, 75, 80, 85, 90, 95];
@@ -67,8 +81,9 @@ export function loadConfig(): CacheKeeperConfig {
 		compactAtTokens = DEFAULTS.compactAtTokens,
 		keepWarmMinutes = DEFAULTS.keepWarmMinutes,
 		modelData = DEFAULTS.modelData,
+		coldCompactionModel = DEFAULTS.coldCompactionModel,
 	} = raw;
-	const values = { cacheRetention, compactBeforeExpiry, minContextTokens, compactAtPercent, compactAtTokens, keepWarmMinutes, modelData };
+	const values = { cacheRetention, compactBeforeExpiry, minContextTokens, compactAtPercent, compactAtTokens, keepWarmMinutes, modelData, coldCompactionModel };
 	for (const name of Object.keys(DEFAULTS) as (keyof CacheKeeperConfig)[]) {
 		const problem = valueProblem(name, values[name]);
 		if (problem) throw new Error(`${key}.${name} in ${path} ${problem}`);
@@ -94,7 +109,17 @@ function valueProblem(name: keyof CacheKeeperConfig, value: unknown): string | u
 			return wholeNumber(value) ? undefined : "must be a whole number of tokens, or 0 for off";
 		case "keepWarmMinutes":
 			return wholeNumber(value, 1440) ? undefined : "must be a whole number of minutes from 0 (off) to 1440";
+		case "coldCompactionModel":
+			return isModelRefOrOff(value) ? undefined : 'must be "provider/modelId", or "" for off';
 	}
+}
+
+/** `""`, or a non-empty provider, a slash and a non-empty model id (split at the first slash, as cold-compaction.ts does). */
+function isModelRefOrOff(value: unknown): boolean {
+	if (typeof value !== "string") return false;
+	if (value === "") return true;
+	const slash = value.indexOf("/");
+	return slash > 0 && slash < value.length - 1;
 }
 
 /**
@@ -102,7 +127,7 @@ function valueProblem(name: keyof CacheKeeperConfig, value: unknown): string | u
  * follows the defaults. cacheRetention (the process-wide PI_CACHE_RETENTION) and modelData (Pi's models.json) are the
  * same for every session.
  */
-export const SESSION_KEYS = ["compactAtPercent", "compactAtTokens", "compactBeforeExpiry", "minContextTokens", "keepWarmMinutes"] as const;
+export const SESSION_KEYS = ["compactAtPercent", "compactAtTokens", "compactBeforeExpiry", "minContextTokens", "keepWarmMinutes", "coldCompactionModel"] as const;
 export type SessionKey = (typeof SESSION_KEYS)[number];
 export type SessionSettings = Partial<Pick<CacheKeeperConfig, SessionKey>>;
 /** The settings that stay the same for every session. */

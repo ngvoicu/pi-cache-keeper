@@ -20,7 +20,7 @@ const {
 } = await import("../config.ts");
 // ------------------------------------------------------------------------------------------------- the two layers
 
-const DEFAULTS = { cacheRetention: "long", compactBeforeExpiry: true, minContextTokens: 140_000, compactAtPercent: 90, compactAtTokens: 0, keepWarmMinutes: 0, modelData: true } as const;
+const DEFAULTS = { cacheRetention: "long", compactBeforeExpiry: true, minContextTokens: 140_000, compactAtPercent: 90, compactAtTokens: 0, keepWarmMinutes: 0, modelData: true, coldCompactionModel: "" } as const;
 const entry = (settings: unknown) => ({ type: "custom", customType: SESSION_SETTINGS_TYPE, data: { settings } });
 
 test("the merge: the session's own value wins for each key it set; every other key follows the defaults, also a default changed later", () => {
@@ -36,7 +36,7 @@ test("the merge: the session's own value wins for each key it set; every other k
 });
 
 test("the global-only keys are refused per session: cacheRetention and modelData can't be set, and an entry holding them is read without them", () => {
-	assert.deepEqual([...SESSION_KEYS].sort(), ["compactAtPercent", "compactAtTokens", "compactBeforeExpiry", "keepWarmMinutes", "minContextTokens"]);
+	assert.deepEqual([...SESSION_KEYS].sort(), ["coldCompactionModel", "compactAtPercent", "compactAtTokens", "compactBeforeExpiry", "keepWarmMinutes", "minContextTokens"]);
 	assert.deepEqual([...GLOBAL_ONLY_KEYS], ["cacheRetention", "modelData"]);
 	assert.throws(() => withSessionValue({}, "cacheRetention", "short"), /cacheRetention is the same for every session/);
 	assert.throws(() => withSessionValue({}, "modelData", false), /modelData is the same for every session/);
@@ -51,6 +51,21 @@ test("the global-only keys are refused per session: cacheRetention and modelData
 	assert.deepEqual(read.ignored.sort(), ["cacheRetention", "compactAtPercent", "future", "modelData"]);
 	assert.deepEqual(readSessionSettings(undefined).settings, {});
 	assert.deepEqual(readSessionSettings({ settings: [1] }).settings, {});
+});
+
+// Design 0.10.0, test 6 (session part): the cold compaction model is the sixth session key.
+test("coldCompactionModel is a session key: \"\" and provider/id are valid per session, anything else is refused; an entry holding it is read, and one without it changes nothing", () => {
+	assert.ok((SESSION_KEYS as readonly string[]).includes("coldCompactionModel"));
+	assert.deepEqual(withSessionValue({}, "coldCompactionModel", "google/gemini-2.5-flash"), { coldCompactionModel: "google/gemini-2.5-flash" });
+	assert.deepEqual(withSessionValue({ keepWarmMinutes: 60 }, "coldCompactionModel", ""), { keepWarmMinutes: 60, coldCompactionModel: "" }, "off for this session is a value of its own");
+	assert.deepEqual(withSessionValue({ coldCompactionModel: "" }, "coldCompactionModel", undefined), {}, "dropped: it follows the default again");
+	for (const bad of ["gemini", "google/", 3]) assert.throws(() => withSessionValue({}, "coldCompactionModel", bad), /coldCompactionModel must be "provider\/modelId", or "" for off/);
+	const read = readSessionSettings({ settings: { coldCompactionModel: "google/gemini-2.5-flash", keepWarmMinutes: 240 } });
+	assert.deepEqual(read.settings, { coldCompactionModel: "google/gemini-2.5-flash", keepWarmMinutes: 240 });
+	assert.deepEqual(readSessionSettings({ settings: { coldCompactionModel: "nope" } }).ignored, ["coldCompactionModel"], "a bad value is left out and named");
+	// An entry of 0.9.0, without the key: the session follows the default.
+	const old = readSessionSettings({ settings: { keepWarmMinutes: 240 } }).settings;
+	assert.equal(settingsInEffect({ ...DEFAULTS, coldCompactionModel: "google/gemini-2.5-flash" }, old).coldCompactionModel, "google/gemini-2.5-flash");
 });
 
 test("the latest settings entry on the branch decides; an empty one is back to the defaults; a session without one has the defaults", () => {
