@@ -1,4 +1,4 @@
-// Writes the fields of Pi's built-in model catalog that the cold compaction model's list and fit read, from an installed
+// Writes the fields of Pi's built-in model catalog that the fallback compaction model's list and fit read, from an installed
 // pi-ai, as a fixture: node tests/fixtures/catalog-fixture.mjs <directory with node_modules> <out.json>
 // Each model: [id, api, contextWindow, maxTokens, reasoning (0 or 1), thinking levels (a level mapped to null, or xhigh and
 // max where mapped: what clampThinkingLevel reads), input price, output price], by provider.

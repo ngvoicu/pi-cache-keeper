@@ -298,7 +298,7 @@ export const settingsText = () => readFileSync(settingsFile, "utf8");
 export const KEEP_WARM = "Keep the cache warm when idle";
 export const FULL = "Compact when the context is";
 export const EXPIRY = "Compact before the cache expires";
-export const COLD = "Compact a cold cache with";
+export const FALLBACK = "When the cache can't be used, compact with";
 export const NO_OWN = "settings: the defaults (this session has none of its own) · /cache-keeper-settings";
 export const OWN = "settings: this session's own: compactAtPercent 80% (default off), keepWarmMinutes 4 h (default off); every other follows the defaults · /cache-keeper-settings";
 export const lineOf = (text: string, start: string) => text.split("\n").find((line) => line.startsWith(start));

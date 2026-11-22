@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { COLD, EXPIRY, flush, FULL, inWindow, KEEP_WARM, lineOf, NO_OWN, OWN, ownEntries, ownOf, settingsText, skip, writeDefaults, type Any } from "./session-runtime.ts";
+import { FALLBACK, EXPIRY, flush, FULL, inWindow, KEEP_WARM, lineOf, NO_OWN, OWN, ownEntries, ownOf, settingsText, skip, writeDefaults, type Any } from "./session-runtime.ts";
 
 const {
 	GLOBAL_ONLY_KEYS,
@@ -20,7 +20,7 @@ const {
 } = await import("../config.ts");
 // ------------------------------------------------------------------------------------------------- the two layers
 
-const DEFAULTS = { cacheRetention: "long", compactBeforeExpiry: true, minContextTokens: 140_000, compactAtPercent: 90, compactAtTokens: 0, keepWarmMinutes: 0, modelData: true, coldCompactionModel: "" } as const;
+const DEFAULTS = { cacheRetention: "long", compactBeforeExpiry: true, minContextTokens: 140_000, compactAtPercent: 90, compactAtTokens: 0, keepWarmMinutes: 0, modelData: true, fallbackCompactionModel: "" } as const;
 const entry = (settings: unknown) => ({ type: "custom", customType: SESSION_SETTINGS_TYPE, data: { settings } });
 
 test("the merge: the session's own value wins for each key it set; every other key follows the defaults, also a default changed later", () => {
@@ -36,7 +36,7 @@ test("the merge: the session's own value wins for each key it set; every other k
 });
 
 test("the global-only keys are refused per session: cacheRetention and modelData can't be set, and an entry holding them is read without them", () => {
-	assert.deepEqual([...SESSION_KEYS].sort(), ["coldCompactionModel", "compactAtPercent", "compactAtTokens", "compactBeforeExpiry", "keepWarmMinutes", "minContextTokens"]);
+	assert.deepEqual([...SESSION_KEYS].sort(), ["compactAtPercent", "compactAtTokens", "compactBeforeExpiry", "fallbackCompactionModel", "keepWarmMinutes", "minContextTokens"]);
 	assert.deepEqual([...GLOBAL_ONLY_KEYS], ["cacheRetention", "modelData"]);
 	assert.throws(() => withSessionValue({}, "cacheRetention", "short"), /cacheRetention is the same for every session/);
 	assert.throws(() => withSessionValue({}, "modelData", false), /modelData is the same for every session/);
@@ -53,19 +53,35 @@ test("the global-only keys are refused per session: cacheRetention and modelData
 	assert.deepEqual(readSessionSettings({ settings: [1] }).settings, {});
 });
 
-// Design 0.10.0, test 6 (session part): the cold compaction model is the sixth session key.
-test("coldCompactionModel is a session key: \"\" and provider/id are valid per session, anything else is refused; an entry holding it is read, and one without it changes nothing", () => {
-	assert.ok((SESSION_KEYS as readonly string[]).includes("coldCompactionModel"));
-	assert.deepEqual(withSessionValue({}, "coldCompactionModel", "google/gemini-2.5-flash"), { coldCompactionModel: "google/gemini-2.5-flash" });
-	assert.deepEqual(withSessionValue({ keepWarmMinutes: 60 }, "coldCompactionModel", ""), { keepWarmMinutes: 60, coldCompactionModel: "" }, "off for this session is a value of its own");
-	assert.deepEqual(withSessionValue({ coldCompactionModel: "" }, "coldCompactionModel", undefined), {}, "dropped: it follows the default again");
-	for (const bad of ["gemini", "google/", 3]) assert.throws(() => withSessionValue({}, "coldCompactionModel", bad), /coldCompactionModel must be "provider\/modelId", or "" for off/);
-	const read = readSessionSettings({ settings: { coldCompactionModel: "google/gemini-2.5-flash", keepWarmMinutes: 240 } });
-	assert.deepEqual(read.settings, { coldCompactionModel: "google/gemini-2.5-flash", keepWarmMinutes: 240 });
-	assert.deepEqual(readSessionSettings({ settings: { coldCompactionModel: "nope" } }).ignored, ["coldCompactionModel"], "a bad value is left out and named");
+// Design 0.10.0, test 6 (session part): the fallback compaction model is the sixth session key.
+test("fallbackCompactionModel is a session key: \"\" and provider/id are valid per session, anything else is refused; an entry holding it is read, and one without it changes nothing", () => {
+	assert.ok((SESSION_KEYS as readonly string[]).includes("fallbackCompactionModel"));
+	assert.deepEqual(withSessionValue({}, "fallbackCompactionModel", "google/gemini-2.5-flash"), { fallbackCompactionModel: "google/gemini-2.5-flash" });
+	assert.deepEqual(withSessionValue({ keepWarmMinutes: 60 }, "fallbackCompactionModel", ""), { keepWarmMinutes: 60, fallbackCompactionModel: "" }, "off for this session is a value of its own");
+	assert.deepEqual(withSessionValue({ fallbackCompactionModel: "" }, "fallbackCompactionModel", undefined), {}, "dropped: it follows the default again");
+	for (const bad of ["gemini", "google/", 3]) assert.throws(() => withSessionValue({}, "fallbackCompactionModel", bad), /fallbackCompactionModel must be "provider\/modelId", or "" for off/);
+	const read = readSessionSettings({ settings: { fallbackCompactionModel: "google/gemini-2.5-flash", keepWarmMinutes: 240 } });
+	assert.deepEqual(read.settings, { fallbackCompactionModel: "google/gemini-2.5-flash", keepWarmMinutes: 240 });
+	assert.deepEqual(readSessionSettings({ settings: { fallbackCompactionModel: "nope" } }).ignored, ["fallbackCompactionModel"], "a bad value is left out and named");
 	// An entry of 0.9.0, without the key: the session follows the default.
 	const old = readSessionSettings({ settings: { keepWarmMinutes: 240 } }).settings;
-	assert.equal(settingsInEffect({ ...DEFAULTS, coldCompactionModel: "google/gemini-2.5-flash" }, old).coldCompactionModel, "google/gemini-2.5-flash");
+	assert.equal(settingsInEffect({ ...DEFAULTS, fallbackCompactionModel: "google/gemini-2.5-flash" }, old).fallbackCompactionModel, "google/gemini-2.5-flash");
+});
+
+// 0.10.1: a session's own coldCompactionModel (saved by 0.10.0) is read as fallbackCompactionModel; the new name wins.
+test("a session's own coldCompactionModel from 0.10.0 is read as fallbackCompactionModel; where both are saved the new name wins; a change writes the new name only", () => {
+	const old = readSessionSettings({ settings: { coldCompactionModel: "google/gemini-2.5-flash", keepWarmMinutes: 240 } });
+	assert.deepEqual(old, { settings: { fallbackCompactionModel: "google/gemini-2.5-flash", keepWarmMinutes: 240 }, ignored: [] });
+	assert.deepEqual(readSessionSettings({ settings: { coldCompactionModel: "" } }).settings, { fallbackCompactionModel: "" }, "off under the old name is the session's own off");
+	assert.deepEqual(readSessionSettings({ settings: { coldCompactionModel: "google/gemini-2.5-flash", fallbackCompactionModel: "acme/tiny" } }), { settings: { fallbackCompactionModel: "acme/tiny" }, ignored: [] });
+	assert.deepEqual(readSessionSettings({ settings: { fallbackCompactionModel: "", coldCompactionModel: "google/gemini-2.5-flash" } }).settings, { fallbackCompactionModel: "" });
+	assert.deepEqual(readSessionSettings({ settings: { coldCompactionModel: "nope" } }), { settings: {}, ignored: ["coldCompactionModel"] }, "a bad value is left out and named by its name");
+	const own = sessionSettingsOn([entry({ coldCompactionModel: "google/gemini-2.5-flash" })]);
+	assert.equal(settingsInEffect({ ...DEFAULTS, fallbackCompactionModel: "acme/tiny" }, own).fallbackCompactionModel, "google/gemini-2.5-flash", "the session's own value wins over the default");
+	// What the menu saves next is the new name only.
+	assert.deepEqual(withSessionValue(own, "keepWarmMinutes", 60), { fallbackCompactionModel: "google/gemini-2.5-flash", keepWarmMinutes: 60 });
+	assert.deepEqual(withSessionValue(own, "fallbackCompactionModel", "acme/tiny"), { fallbackCompactionModel: "acme/tiny" });
+	assert.throws(() => withSessionValue(own, "coldCompactionModel", "acme/tiny"), /coldCompactionModel is not a setting a session can set/);
 });
 
 test("the latest settings entry on the branch decides; an empty one is back to the defaults; a session without one has the defaults", () => {
@@ -268,7 +284,7 @@ test("outside the TUI, /cache-keeper-settings lists both layers", { skip }, asyn
 		assert.match(lines[1], /^compactAtPercent: 0 \[default\] · compactAtTokens: 400000 \[this session; default 0\] \(at the 400k-token cap/);
 		assert.equal(lines[2], "compactBeforeExpiry: true [default] · minContextTokens: 140000 [default]");
 		assert.match(lines[3], /^keepWarmMinutes: 240 \[this session; default 120\] \(up to 4 h after Pi goes idle/);
-		assert.equal(lines[4], `coldCompactionModel: "" [default] (off: when the cache can't be read, Pi's compaction writes the summary on this session's model)`);
+		assert.equal(lines[4], `fallbackCompactionModel: "" [default] (off: when the cache can't be read, Pi's compaction writes the summary on this session's model)`);
 		assert.equal(lines[5], "cacheRetention: short (all sessions)");
 		assert.match(lines[6], /^modelData: false \(all sessions\) \(off\)$/);
 		assert.equal(lines[7], "This session's own: compactAtTokens 400k tokens (default off), keepWarmMinutes 4 h (default 2 h); every other setting follows the defaults.");
@@ -623,14 +639,14 @@ test("a change of a default the session overrides does not try compacting when f
 	assert.equal(seen.changedOwn, 2, "the cap in effect changed: tried again");
 });
 
-// ------------------------------------------------------------------------------------------- the cold compaction model
+// ------------------------------------------------------------------------------------------- the fallback compaction model
 
 // The models a test's registry lists, with credentials: the picked model's list is Pi's available models.
 const GEMINI = { provider: "google", id: "gemini-2.5-flash", api: "google-generative-ai", contextWindow: 1_048_576, maxTokens: 65_536, reasoning: true, input: ["text"], cost: { input: 0.3, output: 2.5, cacheRead: 0.03, cacheWrite: 0 } };
 const TINY = { ...GEMINI, provider: "acme", id: "tiny", contextWindow: 8_000, maxTokens: 4_000, cost: { input: 0.05, output: 0.1, cacheRead: 0, cacheWrite: 0 } };
 const NO_WINDOW = { ...GEMINI, provider: "local", id: "llama", contextWindow: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
 const VIRTUAL = { ...GEMINI, provider: "pi", id: "auto", api: "pi-virtual" };
-const coldModels = (w: Any) => {
+const fallbackModels = (w: Any) => {
 	const registry = w.runtime.session.extensionRunner.createContext().modelRegistry;
 	const listed = [GEMINI, TINY, NO_WINDOW, VIRTUAL];
 	const find = registry.find.bind(registry);
@@ -641,68 +657,68 @@ const coldModels = (w: Any) => {
 };
 // What /cache-keeper says of the picked model: the setting, the model, its window and price; no prediction (review 7).
 const DECIDED = "whether it writes a summary is decided at each compaction, from the part Pi cuts off";
-const GEMINI_LINE = `cold compaction: google/gemini-2.5-flash · 1.05M window · $0.30 in, $2.50 out per M · ${DECIDED}`;
-const NOT_CACHED = "the cold compaction model writes the summary where it can, else Pi's compaction";
+const GEMINI_LINE = `fallback compaction model: google/gemini-2.5-flash · 1.05M window · $0.30 in, $2.50 out per M · ${DECIDED}`;
+const NOT_CACHED = "the fallback compaction model writes the summary where it can, else Pi's compaction";
 
 // Design 0.10.0, test 7.
-test("the cold compaction model: a session's own value wins over the default, its off wins over a default model, the default is read as saved now, and back to the defaults drops it", { skip }, async () => {
-	writeDefaults({ coldCompactionModel: "google/gemini-2.5-flash" });
+test("the fallback compaction model: a session's own value wins over the default, its off wins over a default model, the default is read as saved now, and back to the defaults drops it", { skip }, async () => {
+	writeDefaults({ fallbackCompactionModel: "google/gemini-2.5-flash" });
 	const result = await inWindow(
 		async (w) => {
-			coldModels(w);
+			fallbackModels(w);
 			await w.answer();
-			assert.equal(lineOf(await w.status(), "cold compaction:"), GEMINI_LINE, "the default, as saved");
+			assert.equal(lineOf(await w.status(), "fallback compaction model:"), GEMINI_LINE, "the default, as saved");
 			// Off for this session over a default model: the list's second line.
 			let menu = await w.menu();
-			assert.match(menu.text(), /\n {2}Compact a cold cache with +google\/gemini-2\.5-flash · default\n/);
-			menu.press(COLD);
+			assert.match(menu.text(), /\n {2}When the cache can't be used, compact with +google\/gemini-2\.5-flash · default\n/);
+			menu.press(FALLBACK);
 			menu.keys("\x1b[B\r");
-			assert.match(menu.text(), /\n→ Compact a cold cache with +off · this session\n/);
+			assert.match(menu.text(), /\n→ When the cache can't be used, compact with +off · this session\n/);
 			await menu.close();
-			assert.deepEqual(ownOf(w.manager()), { settings: { coldCompactionModel: "" } });
-			assert.equal(lineOf(await w.status(), "cold compaction:"), "cold compaction: off (this session): when the cache can't be read, Pi's compaction writes the summary on this session's model");
+			assert.deepEqual(ownOf(w.manager()), { settings: { fallbackCompactionModel: "" } });
+			assert.equal(lineOf(await w.status(), "fallback compaction model:"), "fallback compaction model: off (this session): when the cache can't be read, Pi's compaction writes the summary on this session's model");
 			// A default changed in another window: this session's off still wins.
-			saveConfig({ coldCompactionModel: "acme/tiny" });
-			assert.match(lineOf(await w.status(), "cold compaction:") ?? "", /^cold compaction: off \(this session\)/);
-			assert.match(lineOf(await w.status(), "settings:") ?? "", /coldCompactionModel off \(default acme\/tiny\)/);
+			saveConfig({ fallbackCompactionModel: "acme/tiny" });
+			assert.match(lineOf(await w.status(), "fallback compaction model:") ?? "", /^fallback compaction model: off \(this session\)/);
+			assert.match(lineOf(await w.status(), "settings:") ?? "", /fallbackCompactionModel off \(default acme\/tiny\)/);
 			// Back to the defaults: the default as saved now.
 			menu = await w.menu();
 			menu.press("Back to the defaults");
 			await menu.close();
-			assert.equal(lineOf(await w.status(), "cold compaction:"), `cold compaction: acme/tiny · 8k window · $0.05 in, $0.10 out per M · ${DECIDED}`);
+			assert.equal(lineOf(await w.status(), "fallback compaction model:"), `fallback compaction model: acme/tiny · 8k window · $0.05 in, $0.10 out per M · ${DECIDED}`);
 			// A session's own model over the default, picked by typing.
 			menu = await w.menu();
-			menu.press(COLD);
+			menu.press(FALLBACK);
 			menu.keys("gemini\r");
-			assert.match(menu.text(), /\n→ Compact a cold cache with +google\/gemini-2\.5-flash · this session\n/);
+			assert.match(menu.text(), /\n→ When the cache can't be used, compact with +google\/gemini-2\.5-flash · this session\n/);
 			await menu.close();
-			assert.deepEqual(ownOf(w.manager()), { settings: { coldCompactionModel: "google/gemini-2.5-flash" } });
-			assert.match(lineOf(await w.status(), "cold compaction:") ?? "", /^cold compaction: google\/gemini-2\.5-flash \(this session\) · 1\.05M window/);
+			assert.deepEqual(ownOf(w.manager()), { settings: { fallbackCompactionModel: "google/gemini-2.5-flash" } });
+			assert.match(lineOf(await w.status(), "fallback compaction model:") ?? "", /^fallback compaction model: google\/gemini-2\.5-flash \(this session\) · 1\.05M window/);
 			// The list's first line drops it again.
 			menu = await w.menu();
-			menu.press(COLD);
+			menu.press(FALLBACK);
 			menu.keys("\r");
-			assert.match(menu.text(), /\n→ Compact a cold cache with +acme\/tiny · default\n/);
+			assert.match(menu.text(), /\n→ When the cache can't be used, compact with +acme\/tiny · default\n/);
 			await menu.close();
 			assert.deepEqual(ownOf(w.manager()), { settings: {} });
 		},
 		{ persisted: true },
 	);
 	assert.deepEqual(result.thrown, []);
-	assert.equal(JSON.parse(settingsText()).cacheKeeper.coldCompactionModel, "acme/tiny", "the session's values never went into settings.json");
+	assert.equal(JSON.parse(settingsText()).cacheKeeper.fallbackCompactionModel, "acme/tiny", "the session's values never went into settings.json");
 });
 
 // Design 0.10.0, test 8.
-test("the cold compaction model's row, its list, its /cache-keeper lines and the next compaction; a pick Pi can't use now is kept and marked", { skip }, async () => {
+test("the fallback compaction model's row, its list, its /cache-keeper lines and the next compaction; a pick Pi can't use now is kept and marked", { skip }, async () => {
 	writeDefaults({});
 	const result = await inWindow(async (w) => {
-		coldModels(w);
+		fallbackModels(w);
 		await w.answer();
 		let menu = await w.menu();
-		assert.match(menu.text(), /\n {2}Or once it holds +[^\n]+\n {2}Compact a cold cache with +off · default\n {2}Compact before the cache expires/, "after Or once it holds");
-		menu.press(COLD);
+		assert.match(menu.text(), /\n {2}Or once it holds +[^\n]+\n {2}When the cache can't be used, compact with +off · default\n {2}Compact before the cache expires/, "after Or once it holds");
+		menu.press(FALLBACK);
 		const list = menu.text().split("\n");
-		assert.match(list.find((line) => line.startsWith("Compact a cold cache with,")) ?? "", /^Compact a cold cache with, in this session · "holds this session" speaks of this session now \(about \d+k? tokens as text\)$/);
+		assert.match(list.find((line) => line.startsWith("When the cache can't be used, compact with,")) ?? "", /^When the cache can't be used, compact with, in this session · "holds this session" speaks of this session now \(about \d+k? tokens as text\)$/);
 		const lines = list.filter((line) => /^(→ )?\s*(default|off|google|acme|local|pi\/|anthropic)/.test(line)).map((line) => line.replace(/^→?\s*/, ""));
 		assert.deepEqual(lines.slice(0, 2), ["default (off)", "off"]);
 		assert.ok(lines.includes("google/gemini-2.5-flash · 1.05M window · $0.30 in, $2.50 out per M · holds this session"), lines.join("\n"));
@@ -714,36 +730,102 @@ test("the cold compaction model's row, its list, its /cache-keeper lines and the
 		menu.keys("\x1b");
 		// The defaults: no default line in the list.
 		menu.press("Editing");
-		menu.press(COLD);
-		assert.match(menu.text(), /\nCompact a cold cache with, by default · "holds this session" speaks of the session this menu was opened in/);
+		menu.press(FALLBACK);
+		assert.match(menu.text(), /\nWhen the cache can't be used, compact with, by default · "holds this session" speaks of the session this menu was opened in/);
 		assert.match(menu.text(), /\n→? *off\n/);
 		assert.doesNotMatch(menu.text(), /default \(/);
 		menu.keys("gemini\r");
-		assert.match(menu.text(), /\n→ Compact a cold cache with +google\/gemini-2\.5-flash\n/);
+		assert.match(menu.text(), /\n→ When the cache can't be used, compact with +google\/gemini-2\.5-flash\n/);
 		await menu.close();
-		assert.equal(JSON.parse(settingsText()).cacheKeeper.coldCompactionModel, "google/gemini-2.5-flash");
+		assert.equal(JSON.parse(settingsText()).cacheKeeper.fallbackCompactionModel, "google/gemini-2.5-flash");
 		// /cache-keeper: the line, and the next compaction on a cold cache (none since the session's model last answered
 		// is still warm: the cached path; a model switch makes it cold).
 		let status = await w.status();
-		assert.equal(lineOf(status, "cold compaction:"), GEMINI_LINE);
+		assert.equal(lineOf(status, "fallback compaction model:"), GEMINI_LINE);
 		assert.match(lineOf(status, "next compaction:") ?? "", /^next compaction: cached path;/);
 		const session = w.runtime.session;
 		const original = session.model;
 		session.agent.state.model = { ...original, id: "claude-sonnet-4-5" };
 		status = await w.status();
 		assert.equal(lineOf(status, "next compaction:"), `next compaction: not from the cache, because the model changed since the last request; ${NOT_CACHED}`);
-		saveConfig({ coldCompactionModel: "local/llama" });
+		saveConfig({ fallbackCompactionModel: "local/llama" });
 		status = await w.status();
 		assert.equal(lineOf(status, "next compaction:"), `next compaction: not from the cache, because the model changed since the last request; ${NOT_CACHED}`);
-		assert.equal(lineOf(status, "cold compaction:"), "cold compaction: local/llama · window unknown · no price · can't be used: it declares no context window");
+		assert.equal(lineOf(status, "fallback compaction model:"), "fallback compaction model: local/llama · window unknown · no price · can't be used: it declares no context window");
 		session.agent.state.model = original;
 		// A pick Pi can't use now is kept, and marked on the row and in /cache-keeper.
-		saveConfig({ coldCompactionModel: "google/gemini-9" });
-		assert.equal(lineOf(await w.status(), "cold compaction:"), "cold compaction: google/gemini-9 · not available now: Pi no longer lists it");
+		saveConfig({ fallbackCompactionModel: "google/gemini-9" });
+		assert.equal(lineOf(await w.status(), "fallback compaction model:"), "fallback compaction model: google/gemini-9 · not available now: Pi no longer lists it");
 		menu = await w.menu();
-		assert.match(menu.text(), /\n {2}Compact a cold cache with +google\/gemini-9 · not available now · default\n/);
+		assert.match(menu.text(), /\n {2}When the cache can't be used, compact with +google\/gemini-9 · not available now · default\n/);
 		await menu.close();
-		assert.equal(JSON.parse(settingsText()).cacheKeeper.coldCompactionModel, "google/gemini-9");
+		assert.equal(JSON.parse(settingsText()).cacheKeeper.fallbackCompactionModel, "google/gemini-9");
+	});
+	assert.deepEqual(result.thrown, []);
+});
+
+// 0.10.1, in Pi's own session runtime: a session that set coldCompactionModel in 0.10.0, over a default saved under
+// that name too. Both are read; the menu writes fallbackCompactionModel only, in the session and in settings.json.
+test("a session that set coldCompactionModel in 0.10.0: its own value and the default under the old name are read, and the menu writes only the new name", { skip }, async () => {
+	writeDefaults({ coldCompactionModel: "acme/tiny" });
+	const result = await inWindow(
+		async (w) => {
+			fallbackModels(w);
+			await w.answer();
+			// As 0.10.0 saved it: the session's own value under the old name.
+			w.manager().appendCustomEntry(SESSION_SETTINGS_TYPE, { settings: { coldCompactionModel: "google/gemini-2.5-flash" } });
+			await w.runtime.switchSession(w.manager().getSessionFile());
+			fallbackModels(w);
+			let status = await w.status();
+			assert.match(lineOf(status, "fallback compaction model:") ?? "", /^fallback compaction model: google\/gemini-2\.5-flash \(this session\) · 1\.05M window/);
+			assert.match(lineOf(status, "settings:") ?? "", /fallbackCompactionModel google\/gemini-2\.5-flash \(default acme\/tiny\)/);
+			let menu = await w.menu();
+			assert.match(menu.text(), /\n {2}When the cache can't be used, compact with +google\/gemini-2\.5-flash · this session\n/);
+			// A change of another row rewrites the session's values: the old name goes, its value stays under the new one.
+			menu.set(KEEP_WARM, "1 h · this session");
+			await menu.close();
+			assert.deepEqual(ownOf(w.manager()), { settings: { fallbackCompactionModel: "google/gemini-2.5-flash", keepWarmMinutes: 60 } });
+			// Picking a model for this session writes the new name.
+			menu = await w.menu();
+			menu.press(FALLBACK);
+			menu.keys("tiny\r");
+			await menu.close();
+			assert.deepEqual(ownOf(w.manager()), { settings: { fallbackCompactionModel: "acme/tiny", keepWarmMinutes: 60 } });
+			assert.ok(!JSON.stringify(ownEntries(w.manager()).slice(1)).includes("coldCompactionModel"), "no entry the menu wrote holds the old name");
+			// The default, saved under the old name: picking one in the menu writes the new name and takes the old one out.
+			assert.equal(JSON.parse(settingsText()).cacheKeeper.coldCompactionModel, "acme/tiny", "untouched until the menu rewrites it");
+			menu = await w.menu();
+			menu.press("Editing");
+			menu.press(FALLBACK);
+			menu.keys("gemini\r");
+			await menu.close();
+			const saved = JSON.parse(settingsText()).cacheKeeper;
+			assert.equal(saved.fallbackCompactionModel, "google/gemini-2.5-flash");
+			assert.ok(!("coldCompactionModel" in saved), "the old name is gone from settings.json");
+			status = await w.status();
+			assert.match(lineOf(status, "settings:") ?? "", /fallbackCompactionModel acme\/tiny \(default google\/gemini-2\.5-flash\)/);
+		},
+		{ persisted: true },
+	);
+	assert.deepEqual(result.thrown, []);
+});
+
+// A default saved under the old name and nothing else: a change of another default carries it over to the new name.
+test("a default saved as coldCompactionModel by 0.10.0: a change of another default in the menu writes it as fallbackCompactionModel", { skip }, async () => {
+	writeDefaults({ coldCompactionModel: "google/gemini-2.5-flash" });
+	const result = await inWindow(async (w) => {
+		fallbackModels(w);
+		await w.answer();
+		assert.equal(lineOf(await w.status(), "fallback compaction model:"), GEMINI_LINE, "the old name is read");
+		const menu = await w.menu();
+		menu.press("Editing");
+		menu.set(KEEP_WARM, "1 h");
+		await menu.close();
+		const saved = JSON.parse(settingsText()).cacheKeeper;
+		assert.equal(saved.fallbackCompactionModel, "google/gemini-2.5-flash");
+		assert.equal(saved.keepWarmMinutes, 60);
+		assert.ok(!("coldCompactionModel" in saved));
+		assert.equal(lineOf(await w.status(), "fallback compaction model:"), GEMINI_LINE);
 	});
 	assert.deepEqual(result.thrown, []);
 });
@@ -763,7 +845,7 @@ test("review 10 and 3: at 40 and 60 columns the picker's rows keep the provider,
 		registry.hasConfiguredAuth = () => true;
 		await w.answer();
 		const menu = await w.menu();
-		menu.press(COLD);
+		menu.press(FALLBACK);
 		for (const width of [40, 60]) {
 			const rows = menu
 				.text(width)

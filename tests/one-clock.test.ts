@@ -34,8 +34,8 @@ test("the two owners do not see each other: the clock imports no warmer, the war
 
 test("one door per paid request, one read: index.ts sends in three places, reads the cache in `look` and starts a period's facts in `goIdle`", () => {
 	const index = source("index.ts");
-	assert.equal(count(index, "streamSimple("), 3, "the refresh, the cached summary, and the cold model's summary (0.10.0)");
-	assert.equal(count(body(index, "coldSummary"), "streamSimple("), 1, "the cold model's, inside coldSummary");
+	assert.equal(count(index, "streamSimple("), 3, "the refresh, the cached summary, and the fallback model's summary (0.10.0)");
+	assert.equal(count(body(index, "fallbackSummary"), "streamSimple("), 1, "the fallback model's, inside fallbackSummary");
 	assert.equal(count(index, "cacheView("), 1);
 	assert.equal(count(body(index, "look"), "cacheView("), 1, "inside look");
 	assert.equal(count(index, "startFacts("), 1);

@@ -18,19 +18,19 @@ import {
 import { Container, fuzzyFilter, getKeybindings, Input, SettingsList, Text, type Component, type SelectItem, type SettingItem } from "@earendil-works/pi-tui";
 import { cacheTier, hasExplicitPromptCache, isKimiOnMoonshot, lifetimeFor } from "./cache-state.ts";
 import {
-	coldChoiceLabel,
-	coldModelFit,
-	coldModelParts,
-	coldNeedTokens,
-	coldRequestTokens,
-	coldRowLines,
-	coldUnusable,
+	fallbackChoiceLabel,
+	fallbackModelFit,
+	fallbackModelParts,
+	fallbackNeedTokens,
+	fallbackRequestTokens,
+	fallbackRowLines,
+	fallbackUnusable,
 	formatModelRef,
-	orderColdChoices,
+	orderFallbackChoices,
 	parseModelRef,
 	summaryBody,
-	type ColdChoice,
-} from "./cold-compaction.ts";
+	type FallbackChoice,
+} from "./fallback-compaction.ts";
 import { cacheView, PeriodClock, startFacts, type CacheView, type StartFacts } from "./cache-clock.ts";
 import { written } from "./lifetime-evidence.ts";
 import {
@@ -157,8 +157,8 @@ import { formatFooter, lifetimesView, priceAt, sentView, tierInUse, type Countdo
 
 /** A session's own value of a setting. */
 type SessionValue = number | boolean | string;
-/** The settings whose menu row steps through its values on Enter (the cold compaction model opens a list instead). */
-type CycledKey = Exclude<SessionKey, "coldCompactionModel">;
+/** The settings whose menu row steps through its values on Enter (the fallback compaction model opens a list instead). */
+type CycledKey = Exclude<SessionKey, "fallbackCompactionModel">;
 
 interface CapturedRequest {
 	transcript: AgentMessage[];
@@ -361,11 +361,11 @@ const LEGACY_CARD_TYPE = "cached-compaction";
 const PREFIX_MISMATCH = "pi-cache-keeper: request prefix differs from the cached request";
 const BRIDGE_API = "claude-bridge";
 const COMPACTION_ABORTED = "the compaction was aborted";
-/** The cached path's reason where a taken period's expiry is unknown: Pi's own compaction runs, never the cold model. */
+/** The cached path's reason where a taken period's expiry is unknown: Pi's own compaction runs, never the fallback model. */
 const EXPIRY_UNKNOWN = "the prompt cache's expiry is unknown";
-const COLD_ROW_LABEL = "Compact a cold cache with";
-/** The cold model list's first line, editing a session: drop its own value. Never a model reference (it has no slash). */
-const COLD_DEFAULT_PICK = "default";
+const FALLBACK_ROW_LABEL = "When the cache can't be used, compact with";
+/** The fallback model list's first line, editing a session: drop its own value. Never a model reference (it has no slash). */
+const FALLBACK_DEFAULT_PICK = "default";
 const FORK_REQUEST_HEADER = "x-claude-bridge-fork";
 const EXPIRY_LEAD_MS = 20_000;
 const RETENTION_MARKER = "PI_CACHE_KEEPER_RETENTION";
@@ -422,15 +422,15 @@ type Handed = { stop?: WarmStop; reason: string; handedOver: "evidence" | "let g
 const hhmm = (at: number) => new Date(at).toTimeString().slice(0, 5);
 
 /**
- * The cold compaction model's list, drawn as Pi's select list is (its theme, its keys, `maxVisible` rows around the
- * selection), each row by coldRowLines: one line, a model id that doesn't fit shortened in the middle; or, where two rows
+ * The fallback compaction model's list, drawn as Pi's select list is (its theme, its keys, `maxVisible` rows around the
+ * selection), each row by fallbackRowLines: one line, a model id that doesn't fit shortened in the middle; or, where two rows
  * would still read the same, the whole id over two lines or more.
  */
-function coldModelList(items: SelectItem[], maxVisible: number, done: (value?: string) => void): Component & { handleInput: (data: string) => void } {
+function fallbackModelList(items: SelectItem[], maxVisible: number, done: (value?: string) => void): Component & { handleInput: (data: string) => void } {
 	let selected = 0;
 	let cached: { width: number; rows: string[][] } | undefined;
 	const rowsAt = (width: number) => {
-		if (cached?.width !== width) cached = { width, rows: coldRowLines(items.map((item) => ({ label: item.label ?? item.value, ref: item.value === COLD_DEFAULT_PICK ? "" : item.value })), width) };
+		if (cached?.width !== width) cached = { width, rows: fallbackRowLines(items.map((item) => ({ label: item.label ?? item.value, ref: item.value === FALLBACK_DEFAULT_PICK ? "" : item.value })), width) };
 		return cached.rows;
 	};
 	return {
@@ -866,11 +866,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const renderCard: Parameters<typeof pi.registerEntryRenderer<{ records: TraceRecord[] }>>[1] = (entry, { expanded }, theme) => {
 		const records = entry.data?.records;
 		if (!records?.length) return undefined;
-		const cold = records.some((record) => record.event === "compact" && record.outcome === "cold");
-		const lines = [`${theme.fg("accent", cold ? "cold compaction" : "cached compaction")}${expanded ? "" : `  ${theme.fg("muted", "(")}${keyHint("app.tools.expand", "for details")}${theme.fg("muted", ")")}`}`];
+		const byFallbackModel = records.some((record) => record.event === "compact" && record.outcome === "cold");
+		const lines = [`${theme.fg("accent", byFallbackModel ? "fallback model compaction" : "cached compaction")}${expanded ? "" : `  ${theme.fg("muted", "(")}${keyHint("app.tools.expand", "for details")}${theme.fg("muted", ")")}`}`];
 		for (const record of records) {
 			const line = describeTrace(record);
-			// A summary the cold model wrote is not a warning: nothing went wrong.
+			// A summary the fallback model wrote is not a warning: nothing went wrong.
 			const missed = record.event === "failed" || (record.event === "compact" && record.outcome !== "cold" && (record.outcome !== "cached" || record.response?.usage.cacheRead === 0));
 			lines.push(missed ? theme.fg("warning", line) : line);
 			const versus = record.event === "compact" ? comparison(record) : undefined;
@@ -2198,66 +2198,66 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		return { request, prefix, trailing: trailing.messages, cache };
 	};
 
-	// The cold compaction model named by `ref`, if this session can hand it a summary now (before anything is measured):
+	// The fallback compaction model named by `ref`, if this session can hand it a summary now (before anything is measured):
 	// not the session's own model, listed by Pi, of an API that can take the request, and with credentials.
-	const coldCandidate = (ctx: ExtensionContext, ref: string): { model: Model<Api> } | { why: string } => {
+	const fallbackCandidate = (ctx: ExtensionContext, ref: string): { model: Model<Api> } | { why: string } => {
 		const parsed = parseModelRef(ref);
 		if (!parsed) return { why: "it is not a model reference" };
 		if (ctx.model?.provider === parsed.provider && ctx.model.id === parsed.id) return { why: "it is the session's own model" };
 		const model = ctx.modelRegistry.find(parsed.provider, parsed.id);
 		if (!model) return { why: "Pi no longer lists it" };
-		const unusable = coldUnusable(model);
+		const unusable = fallbackUnusable(model);
 		if (unusable) return { why: unusable };
 		if (!ctx.modelRegistry.hasConfiguredAuth(model)) return { why: `Pi has no credentials for ${model.provider}` };
 		return { model };
 	};
 
-	// What this session would send a cold model now, in tokens: the context as it stands, as text the way Pi's summarizer
+	// What this session would send a fallback model now, in tokens: the context as it stands, as text the way Pi's summarizer
 	// writes it (an upper bound: a compaction sends only the part before the messages it keeps). Undefined where the
 	// session can't be read.
-	const coldSessionNeed = (ctx: ExtensionContext): number | undefined => {
+	const fallbackSessionNeed = (ctx: ExtensionContext): number | undefined => {
 		try {
 			const messages = ctx.sessionManager.buildSessionProjection().messages;
-			return coldNeedTokens(coldRequestTokens({ messagesToSummarize: messages, turnPrefixMessages: [], isSplitTurn: false, previousSummary: undefined }));
+			return fallbackNeedTokens(fallbackRequestTokens({ messagesToSummarize: messages, turnPrefixMessages: [], isSplitTurn: false, previousSummary: undefined }));
 		} catch {
 			return undefined;
 		}
 	};
 	// One model as the menu and /cache-keeper show it: its window, its price at the size needed or that it is a
 	// subscription, and whether it holds this session now.
-	const coldChoiceOf = (model: Model<Api>, need: number | undefined, accessOf: (model: Model<Api>) => Access): ColdChoice => {
-		const unusable = coldUnusable(model);
+	const fallbackChoiceOf = (model: Model<Api>, need: number | undefined, accessOf: (model: Model<Api>) => Access): FallbackChoice => {
+		const unusable = fallbackUnusable(model);
 		return {
 			ref: formatModelRef(model),
 			...(model.contextWindow > 0 ? { window: model.contextWindow } : {}),
 			...(hasPrices(model) ? { price: priceAt(model.cost, need) } : {}),
 			subscription: accessVia(accessOf(model)) === "sub",
-			// The fit the compaction itself uses (coldModelFit), so the two can't disagree.
-			...(unusable ? { unusable } : need === undefined ? {} : { fit: coldModelFit(model, need).fit }),
+			// The fit the compaction itself uses (fallbackModelFit), so the two can't disagree.
+			...(unusable ? { unusable } : need === undefined ? {} : { fit: fallbackModelFit(model, need).fit }),
 		};
 	};
 	// A pick Pi can't use now: the model is gone, or its credentials are (the setting is kept).
-	const coldUnavailable = (ctx: ExtensionContext, ref: string): boolean => {
+	const fallbackUnavailable = (ctx: ExtensionContext, ref: string): boolean => {
 		const parsed = parseModelRef(ref);
 		const model = parsed && ctx.modelRegistry.find(parsed.provider, parsed.id);
 		return !model || !ctx.modelRegistry.hasConfiguredAuth(model);
 	};
-	const coldNote = (ctx: ExtensionContext): string => {
-		const ref = inEffect().coldCompactionModel;
-		const mark = ownMark("coldCompactionModel");
+	const fallbackNote = (ctx: ExtensionContext): string => {
+		const ref = inEffect().fallbackCompactionModel;
+		const mark = ownMark("fallbackCompactionModel");
 		if (!ref) return `off${mark}: when the cache can't be read, Pi's compaction writes the summary on this session's model`;
-		const candidate = coldCandidate(ctx, ref);
-		if ("why" in candidate) return `${ref}${mark} · ${coldUnavailable(ctx, ref) ? "not available now" : "can't be used"}: ${candidate.why}`;
+		const candidate = fallbackCandidate(ctx, ref);
+		if ("why" in candidate) return `${ref}${mark} · ${fallbackUnavailable(ctx, ref) ? "not available now" : "can't be used"}: ${candidate.why}`;
 		const { model } = candidate;
 		// No prediction: whether it writes a summary depends on the part Pi cuts off at that compaction.
-		const parts = coldModelParts(coldChoiceOf(model, undefined, accessReader(ctx)));
+		const parts = fallbackModelParts(fallbackChoiceOf(model, undefined, accessReader(ctx)));
 		if (!(model.contextWindow > 0)) return `${ref}${mark} · ${parts.join(" · ")} · can't be used: it declares no context window`;
-		const never = coldModelFit(model, 0).fit;
+		const never = fallbackModelFit(model, 0).fit;
 		if (!never.fits && never.never) return `${ref}${mark} · ${parts.join(" · ")} · can't be used: ${never.why}`;
 		return `${ref}${mark} · ${parts.join(" · ")} · whether it writes a summary is decided at each compaction, from the part Pi cuts off`;
 	};
 
-	// Why a reply of the cold compaction model is no summary, or undefined: anything but a normal stop (an error, an abort,
+	// Why a reply of the fallback compaction model is no summary, or undefined: anything but a normal stop (an error, an abort,
 	// the output limit, a tool call, whatever text came before it), or no text once the file lists are taken out.
 	const replyFailure = (reply: AssistantMessage): string | undefined => {
 		if (reply.stopReason === "toolUse" || reply.content.some((block) => block.type === "toolCall")) return "the model called a tool instead of writing the summary";
@@ -2269,11 +2269,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		return undefined;
 	};
 
-	// The summary by the cold compaction model, where the cached path can't write it: Pi's own compact() with the picked
+	// The summary by the fallback compaction model, where the cached path can't write it: Pi's own compact() with the picked
 	// model, beside the session (its model and thinking level are not touched). Nothing returned is Pi's own compaction; a
 	// cancel is only for the user's abort. `base` is the compaction's record with the cached path's reason.
-	const coldSummary = async (ctx: ExtensionContext, event: SessionBeforeCompactEvent, base: CompactTrace) => {
-		const ref = inEffect().coldCompactionModel;
+	const fallbackSummary = async (ctx: ExtensionContext, event: SessionBeforeCompactEvent, base: CompactTrace) => {
+		const ref = inEffect().fallbackCompactionModel;
 		if (!ref) {
 			decision = trace(ctx, { ...base, outcome: "fallback" });
 			return undefined;
@@ -2291,15 +2291,15 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		};
 		const { preparation, signal } = event;
 		if (signal.aborted) return cancel();
-		const candidate = coldCandidate(ctx, ref);
+		const candidate = fallbackCandidate(ctx, ref);
 		if ("why" in candidate) return skip(candidate.why);
 		const { model } = candidate;
 		cold.via = accessVia(accessReader(ctx)(model));
-		cold.needTokens = coldNeedTokens(coldRequestTokens(preparation, event.customInstructions));
+		cold.needTokens = fallbackNeedTokens(fallbackRequestTokens(preparation, event.customInstructions));
 		if (model.contextWindow > 0) cold.window = model.contextWindow;
-		// The fit the menu shows (coldModelFit): the output cap is the one the fit assumed, passed with every request, less
+		// The fit the menu shows (fallbackModelFit): the output cap is the one the fit assumed, passed with every request, less
 		// what the lowest thinking level adds.
-		const { fit, thinking } = coldModelFit(model, cold.needTokens);
+		const { fit, thinking } = fallbackModelFit(model, cold.needTokens);
 		cold.thinking = thinking;
 		if (!fit.fits) return skip(fit.why);
 		cold.maxTokens = fit.maxTokens;
@@ -2384,7 +2384,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			cwd: ctx.cwd,
 			sessionFile: ctx.sessionManager.getSessionFile(),
 		};
-		// Where the cached path can't write the summary: before expiry, the compaction is cancelled; else the cold compaction
+		// Where the cached path can't write the summary: before expiry, the compaction is cancelled; else the fallback compaction
 		// model writes it where one is set and can, and Pi's own compaction runs where it can't (the one rule of 0.10.0).
 		const fallBack = async (reason: string, mismatch?: PrefixMismatch) => {
 			const diff = mismatch?.captured === undefined ? undefined : { captured: mismatch.captured, rebuilt: mismatch.rebuilt };
@@ -2392,13 +2392,13 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				decision = trace(ctx, { ...record, outcome: "cancelled", reason, mismatch: diff });
 				return { cancel: true };
 			}
-			// An unknown lifetime or expiry is never a reason to use the cold compaction model: Pi's own compaction runs, as in
+			// An unknown lifetime or expiry is never a reason to use the fallback compaction model: Pi's own compaction runs, as in
 			// 0.9.0.
 			if (reason.startsWith(EXPIRY_UNKNOWN)) {
 				decision = trace(ctx, { ...record, outcome: "fallback", reason, mismatch: diff });
 				return undefined;
 			}
-			return coldSummary(ctx, event, { ...record, reason, mismatch: diff });
+			return fallbackSummary(ctx, event, { ...record, reason, mismatch: diff });
 		};
 		if (event.reason === "overflow") return fallBack("the last request overflowed the context window");
 		const check = checkCachedPath(ctx, event.branchEntries, ctx.model);
@@ -2614,7 +2614,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 
 	// A session's own value, as the menu and the transcript say it.
 	const valueLabel = (name: SessionKey, value: SessionValue): string => {
-		if (name === "coldCompactionModel") return value === "" ? "off" : String(value);
+		if (name === "fallbackCompactionModel") return value === "" ? "off" : String(value);
 		if (name === "compactAtPercent") return percentLabel(value as number);
 		if (name === "compactAtTokens") return capLabel(value as number);
 		if (name === "compactBeforeExpiry") return value ? "on" : "off";
@@ -2653,7 +2653,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			`compactAtPercent: ${layer("compactAtPercent")} · compactAtTokens: ${layer("compactAtTokens")} (${fullNote(ctx.model)})`,
 			`compactBeforeExpiry: ${layer("compactBeforeExpiry")} · minContextTokens: ${layer("minContextTokens")}`,
 			`keepWarmMinutes: ${layer("keepWarmMinutes")} (${keepWarmNote(ctx.model)})`,
-			`coldCompactionModel: ${layer("coldCompactionModel")} (${coldNote(ctx)})`,
+			`fallbackCompactionModel: ${layer("fallbackCompactionModel")} (${fallbackNote(ctx)})`,
 			`cacheRetention: ${config.cacheRetention} (all sessions)`,
 			`modelData: ${config.modelData} (all sessions) (${dataNote(ctx)})`,
 			ownKeys().length > 0 ? `This session's own: ${describeOwn(own, true)}; every other setting follows the defaults.` : "This session has no settings of its own: every setting follows the defaults.",
@@ -2717,14 +2717,14 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				describe: () => "The smallest context compacted before the cache expires; smaller sessions are cheap to write again, so they are left to cool. Keeping the cache warm doesn't use it: its budget grows and shrinks with the context.",
 			},
 		];
-		// The cold compaction model's row: Enter opens a list of the models instead of stepping through values.
-		const COLD = "coldCompactionModel";
-		const coldText =
+		// The fallback compaction model's row: Enter opens a list of the models instead of stepping through values.
+		const FALLBACK = "fallbackCompactionModel";
+		const fallbackText =
 			"When the cached path can't write a compaction's summary (the cache is cold, this session's model refuses the summary, or the conversation no longer fits it), this model writes it with Pi's own summarizer, and the session goes on with its own model; where it can't either, Pi's own compaction runs as before. What goes to that model's provider is the part of the conversation being summarized, as Pi's summarizer writes it out: your messages in full, with the full output of shell commands you ran with !; the assistant's answers and its tool calls with their arguments; the first 2,000 characters of each tool result; the previous summary; any /compact instructions; and, on Pi before 1.2, the assistant's thinking.";
-		const coldValue = (ref: string) => `${valueLabel(COLD, ref)}${ref && coldUnavailable(ctx, ref) ? " · not available now" : ""}`;
-		const coldList = (_current: string, done: (value?: string) => void): Component => {
+		const fallbackValue = (ref: string) => `${valueLabel(FALLBACK, ref)}${ref && fallbackUnavailable(ctx, ref) ? " · not available now" : ""}`;
+		const fallbackList = (_current: string, done: (value?: string) => void): Component => {
 			// "This session now" is measured once, when the list opens.
-			const need = coldSessionNeed(ctx);
+			const need = fallbackSessionNeed(ctx);
 			const accessOf = accessReader(ctx);
 			let models: Model<Api>[] = [];
 			try {
@@ -2732,22 +2732,22 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			} catch {
 				// No models to offer: default and off stay.
 			}
-			// The session's own model is refused by the compaction (coldCandidate), so the list says so too.
+			// The session's own model is refused by the compaction (fallbackCandidate), so the list says so too.
 			const ownModel = (model: Model<Api>) => ctx.model?.provider === model.provider && ctx.model.id === model.id;
-			const choices = orderColdChoices(
+			const choices = orderFallbackChoices(
 				models
-					.filter((model) => !coldUnusable(model))
-					.map((model): ColdChoice => {
-						const choice = coldChoiceOf(model, need, accessOf);
+					.filter((model) => !fallbackUnusable(model))
+					.map((model): FallbackChoice => {
+						const choice = fallbackChoiceOf(model, need, accessOf);
 						if (!ownModel(model)) return choice;
 						const { fit: _fit, ...rest } = choice;
 						return { ...rest, unusable: "it is the session's own model" };
 					}),
 			);
 			const items: SelectItem[] = [
-				...(scope === "session" ? [{ value: COLD_DEFAULT_PICK, label: `default (${valueLabel(COLD, defaultOf(COLD))})` }] : []),
+				...(scope === "session" ? [{ value: FALLBACK_DEFAULT_PICK, label: `default (${valueLabel(FALLBACK, defaultOf(FALLBACK))})` }] : []),
 				{ value: "", label: "off" },
-				...choices.map((choice) => ({ value: choice.ref, label: coldChoiceLabel(choice) })),
+				...choices.map((choice) => ({ value: choice.ref, label: fallbackChoiceLabel(choice) })),
 			];
 			const input = new Input();
 			input.focused = true;
@@ -2755,14 +2755,14 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			const filter = () => {
 				const query = input.getValue().trim();
 				// A line too wide shortens a model id in the middle; rows that would still read the same show their ids in full.
-				list = coldModelList(query ? fuzzyFilter(items, query, (item) => item.label) : items, 12, done);
+				list = fallbackModelList(query ? fuzzyFilter(items, query, (item) => item.label) : items, 12, done);
 			};
 			filter();
 			const size = need === undefined ? "its size is unknown" : `about ${formatTokens(need)} tokens as text`;
 			const header =
 				scope === "session"
-					? `Compact a cold cache with, in this session · "holds this session" speaks of this session now (${size})`
-					: `Compact a cold cache with, by default · "holds this session" speaks of the session this menu was opened in (${size})`;
+					? `When the cache can't be used, compact with, in this session · "holds this session" speaks of this session now (${size})`
+					: `When the cache can't be used, compact with, by default · "holds this session" speaks of the session this menu was opened in (${size})`;
 			const keys = ["tui.select.up", "tui.select.down", "tui.select.pageUp", "tui.select.pageDown", "tui.select.confirm", "tui.select.cancel"] as const;
 			return {
 				render: (width: number) => [...new Text(header, 0, 0).render(width), ...input.render(width), ...list.render(width), ...new Text("Type to search · Enter picks · Esc goes back", 0, 0).render(width)],
@@ -2780,30 +2780,30 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				},
 			};
 		};
-		const coldRow = (): SettingItem => {
-			const fallback = defaultOf(COLD) as string;
-			const mine = own[COLD];
+		const fallbackRow = (): SettingItem => {
+			const fallback = defaultOf(FALLBACK) as string;
+			const mine = own[FALLBACK];
 			if (scope === "defaults") {
 				return {
-					id: COLD,
-					label: COLD_ROW_LABEL,
-					currentValue: coldValue(fallback),
-					description: `${coldText}${mine === undefined ? "" : ` This session has its own value (${valueLabel(COLD, mine)}), which wins in it.`}`,
-					submenu: coldList,
+					id: FALLBACK,
+					label: FALLBACK_ROW_LABEL,
+					currentValue: fallbackValue(fallback),
+					description: `${fallbackText}${mine === undefined ? "" : ` This session has its own value (${valueLabel(FALLBACK, mine)}), which wins in it.`}`,
+					submenu: fallbackList,
 				};
 			}
 			return {
-				id: COLD,
-				label: COLD_ROW_LABEL,
-				currentValue: mine === undefined ? `${coldValue(fallback)}${DEFAULT_SUFFIX}` : `${coldValue(mine)}${OWN_SUFFIX}`,
-				description: `${coldText} ${mine === undefined ? `This session follows the default (${valueLabel(COLD, fallback)}).` : `This session's own value; the default is ${valueLabel(COLD, fallback)}.`}`,
-				submenu: coldList,
+				id: FALLBACK,
+				label: FALLBACK_ROW_LABEL,
+				currentValue: mine === undefined ? `${fallbackValue(fallback)}${DEFAULT_SUFFIX}` : `${fallbackValue(mine)}${OWN_SUFFIX}`,
+				description: `${fallbackText} ${mine === undefined ? `This session follows the default (${valueLabel(FALLBACK, fallback)}).` : `This session's own value; the default is ${valueLabel(FALLBACK, fallback)}.`}`,
+				submenu: fallbackList,
 			};
 		};
 		// After "Or once it holds".
-		const withColdRow = (rows: SettingItem[]) => {
+		const withFallbackRow = (rows: SettingItem[]) => {
 			const at = rows.findIndex((row) => row.id === "compactAtTokens") + 1;
-			return [...rows.slice(0, at), coldRow(), ...rows.slice(at)];
+			return [...rows.slice(0, at), fallbackRow(), ...rows.slice(at)];
 		};
 		const retentionText = "long asks for the longer cache in interactive sessions (2× the write price on Anthropic and Kimi); short keeps Pi's default. Applies from the next request.";
 		const dataText = `Once a day, read each model's input window, cache lifetimes and prices from ${DATA_SOURCE} (a public API: no key, and nothing about your sessions is sent) and put them into ~/.pi/agent/models.json: the window replaces Pi's, lifetimes and prices fill what Pi has none for, and values you set there yourself are never touched. The footer shows the current model's values and marks a guess. off takes these values out again.`;
@@ -2855,7 +2855,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			const drop = count > 0 ? `drop ${count} own value${count === 1 ? "" : "s"}` : "nothing to drop";
 			return [
 				scopeItem(),
-				...withColdRow(rows),
+				...withFallbackRow(rows),
 				{ id: "reset", label: "Back to the defaults", currentValue: drop, values: [drop], description: "Drops this session's own values: every setting follows the defaults again, here and in what you resume or fork from here on." },
 				...globalItems(true),
 			];
@@ -2872,7 +2872,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					description: `${describe()}${mine === undefined ? "" : ` This session has its own value (${valueLabel(name, mine)}), which wins in it.`}`,
 				};
 			});
-			return [scopeItem(), ...withColdRow(rows), ...globalItems(false)];
+			return [scopeItem(), ...withFallbackRow(rows), ...globalItems(false)];
 		};
 		// The value a row's label stands for.
 		const parse = (name: CycledKey, label: string, current: SessionValue) => choicesOf(name, current).find((value) => valueLabel(name, value) === label);
@@ -2907,13 +2907,13 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					afterChange(ctx, dropped);
 					return build(id);
 				}
-				if (id === COLD) {
+				if (id === FALLBACK) {
 					// The list's pick: a model, off (""), or the default (this session drops its own value).
-					const picked = value === COLD_DEFAULT_PICK ? undefined : value;
+					const picked = value === FALLBACK_DEFAULT_PICK ? undefined : value;
 					try {
-						if (scope === "session") setOwn(withSessionValue(own, COLD, picked));
+						if (scope === "session") setOwn(withSessionValue(own, FALLBACK, picked));
 						else if (picked !== undefined) {
-							config = saveConfig({ coldCompactionModel: picked });
+							config = saveConfig({ fallbackCompactionModel: picked });
 							latest = config;
 						}
 					} catch (error) {
@@ -2989,7 +2989,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	};
 
 	pi.registerCommand("cache-keeper-settings", {
-		description: "Change pi-cache-keeper's settings: compact when full, the cold compaction model, compact before expiry, keep the cache warm, cache retention, model data",
+		description: "Change pi-cache-keeper's settings: compact when full, the fallback compaction model, compact before expiry, keep the cache warm, cache retention, model data",
 		handler: async (_args, ctx) => openSettings(ctx),
 	});
 
@@ -3087,8 +3087,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			}
 			const check = checkCachedPath(ctx, entries, model);
 			const next = "reason" in check
-				? inEffect().coldCompactionModel && !check.reason.startsWith(EXPIRY_UNKNOWN)
-					? `not from the cache, because ${check.reason}; the cold compaction model writes the summary where it can, else Pi's compaction`
+				? inEffect().fallbackCompactionModel && !check.reason.startsWith(EXPIRY_UNKNOWN)
+					? `not from the cache, because ${check.reason}; the fallback compaction model writes the summary where it can, else Pi's compaction`
 					: `Pi's compaction, because ${check.reason}`
 				: `cached path; last request ${formatDuration(Date.now() - check.request.at)} ago with ${check.request.transcript.length} messages, ${check.trailing.length} since. The request prefix is checked when it runs.`;
 			const stopped = stopNote();
@@ -3109,7 +3109,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					`cache: ${cache}`,
 					`next compaction: ${next}`,
 					`when full: ${fullNote(model, true)}`,
-					`cold compaction: ${coldNote(ctx)}`,
+					`fallback compaction model: ${fallbackNote(ctx)}`,
 					`keep warm${ownMark("keepWarmMinutes")}: ${keepWarmNote(model)}`,
 					...(stopped ? [`stopped: ${stopped}`] : []),
 					`before expiry: ${expiryNote(true)} · retention ${model?.api === BRIDGE_API ? "set by Claude Code" : (process.env.PI_CACHE_RETENTION ?? "short")}`,

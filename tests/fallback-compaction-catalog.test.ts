@@ -1,4 +1,4 @@
-// The cold compaction model's list against Pi's built-in model catalogs, in Pi's own session runtime (review of 0.10.0,
+// The fallback compaction model's list against Pi's built-in model catalogs, in Pi's own session runtime (review of 0.10.0,
 // round 2): the list and the compaction use one fit, so they agree on every model; and every model's row reads
 // differently from every other at 40 and 60 columns. The catalogs are fixtures of Pi 1.6.0's and Pi 0.87.0's
 // (tests/fixtures/catalog-fixture.mjs wrote them), so both are checked whichever Pi is installed.
@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { COLD, dir, inWindow, settingsFile, skip, type Any } from "./session-runtime.ts";
+import { FALLBACK, dir, inWindow, settingsFile, skip, type Any } from "./session-runtime.ts";
 
 const CATALOGS = ["1.6.0", "0.87.0"] as const;
 const catalog = (version: (typeof CATALOGS)[number]): Any[] => {
@@ -22,11 +22,11 @@ const catalog = (version: (typeof CATALOGS)[number]): Any[] => {
 };
 const refOf = (model: Any) => `${model.provider}/${model.id}`;
 
-// Every other setting off; the cold compaction model as given.
+// Every other setting off; the fallback compaction model as given.
 const settings = (pick: string) =>
 	writeFileSync(
 		settingsFile,
-		JSON.stringify({ cacheKeeper: { compactAtPercent: 0, compactAtTokens: 0, compactBeforeExpiry: false, keepWarmMinutes: 0, modelData: false, cacheRetention: "short", coldCompactionModel: pick }, cacheWarming: "idle", packages: [] }),
+		JSON.stringify({ cacheKeeper: { compactAtPercent: 0, compactAtTokens: 0, compactBeforeExpiry: false, keepWarmMinutes: 0, modelData: false, cacheRetention: "short", fallbackCompactionModel: pick }, cacheWarming: "idle", packages: [] }),
 	);
 // Pi's styles and its terminal marks taken out.
 const plain = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b_[^\x07]*\x07/g, "");
@@ -89,7 +89,7 @@ for (const version of CATALOGS) {
 				const own = refOf(w.runtime.session.model);
 				// The list, as the menu shows it in this session.
 				const menu = await w.menu();
-				menu.press(COLD);
+				menu.press(FALLBACK);
 				const labels = new Map<string, string>();
 				for (const [row] of readRows(menu, models.length + 2, 400)) {
 					const label = row.replace(/^→ /, "");
@@ -149,7 +149,7 @@ for (const version of CATALOGS) {
 			if (size === "large") assert.ok(counts["too small now"] > 0, `${size}: ${JSON.stringify(counts)}`);
 			assert.equal(seen.labels.get("cloudflare-workers-ai/@cf/openai/gpt-oss-120b"), "can't be used: output limit too small", size);
 			assert.equal(seen.labels.get(seen.own), "can't be used: it is the session's own model", size);
-			assert.match(seen.status, /cold compaction: cloudflare-workers-ai\/@cf\/openai\/gpt-oss-120b · 128k window · \$0\.35 in, \$0\.75 out per M · can't be used: output limit too small/, size);
+			assert.match(seen.status, /fallback compaction model: cloudflare-workers-ai\/@cf\/openai\/gpt-oss-120b · 128k window · \$0\.35 in, \$0\.75 out per M · can't be used: output limit too small/, size);
 		}
 	});
 
@@ -160,7 +160,7 @@ for (const version of CATALOGS) {
 		const result = await inWindow(async (w) => {
 			withCatalog(w, models);
 			const menu = await w.menu();
-			menu.press(COLD);
+			menu.press(FALLBACK);
 			for (const width of [40, 60]) seen[width] = readRows(menu, models.length + 2, width);
 			menu.keys("\x1b");
 			await menu.close();

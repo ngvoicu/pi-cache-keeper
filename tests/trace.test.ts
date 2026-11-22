@@ -180,8 +180,8 @@ test("the log reads the two new records: a session left to Pi, and a period hand
 	assert.equal(describeTrace({ event: "warm", action: "skip", handedOver: "evidence", reason: "the route changed", secondsLeft: 2400, at, session: "s" }), `${time} cache expires in 2400s: left to Pi's own warming from now, the route changed`);
 });
 
-// Design 0.10.0, test 23: the words of a cold compaction, on the card and in /cache-keeper's log.
-test("a cold compaction's words: a summary with prices, on a subscription, without prices; a fallback with each kind of skipped", () => {
+// Design 0.10.0, test 23: the words of a fallback model compaction, on the card and in /cache-keeper's log.
+test("a fallback model compaction's words: a summary with prices, on a subscription, without prices; a fallback with each kind of skipped", () => {
 	const at = "2026-11-22T13:48:54.000Z";
 	const time = new Date(at).toLocaleTimeString([], { hourCycle: "h23", hour: "2-digit", minute: "2-digit", second: "2-digit" });
 	const usage: TraceUsage = { input: 148_000, cacheRead: 0, cacheWrite: 0, output: 3_000, cost: 0.052 };
@@ -200,12 +200,12 @@ test("a cold compaction's words: a summary with prices, on a subscription, witho
 	const priced = cold();
 	assert.equal(describeTrace(priced), `${time} /compact: summary by google/gemini-2.5-flash, the prompt cache has expired: 148k in, 3k out, $0.052, 12.3s, summary 5120 chars`);
 	assert.equal(comparison(priced), undefined, "the picked model's own cost only (review 8)");
-	assert.deepEqual(traceDetails(priced), ["cold model: google/gemini-2.5-flash (API key), thinking off, about 148k tokens of a 1M window, 1 request"]);
+	assert.deepEqual(traceDetails(priced), ["fallback model: google/gemini-2.5-flash (API key), thinking off, about 148k tokens of a 1M window, 1 request"]);
 
 	const sub = cold({ via: "sub", requests: 2, thinking: "minimal", response: { seconds: 12.3, usage: { ...usage, cost: 0 }, summaryChars: 5120 } });
 	assert.equal(describeTrace(sub), `${time} /compact: summary by google/gemini-2.5-flash, the prompt cache has expired: 148k in, 3k out, on a subscription, 12.3s, summary 5120 chars`);
 	assert.equal(comparison(sub), undefined);
-	assert.deepEqual(traceDetails(sub), ["cold model: google/gemini-2.5-flash (subscription), thinking minimal, about 148k tokens of a 1M window, 2 requests"]);
+	assert.deepEqual(traceDetails(sub), ["fallback model: google/gemini-2.5-flash (subscription), thinking minimal, about 148k tokens of a 1M window, 2 requests"]);
 
 	const free = cold({ response: { seconds: 2, usage: { ...usage, cost: 0 }, summaryChars: 900 } });
 	assert.equal(describeTrace(free), `${time} /compact: summary by google/gemini-2.5-flash, the prompt cache has expired: 148k in, 3k out, no price, 2.0s, summary 900 chars`);
@@ -228,8 +228,8 @@ test("a cold compaction's words: a summary with prices, on a subscription, witho
 		assert.equal(comparison(record), undefined);
 	}
 	// Skipped before the fit rule: only what was known.
-	assert.deepEqual(traceDetails({ ...cold({ response: undefined, skipped: "Pi no longer lists it", via: undefined, thinking: undefined, needTokens: undefined, window: undefined, requests: undefined }), outcome: "fallback" }), ["cold model: google/gemini-2.5-flash"]);
-	// The fallback's own line when no cold model was set is as before.
+	assert.deepEqual(traceDetails({ ...cold({ response: undefined, skipped: "Pi no longer lists it", via: undefined, thinking: undefined, needTokens: undefined, window: undefined, requests: undefined }), outcome: "fallback" }), ["fallback model: google/gemini-2.5-flash"]);
+	// The fallback's own line when no fallback model was set is as before.
 	const plain = { ...cold(), outcome: "fallback" as const, cold: undefined };
 	assert.equal(describeTrace(plain), `${time} /compact: Pi's compaction, the prompt cache has expired`);
 	assert.deepEqual(traceDetails(plain), []);
@@ -275,7 +275,7 @@ test("round 2, the card details: a cost recorded on a subscription route reads A
 		session: "s",
 		cold: { model: "proxy/gpt-4o-mini", via, requests: 1, response: { seconds: 1, usage: { input: 60_000, cacheRead: 0, cacheWrite: 0, output: 1_000, cost }, summaryChars: 17 } },
 	});
-	const route = (r: CompactTrace) => /^cold model: proxy\/gpt-4o-mini \(([^)]*)\)/.exec(traceDetails(r)[0])?.[1];
+	const route = (r: CompactTrace) => /^fallback model: proxy\/gpt-4o-mini \(([^)]*)\)/.exec(traceDetails(r)[0])?.[1];
 	assert.match(describeTrace(record("sub", 0.0096)), /\$0\.0096/);
 	assert.equal(route(record("sub", 0.0096)), "API key", "a recorded cost on a subscription route");
 	assert.equal(route(record("sub or api", 0.0096)), "API key");

@@ -19,7 +19,7 @@ export interface TraceUsage {
 }
 
 /**
- * The cold compaction model's part of a compaction's record: present whenever one was set and the cached path did not
+ * The fallback compaction model's part of a compaction's record: present whenever one was set and the cached path did not
  * write the summary. `response` when it wrote it, `skipped` (why) when it did not.
  */
 export interface ColdTrace {
@@ -43,7 +43,7 @@ export interface CompactTrace {
 	event: "compact";
 	trigger: Trigger;
 	model: string;
-	/** "cached": the cached path wrote the summary; "cold": the cold compaction model did; "fallback": Pi's own compaction ran. */
+	/** "cached": the cached path wrote the summary; "cold": the fallback compaction model did; "fallback": Pi's own compaction ran. */
 	outcome: "cached" | "cold" | "fallback" | "cancelled";
 	reason?: string;
 	mismatch?: { captured?: string; rebuilt?: string };
@@ -321,7 +321,7 @@ const deltaText = (ratio: number) =>
 	: ratio < 2 ? `${Math.round(100 * (ratio - 1))}% more`
 	: `${ratio.toFixed(1)}× as much`;
 
-/** The line under a cached compaction: against Pi's compaction. A summary the cold model wrote has none: its own cost is on its line. */
+/** The line under a cached compaction: against Pi's compaction. A summary the fallback model wrote has none: its own cost is on its line. */
 export function comparison(record: CompactTrace): { text: string; ratio: number } | undefined {
 	const { piEstimate, response } = record;
 	if (record.outcome !== "cached" || !piEstimate || !response) return undefined;
@@ -385,8 +385,8 @@ export function describeTrace(record: TraceRecord): string {
 			const then = record.outcome === "fallback" ? "Pi's compaction" : "cancelled";
 			const usage = record.response?.usage;
 			const spent = usage && usage.input + usage.cacheRead + usage.cacheWrite > 0 ? ` (the summary request used ${cacheShare(usage)}, ${formatCost(usage.cost)})` : "";
-			const coldNote = record.outcome === "fallback" && cold?.skipped ? `; ${cold.model} did not write the summary: ${cold.skipped}` : "";
-			return `${time} ${what}: ${then}, ${record.reason}${spent}${coldNote}`;
+			const fallbackNote = record.outcome === "fallback" && cold?.skipped ? `; ${cold.model} did not write the summary: ${cold.skipped}` : "";
+			return `${time} ${what}: ${then}, ${record.reason}${spent}${fallbackNote}`;
 		}
 		case "result":
 			return record.by === "pi"
@@ -456,7 +456,7 @@ export function traceDetails(record: CompactTrace): string[] {
 		const via = shown === undefined ? "" : ` (${VIA_LABELS[shown]})`;
 		const size = cold.needTokens === undefined ? "" : `, about ${formatTokens(cold.needTokens)} tokens${cold.window ? ` of a ${formatWindow(cold.window)} window` : ""}`;
 		const parts = [
-			`cold model: ${cold.model}${via}`,
+			`fallback model: ${cold.model}${via}`,
 			...(cold.thinking === undefined ? [] : [`thinking ${cold.thinking}`]),
 		];
 		const requests = cold.requests === undefined ? "" : `, ${cold.requests} request${cold.requests === 1 ? "" : "s"}`;

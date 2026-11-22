@@ -1,4 +1,4 @@
-# Compacting a cold cache with a model the user picks
+# Compacting with another model when the cache can't be used
 
 The design of 0.10.0, built (section 10 says where the build and the review changed it). It is written against pi-cache-keeper 0.9.0 (the model data is providers.dev's safe values) and Pi 1.6.0. It says what the software is; the build chooses nothing about that. Where the build finds this document wrong, the document is corrected.
 
@@ -16,12 +16,12 @@ That one rule holds the three triggers, with one picked model for all of them:
 2. **The session's own model refuses the summary,** for quota or a rate limit.
 3. **The conversation to summarize doesn't fit the session's model** (after a switch to a smaller window, say) **and fits the picked one.**
 
-They need no code of their own: each is a case in which the handler already falls back to Pi's own compaction today (section 2). The setting keeps the name of the first and most common of them, the cold compaction model.
+They need no code of their own: each is a case in which the handler already falls back to Pi's own compaction today (section 2). 0.10.0 named the setting after the first and most common of them (`coldCompactionModel`, "Compact a cold cache with"); 0.10.1 names it for all three, the fallback compaction model (section 11).
 
 Two things never change:
 
 - **A warm cache and a session model that can do it.** The cached path writes the summary from the cache, on the session's model, as in 0.9.0.
-- **Compacting before expiry.** It runs only while the cache is warm, and is cancelled when the cached path can't write the summary. The cold model never writes it.
+- **Compacting before expiry.** It runs only while the cache is warm, and is cancelled when the cached path can't write the summary. The fallback model never writes it.
 
 The session's model and thinking level are never touched. Nothing is switched and switched back: the summary request goes to the picked model directly, beside the session.
 
@@ -29,12 +29,12 @@ The session's model and thinking level are never touched. Nothing is switched an
 
 ### What it is
 
-One setting, `coldCompactionModel`: a string, `"provider/modelId"` (split at the first slash, as Pi's own `provider/modelId` keys are), or `""` for off. **Off is the default**, and with it off nothing in this document happens.
+One setting, `fallbackCompactionModel`: a string, `"provider/modelId"` (split at the first slash, as Pi's own `provider/modelId` keys are), or `""` for off. **Off is the default**, and with it off nothing in this document happens.
 
 ```json
 {
   "cacheKeeper": {
-    "coldCompactionModel": "google/gemini-2.5-flash"
+    "fallbackCompactionModel": "google/gemini-2.5-flash"
   }
 }
 ```
@@ -45,7 +45,7 @@ Validation in `config.ts`, where every key is checked: a string that is empty, o
 
 It is a compaction setting, so it follows the 0.8.0 rules as the five existing per-session keys do. It becomes the sixth entry of `SESSION_KEYS`:
 
-- **The default** is `cacheKeeper.coldCompactionModel` in `~/.pi/agent/settings.json`, read as saved now at every compaction (`inEffect()`).
+- **The default** is `cacheKeeper.fallbackCompactionModel` in `~/.pi/agent/settings.json`, read as saved now at every compaction (`inEffect()`).
 - **A session's own value** wins in that session. It is saved in the session's `cache-keeper-settings` entry, holds after a resume and in a fork made after it, and the latest entry on the branch decides.
 - **A session can turn it off for itself** while the default names a model: its own value is `""`. No value of its own means it follows the default.
 - **"Back to the defaults"** drops it with the session's other values.
@@ -63,7 +63,7 @@ Two compatibility facts, both already true of every key added so far:
 
 | | |
 |---|---|
-| Label | `Compact a cold cache with` |
+| Label | `When the cache can't be used, compact with` |
 | Value, editing this session | `off · default`, `google/gemini-2.5-flash · default`, `off · this session`, `google/gemini-2.5-flash · this session` |
 | Value, editing the defaults | `off` or `google/gemini-2.5-flash` |
 | Enter | opens a list (the row's `submenu`), instead of stepping through values: there can be a hundred models |
@@ -90,11 +90,11 @@ The description under the row names the three cases in which the model writes th
 
 **A pick Pi can't use now** (the model is gone, or its credentials are) is shown on the row as `<provider/id> · not available now`. The setting is kept: it works again when the model does.
 
-Outside the TUI the listing gains `coldCompactionModel: <value> [default]` or `[this session; default <value>]`, as for the other keys. As with them, it is changed there by editing `settings.json`.
+Outside the TUI the listing gains `fallbackCompactionModel: <value> [default]` or `[this session; default <value>]`, as for the other keys. As with them, it is changed there by editing `settings.json`.
 
 ### "No matter what the settings are"
 
-When the rule of section 0 applies, the cold model writes the summary whatever these are:
+When the rule of section 0 applies, the fallback model writes the summary whatever these are:
 
 | It applies whatever | Because |
 |---|---|
@@ -110,7 +110,7 @@ It can't override these:
 |---|---|
 | a cache the cached path can use | the cached path, on the session's model |
 | compacting before expiry | cancelled when the cached path can't write the summary, as today |
-| Pi's `compaction.enabled: false` | no automatic compaction starts; `/compact` still does, and the cold model writes that one |
+| Pi's `compaction.enabled: false` | no automatic compaction starts; `/compact` still does, and the fallback model writes that one |
 | Pi's `compaction.reserveTokens`, `keepRecentTokens` and their per-model overrides | they are the session model's, and still decide when Pi compacts and which messages are kept |
 | what the picked model can take | section 3 |
 | another extension that answers `session_before_compact` | Pi's own rules between extensions |
@@ -189,7 +189,7 @@ In every case below, **Pi's own compaction runs as today**: the handler returns 
 **The fit rule.** It uses the model as Pi's registry gives it, which carries the keeper's model data (the safe input window and output limit of 0.9.0, where `modelData` is on).
 
 1. **What would be sent.** Pi's summarizer sends one request, or two for a split turn (the history, and the turn's prefix). Each is the messages as text (`serializeConversation(convertToLlm(messages))`: tool results cut to 2,000 characters, thinking left out), plus the previous summary and the `/compact` instructions where there are any, plus Pi's prompt (the existing `PI_PROMPT_CHARS`). This is the arithmetic `piCompactionInput` already does, per request.
-2. **Counted by words.** Each request's text is split on whitespace: a word that is ASCII and at most 20 characters long (`COLD_SHORT_WORD`) counts its length / 3 tokens (at least 1); any other word (non-ASCII, or longer: base64, hashes, minified code, CJK) counts one token per UTF-8 byte, since a token of a byte-level tokenizer covers at least one byte. Pi's prompt is counted as `COLD_PROMPT_TOKENS = 700` (1,642 characters of English at most in Pi 0.87.0 and 1.6.0). Measured against o200k_base and cl100k_base (gpt-tokenizer 3.4.0): prose 1.27-1.35 times its real size, code 1.56, base64 1.39-1.47, rare CJK 1.29-1.58. The need is the larger request.
+2. **Counted by words.** Each request's text is split on whitespace: a word that is ASCII and at most 20 characters long (`FALLBACK_SHORT_WORD`) counts its length / 3 tokens (at least 1); any other word (non-ASCII, or longer: base64, hashes, minified code, CJK) counts one token per UTF-8 byte, since a token of a byte-level tokenizer covers at least one byte. Pi's prompt is counted as `FALLBACK_PROMPT_TOKENS = 700` (1,642 characters of English at most in Pi 0.87.0 and 1.6.0). Measured against o200k_base and cl100k_base (gpt-tokenizer 3.4.0): prose 1.27-1.35 times its real size, code 1.56, base64 1.39-1.47, rare CJK 1.29-1.58. The need is the larger request.
 3. **Room for the summary.** `summaryBudget(model, need)`, the existing function: the model's output limit, reduced so the prompt, a 4k margin and the summary fit the window, less the thinking a model that can't turn it off adds at its lowest level (Pi's default thinking budgets: minimal 1,024, low 2,048). The model fits when that is at least `MIN_SUMMARY_TOKENS` (16k), or at least its whole output limit where the limit is smaller. That room is the output cap passed with every request (`maxTokens`), so Pi can't ask for more than the fit assumed.
 
 Because tool results are cut down, a session larger than a model's window can still fit it; counting high can refuse a model near the limit that would have fit.
@@ -208,15 +208,15 @@ Counting high can refuse a model that would have fit; counting low sends a reque
 | The model called a tool | `the model called a tool instead of writing the summary` |
 | A reply, or the whole summary, holds no text once the file lists are taken out | `it returned no summary text` |
 
-Each reply is checked as it ends, in the transport given to `compact()`, before Pi's summarizer sees it: any reply that doesn't end in a normal stop is a failure, and a failure stops the cold path before any further request (a split turn's prefix is not sent after a failed or empty history summary). The record's `requests` counts the requests really sent.
+Each reply is checked as it ends, in the transport given to `compact()`, before Pi's summarizer sees it: any reply that doesn't end in a normal stop is a failure, and a failure stops the fallback model's path before any further request (a split turn's prefix is not sent after a failed or empty history summary). The record's `requests` counts the requests really sent.
 
 ### Aborted
 
-When the user aborts the compaction (the handler's `signal`), before or during the cold request, **the compaction ends as an aborted one does today**: the handler returns `{ cancel: true }`, as the cached path does for its own aborted request, with the reason `the compaction was aborted`. Nothing is sent after the abort; in particular Pi's own compaction is not started behind the user's back.
+When the user aborts the compaction (the handler's `signal`), before or during the fallback model's request, **the compaction ends as an aborted one does today**: the handler returns `{ cancel: true }`, as the cached path does for its own aborted request, with the reason `the compaction was aborted`. Nothing is sent after the abort; in particular Pi's own compaction is not started behind the user's back.
 
 ### Why nothing is ever lost
 
-The handler can return only three things: a complete compaction with the `firstKeptEntryId` and `tokensBefore` of Pi's own preparation; nothing, which is Pi's own compaction; or a cancel, only for the user's abort. Pi appends the entry itself, and a compaction removes no entry from the session file. An overflow recovery gets either the cold model's summary or Pi's own, and retries the turn after either.
+The handler can return only three things: a complete compaction with the `firstKeptEntryId` and `tokensBefore` of Pi's own preparation; nothing, which is Pi's own compaction; or a cancel, only for the user's abort. Pi appends the entry itself, and a compaction removes no entry from the session file. An overflow recovery gets either the fallback model's summary or Pi's own, and retries the turn after either.
 
 ## 4. The summary itself
 
@@ -246,9 +246,9 @@ It differs from Pi's own compaction in the model, the thinking level and the mis
 
 `CompactTrace` (`trace.ts`) gains one outcome and one field. One record per compaction, as today.
 
-- `outcome` adds `"cold"`: the cold model wrote the summary. `"fallback"` stays "Pi's own compaction ran"; `"cancelled"` stays.
+- `outcome` adds `"cold"`: the fallback model wrote the summary. `"fallback"` stays "Pi's own compaction ran"; `"cancelled"` stays.
 - `reason` stays what it is: why the cached path did not write the summary.
-- `cold`, present whenever a cold model was set and the handler fell back:
+- `cold`, present whenever a fallback model was set and the handler fell back:
 
 | Field | |
 |---|---|
@@ -277,13 +277,13 @@ It differs from Pi's own compaction in the model, the thinking level and the mis
 
 - **The model and its cost** are on the first line, as the requests recorded them: a recorded cost reads as that cost; no cost through a subscription login reads `on a subscription`; else `no price`.
 - **No comparison line.** The card shows the picked model's own cost only (decided after the review: a same-request price at the session's model can't be told right across tiers and routes).
-- **The card's header** is `cold compaction` when the cold model wrote the summary, and the line is not painted as a warning: nothing went wrong. A fallback after a cold model that could not write it keeps today's warning colour.
-- **Expanded** (`traceDetails`), one more line: `cold model: google/gemini-2.5-flash (API key), thinking off, about 148k tokens of a 1M window, 1 request`.
+- **The card's header** is `fallback model compaction` when the fallback model wrote the summary, and the line is not painted as a warning: nothing went wrong. A fallback after a fallback model that could not write it keeps today's warning colour.
+- **Expanded** (`traceDetails`), one more line: `fallback model: google/gemini-2.5-flash (API key), thinking off, about 148k tokens of a 1M window, 1 request`.
 
 ### `/cache-keeper`
 
-- A new line after `when full:`. With a model: `cold compaction: google/gemini-2.5-flash (this session) · 1M window · $0.30 in, $2.50 out per M · whether it writes a summary is decided at each compaction, from the part Pi cuts off`: the setting, the model, its window and its price or `subscription`, and no prediction. Off: `cold compaction: off: when the cache can't be read, Pi's compaction writes the summary on this session's model`. A pick Pi can't use now: `<ref> · not available now: <why>`.
-- The existing `next compaction:` line, where it says "Pi's compaction, because …" today, reads with a model set: `not from the cache, because <reason>; the cold compaction model writes the summary where it can, else Pi's compaction`. It names no model: that is decided at the compaction, from the part Pi cuts off then.
+- A new line after `when full:`. With a model: `fallback compaction model: google/gemini-2.5-flash (this session) · 1M window · $0.30 in, $2.50 out per M · whether it writes a summary is decided at each compaction, from the part Pi cuts off`: the setting, the model, its window and its price or `subscription`, and no prediction. Off: `fallback compaction model: off: when the cache can't be read, Pi's compaction writes the summary on this session's model`. A pick Pi can't use now: `<ref> · not available now: <why>`.
+- The existing `next compaction:` line, where it says "Pi's compaction, because …" today, reads with a model set: `not from the cache, because <reason>; the fallback compaction model writes the summary where it can, else Pi's compaction`. It names no model: that is decided at the compaction, from the part Pi cuts off then.
 - The `settings:` line lists it with the session's other own values.
 
 The footer does not change in this version.
@@ -294,13 +294,13 @@ The README is part of 0.10.0: the release is not done without it. It gets five t
 
 **1. A bullet in the opening "What it does:" list**, after "Compacts just before the cache expires", with its link:
 
-> - **Compacts a cold cache with a model you pick.** When the cache can't be read, the summary would cost your session model's full input price; a cheaper model, or one on a login with spare quota, writes it instead. The same model steps in when your session's model refuses the summary or the conversation no longer fits it, and the session goes on with its own model (off until you pick one). [More](#compacting-a-cold-cache-with-another-model).
+> - **Compacts with another model when the cache can't be used.** When the cache can't be read, the summary would cost your session model's full input price; a cheaper model, or one on a login with spare quota, writes it instead. The same model steps in when your session's model refuses the summary or the conversation no longer fits it, and the session goes on with its own model (off until you pick one). [More](#compacting-a-cold-cache-with-another-model).
 
 That list is being brought up to date for 0.8.0 and 0.9.0 by other work. The bullet is added to the list as that work leaves it, in its wording and order, not to the list as it stands in 0.9.0.
 
-**2. Its own section, "Compacting a cold cache with another model"**, after "Compacting from the cache". Four parts, in this order:
+**2. Its own section, "Compacting with another model when the cache can't be used"**, after "Compacting from the cache". Four parts, in this order:
 
-- **What it does:** the rule of section 0 with its three triggers, that it needs no other setting of the extension switched on (section 1, "With every other setting off": Pi's own threshold, overflow and `/compact` compactions use the picked model, and what follows with compacting when full off), and what the summary is (section 4): Pi's own summary, written by the picked model, with no thinking or its lowest level; the session's model and thinking level untouched. One comparison with the cached path: the cold model sees what Pi's compaction sees, tool results cut to 2,000 characters, not the whole conversation.
+- **What it does:** the rule of section 0 with its three triggers, that it needs no other setting of the extension switched on (section 1, "With every other setting off": Pi's own threshold, overflow and `/compact` compactions use the picked model, and what follows with compacting when full off), and what the summary is (section 4): Pi's own summary, written by the picked model, with no thinking or its lowest level; the session's model and thinking level untouched. One comparison with the cached path: the fallback model sees what Pi's compaction sees, tool results cut to 2,000 characters, not the whole conversation.
 - **When it applies:** one line for each trigger, as worded below, then the table of compactions of section 2, the rest of the fallbacks, and the unknown lifetime.
 
 > - **The cache is cold.** It has expired, was never written, or belongs to the model you switched away from. The picked model writes the summary, at its own price instead of your session model's full input price.
@@ -311,7 +311,7 @@ That list is being brought up to date for 0.8.0 and 0.9.0 by other work. The bul
 - **When it falls back:** the cases of section 3, each ending in Pi's own compaction, the abort, and that nothing is lost.
 - **The privacy note,** as worded here:
 
-> **Where your conversation goes.** With a cold compaction model set, the part of the conversation being summarized is sent to that model's provider, as Pi's own summarizer writes it out: your messages in full, with the full output of shell commands you ran with `!` (they are your messages, not tool results); the assistant's answers and its tool calls with their arguments; the first 2,000 characters of each tool result; the previous summary; any `/compact` instructions; and, on Pi before 1.2, the assistant's thinking. That is the same text Pi's own compaction sends, but to another provider than the one your session talks to, under that provider's terms and with the credentials Pi holds for it. It is off by default, nothing is sent this way until you pick a model, and you can turn it off for one session only. The summary is then as good as the model you picked.
+> **Where your conversation goes.** With a fallback compaction model set, the part of the conversation being summarized is sent to that model's provider, as Pi's own summarizer writes it out: your messages in full, with the full output of shell commands you ran with `!` (they are your messages, not tool results); the assistant's answers and its tool calls with their arguments; the first 2,000 characters of each tool result; the previous summary; any `/compact` instructions; and, on Pi before 1.2, the assistant's thinking. That is the same text Pi's own compaction sends, but to another provider than the one your session talks to, under that provider's terms and with the credentials Pi holds for it. It is off by default, nothing is sent this way until you pick a model, and you can turn it off for one session only. The summary is then as good as the model you picked.
 
 The menu row's description carries the note's first sentence.
 
@@ -319,21 +319,21 @@ The menu row's description carries the note's first sentence.
 
 | Setting | Menu | Default | Per session | What it does |
 |---|---|---|---|---|
-| `coldCompactionModel` | Compact a cold cache with | `""` | yes | this model (`"provider/modelId"`) writes the summary when the cache is cold, when the session's model refuses it, or when the conversation doesn't fit the session's model, also with every other setting here off; `""` turns it off |
+| `fallbackCompactionModel` | When the cache can't be used, compact with | `""` | yes | this model (`"provider/modelId"`) writes the summary when the cache is cold, when the session's model refuses it, or when the conversation doesn't fit the session's model, also with every other setting here off; `""` turns it off |
 
-The paragraph above the table that names the session's own values gains `coldCompactionModel`.
+The paragraph above the table that names the session's own values gains `fallbackCompactionModel`.
 
-**4. What is shown:** the card's new lines in "The compaction card and the log" (section 5), and the `cold compaction:` line under `/cache-keeper` in "Commands".
+**4. What is shown:** the card's new lines in "The compaction card and the log" (section 5), and the `fallback compaction model:` line under `/cache-keeper` in "Commands".
 
 **5. "Limitations":** the items of section 9.
 
-**The CHANGELOG entry**, under `## [0.10.0]`, `### Added`: one item, "A cold compaction model", saying the rule and its three triggers, the setting and its two layers, when it falls back, where the conversation goes, and that going back to 0.9.0 needs the key removed from `settings.json` (section 1).
+**The CHANGELOG entry**, under `## [0.10.0]`, `### Added`: one item, "A fallback compaction model", saying the rule and its three triggers, the setting and its two layers, when it falls back, where the conversation goes, and that going back to 0.9.0 needs the key removed from `settings.json` (section 1).
 
 ## 7. Tests
 
 Fake models and a fake registry everywhere; no test sends a real request (the harness already makes `fetch` throw). The fake registry answers `getAvailable`, `find`, `hasConfiguredAuth`, `isUsingOAuth`, `getProvider` and `streamSimple`; its `streamSimple` records each call (model, context, options) and returns a canned answer or failure.
 
-**The pure module** (`tests/cold-compaction.test.ts`):
+**The pure module** (`tests/fallback-compaction.test.ts`):
 
 1. A model reference parses and formats; an id with slashes keeps them; a bad string is refused.
 2. What would be sent: one request, and two for a split turn; the previous summary and the instructions are counted; tool results are counted cut.
@@ -347,30 +347,30 @@ Fake models and a fake registry everywhere; no test sends a real request (the ha
 7. A session's own value wins over the default; a session's `""` wins over a default model; the default is read as saved now; "Back to the defaults" drops it.
 8. The menu row, its list and the lines of `/cache-keeper` and of the non-TUI listing.
 
-**The handler** (`tests/cold-compaction-flow.test.ts`, built as `compact-before-expiry-flow.test.ts` builds its context):
+**The handler** (`tests/fallback-compaction-flow.test.ts`, built as `compact-before-expiry-flow.test.ts` builds its context):
 
 9. Off: on a cold cache the handler returns nothing and the registry is never called.
-10. Set, warm cache: the cached path writes the summary; the cold model gets no request.
+10. Set, warm cache: the cached path writes the summary; the fallback model gets no request.
 11. **Trigger 1, the cache is cold:** an expired cache, a session with no request yet, and a model changed since the last request, for each of `manual`, `threshold`, `overflow` and `full`: the handler returns a compaction whose summary is the fake model's text, whose `firstKeptEntryId` and `tokensBefore` are the preparation's, whose `usage` is the fake's, and whose file lists include the previous compaction's.
 12. The request it sent: to the picked model; Pi's summarizer system prompt; the conversation inside `<conversation>`; no `maxTokens` above the model's limit; no reasoning for a model that can turn it off, its lowest level for one that can't; no cache retention.
 13. A previous summary is sent as `<previous-summary>`; a split turn sends two requests and sums their usage; `/compact` instructions are in the prompt.
-14. `expiry`: a cache that went cold at the gate cancels, and the cold model gets no request.
+14. `expiry`: a cache that went cold at the gate cancels, and the fallback model gets no request.
 15. Each "can't" of section 3 that is decided before sending: nothing is returned, no request is sent, and the record's `cold.skipped` is the reason.
 16. Each failure after sending: a thrown error, an error answer, the output limit, a tool call, an empty text. Nothing is returned, one request was sent, the reason is recorded.
 17. Abort before the request: none is sent, the result is a cancel. Abort during it: a cancel. In both, no compaction is returned.
-18. After a cold summary: `pi.setModel` and `pi.setThinkingLevel` were not called, `ctx.model` is the same object, and the keeper's captured request was not replaced by the cold one.
-19. A model with no lifetime whose last answer used the cache: the cached path is tried, not the cold model.
-20. Every other setting off (`compactAtPercent: 0`, `compactAtTokens: 0`, `compactBeforeExpiry: false`, `keepWarmMinutes: 0`, `modelData: false`): `manual`, `threshold` and `overflow` on a cold cache are written by the cold model.
-21. **Trigger 2, the session's model refuses the summary,** on a warm cache: (a) the cached path's request throws a rate-limit error; (b) it comes back as an error answer saying the quota is used up. In both the cold model writes the summary and the record's `reason` holds the provider's words. (c) The same with a cold model that can't take it: nothing is returned, so Pi's own compaction runs.
-22. **Trigger 3, the conversation doesn't fit the session's model:** (a) after a switch to a session model with a smaller window than the text to summarize; (b) the last request overflowed; (c) under 16k tokens of the window are left for a cached summary, on a warm cache. In each the cold model, whose window holds the text, writes the summary. (d) The same with a cold model whose window doesn't hold it either: nothing is returned, no request is sent, and the record says what it needs and what its window is.
+18. After a summary by the fallback model: `pi.setModel` and `pi.setThinkingLevel` were not called, `ctx.model` is the same object, and the keeper's captured request was not replaced by the fallback model's.
+19. A model with no lifetime whose last answer used the cache: the cached path is tried, not the fallback model.
+20. Every other setting off (`compactAtPercent: 0`, `compactAtTokens: 0`, `compactBeforeExpiry: false`, `keepWarmMinutes: 0`, `modelData: false`): `manual`, `threshold` and `overflow` on a cold cache are written by the fallback model.
+21. **Trigger 2, the session's model refuses the summary,** on a warm cache: (a) the cached path's request throws a rate-limit error; (b) it comes back as an error answer saying the quota is used up. In both the fallback model writes the summary and the record's `reason` holds the provider's words. (c) The same with a fallback model that can't take it: nothing is returned, so Pi's own compaction runs.
+22. **Trigger 3, the conversation doesn't fit the session's model:** (a) after a switch to a session model with a smaller window than the text to summarize; (b) the last request overflowed; (c) under 16k tokens of the window are left for a cached summary, on a warm cache. In each the fallback model, whose window holds the text, writes the summary. (d) The same with a fallback model whose window doesn't hold it either: nothing is returned, no request is sent, and the record says what it needs and what its window is.
 
 **The words** (`tests/trace.test.ts`):
 
-23. `describeTrace` and `traceDetails` (and no comparison line) for: a cold summary with a recorded cost, on a subscription, without prices; and a fallback with each kind of `skipped`.
+23. `describeTrace` and `traceDetails` (and no comparison line) for: a summary by the fallback model with a recorded cost, on a subscription, without prices; and a fallback with each kind of `skipped`.
 
 **In Pi's session runtime** (the `tests/session-runtime.ts` harness, its in-memory provider, a second in-memory model):
 
-24. `/compact` on a cold session with a cold model set, every other setting off: the session gets a compaction entry written through the second model, marked as an extension's, and the session's model and thinking level are unchanged afterwards.
+24. `/compact` on a cold session with a fallback model set, every other setting off: the session gets a compaction entry written through the second model, marked as an extension's, and the session's model and thinking level are unchanged afterwards.
 25. The same with the second model failing: Pi's own compaction writes the entry.
 
 ## 8. The steps
@@ -378,16 +378,16 @@ Fake models and a fake registry everywhere; no test sends a real request (the ha
 Version **0.10.0**. Each step leaves `npm run check` green.
 
 1. **`config.ts`:** the key, its default `""`, its validation, its place in `SESSION_KEYS`. Tests 6.
-2. **`cold-compaction.ts`**, a new module without state: the contract below. Tests 1 to 5.
+2. **`fallback-compaction.ts`**, a new module without state: the contract below. Tests 1 to 5.
 3. **`trace.ts`:** the outcome, the `cold` field, the lines. Tests 23.
-4. **`index.ts`, the handler:** `fallBack` hands over to the cold model for every trigger but `expiry`; the call of Pi's `compact()`; the record. Tests 9 to 22.
+4. **`index.ts`, the handler:** `fallBack` hands over to the fallback model for every trigger but `expiry`; the call of Pi's `compact()`; the record. Tests 9 to 22.
 5. **`index.ts`, what is shown:** the menu row and its list, `/cache-keeper`, the non-TUI listing, the entry renderer, the card's header and colour. Tests 7, 8.
 6. **Pi's runtime:** tests 24, 25.
-7. **README and CHANGELOG,** part of the release (section 6): the bullet in the opening "What it does:" list with its link, built on that list as updated for 0.8.0 and 0.9.0; the section "Compacting a cold cache with another model" (what it does, when it applies, when it falls back, the privacy note); the Settings table row; the card and `/cache-keeper` lines; the limitations; and the CHANGELOG entry under `## [0.10.0]`. `package.json` to `0.10.0`.
+7. **README and CHANGELOG,** part of the release (section 6): the bullet in the opening "What it does:" list with its link, built on that list as updated for 0.8.0 and 0.9.0; the section "Compacting with another model when the cache can't be used" (what it does, when it applies, when it falls back, the privacy note); the Settings table row; the card and `/cache-keeper` lines; the limitations; and the CHANGELOG entry under `## [0.10.0]`. `package.json` to `0.10.0`.
 
 One check belongs to the build: Pi's `compact()` has the signature used here in Pi 1.5.2 and 1.6.0. The package claims Pi from 0.87.0; run the flow tests on the oldest Pi the package is tested with, and raise the peer range if `compact()` there takes no transport.
 
-### The contract of `cold-compaction.ts`
+### The contract of `fallback-compaction.ts`
 
 Signatures only; every body is the build's.
 
@@ -397,45 +397,45 @@ export function parseModelRef(value: string): { provider: string; id: string } |
 export function formatModelRef(model: { provider: string; id: string }): string;
 
 /** The longest ASCII word counted at a third of its length; longer or non-ASCII words count a token a UTF-8 byte. */
-export const COLD_SHORT_WORD = 20;
-export function coldTextTokens(text: string): number;
+export const FALLBACK_SHORT_WORD = 20;
+export function fallbackTextTokens(text: string): number;
 
 /** The requests Pi's compact() sends for a preparation, each in tokens as counted above: one, or two for a split turn. */
-export function coldRequestTokens(
+export function fallbackRequestTokens(
 	preparation: Pick<CompactionPreparation, "messagesToSummarize" | "turnPrefixMessages" | "isSplitTurn" | "previousSummary">,
 	customInstructions?: string,
 ): number[];
 
 /** The larger request, in tokens. */
-export function coldNeedTokens(requestTokens: number[]): number;
+export function fallbackNeedTokens(requestTokens: number[]): number;
 
 /** Why a model can't write a summary this way whatever the session's size, or undefined. */
-export function coldUnusable(model: { api: string }): string | undefined;
+export function fallbackUnusable(model: { api: string }): string | undefined;
 
-export type ColdFit = { fits: true; need: number; window: number; maxTokens: number } | { fits: false; why: string; need: number; window?: number; never?: true };
+export type FallbackFit = { fits: true; need: number; window: number; maxTokens: number } | { fits: false; why: string; need: number; window?: number; never?: true };
 
 /** The fit rule: a known window, and room for the summary beside the need. */
 /** `reserve`: the output thinking adds at the model's lowest level. `maxTokens` of a fit is the cap sent. */
-export function coldFit(model: { contextWindow: number; maxTokens: number }, need: number, reserve?: number): ColdFit;
-/** The one fit the list and the compaction use (section 10, round 2): the lowest thinking level, and coldFit with its reserve. */
-export function coldModelFit(model: Model<Api>, need: number): { fit: ColdFit; thinking: ThinkingLevel };
+export function fallbackFit(model: { contextWindow: number; maxTokens: number }, need: number, reserve?: number): FallbackFit;
+/** The one fit the list and the compaction use (section 10, round 2): the lowest thinking level, and fallbackFit with its reserve. */
+export function fallbackModelFit(model: Model<Api>, need: number): { fit: FallbackFit; thinking: ThinkingLevel };
 
 /** One model of the menu's list. */
-export interface ColdChoice {
+export interface FallbackChoice {
 	ref: string;
 	window?: number;
 	/** Dollars per million tokens at the size needed; absent without prices. */
 	price?: { input: number; output: number };
 	subscription: boolean;
 	/** Absent where the model can't be used at all (`unusable` says why). */
-	fit?: ColdFit;
+	fit?: FallbackFit;
 	unusable?: string;
 }
-export function coldChoiceLabel(choice: ColdChoice): string;
-export function orderColdChoices(choices: ColdChoice[]): ColdChoice[];
+export function fallbackChoiceLabel(choice: FallbackChoice): string;
+export function orderFallbackChoices(choices: FallbackChoice[]): FallbackChoice[];
 ```
 
-`config.ts` gains `coldCompactionModel: string` in `CacheKeeperConfig`, and `"coldCompactionModel"` in `SESSION_KEYS`. `trace.ts` gains `"cold"` in `CompactTrace["outcome"]` and `CompactTrace["cold"]` as in section 5.
+`config.ts` gains `fallbackCompactionModel: string` in `CacheKeeperConfig`, and `"fallbackCompactionModel"` in `SESSION_KEYS`. `trace.ts` gains `"cold"` in `CompactTrace["outcome"]` and `CompactTrace["cold"]` as in section 5.
 
 ## 9. Not in this version, and open questions
 
@@ -444,16 +444,16 @@ export function orderColdChoices(choices: ColdChoice[]): ColdChoice[];
 - `/tree` branch summaries still use the session's model.
 - Virtual models and Claude through pi-claude-bridge can't be picked.
 - A model that declares no context window can't be used; declare one in `models.json`.
-- One attempt: a cold request that fails is not retried, Pi's own compaction follows.
-- The cold model sees what Pi's compaction sees, tool results cut to 2,000 characters, not the whole conversation the cached path reads from the cache.
+- One attempt: a request to the fallback model that fails is not retried, Pi's own compaction follows.
+- The fallback model sees what Pi's compaction sees, tool results cut to 2,000 characters, not the whole conversation the cached path reads from the cache.
 - The footer says nothing about the setting.
 - A refusal is not told from any other failed summary request: the card shows the provider's words, not "quota".
-- No hint to pick a cold compaction model when Pi's own compaction fails for size and none is set.
+- No hint to pick a fallback compaction model when Pi's own compaction fails for size and none is set.
 
 **Two questions only the owner can answer.** The three triggers are decided. The design takes the first answer of each question below; the other is a small change.
 
 1. **Does the picked model also take the rest of the fallbacks?** Beyond the three triggers, the handler falls back on a warm cache where the session's model could still write the summary at full price through Pi's own compaction: a prefix mismatch, an unsupported API, a conversation that changed, a cached summary that came back cut, as a tool call or empty. The design says yes, as one rule: the picked model writes every summary the cached path doesn't. Saying no leaves those to Pi's compaction on the session's model, and is a mark on those reasons.
-2. **Is a cache of unknown lifetime "cold"?** The design says no: the cached path is tried as today. Saying yes sends every compaction of such a model to the cold model, which is cheaper when the cache was in fact gone and gives up a cached, whole-conversation summary when it was not. With the model data off, more models are of this kind.
+2. **Is a cache of unknown lifetime "cold"?** The design says no: the cached path is tried as today. Saying yes sends every compaction of such a model to the fallback model, which is cheaper when the cache was in fact gone and gives up a cached, whole-conversation summary when it was not. With the model data off, more models are of this kind.
 
 ## 10. What the build changed, and the decisions after the review
 
@@ -464,12 +464,12 @@ The owner's answers to section 9: **1. yes**, the picked model takes every fallb
 - **Pi 0.87.0's summarizer** words the split turn's prefix request otherwise and leaves the `/compact` instructions out of it. The extension follows Pi's summarizer, so it does the same there; the need still counts the instructions for both requests (high). Its `compact()` has the signature used here and takes the transport, so the peer range stays at 0.87.0.
 - **`CompactionPreparation`** is not exported by name from `@earendil-works/pi-coding-agent`: the module uses `SessionBeforeCompactEvent["preparation"]`.
 - **An empty summary** can't be seen in what `compact()` returns (Pi appends the file lists), so each reply is checked in the transport, and the whole summary again once the file lists are taken out (`summaryBody`).
-- **One structural test** (`one-clock.test.ts`) asserted two places in `index.ts` that send a paid request; the cold summary is a third, inside `coldSummary`.
-- **Small additions:** `coldModelParts`, `coldChoiceParts` and `fitColdLine` in the module; `formatWindow` in `trace.ts`; models whose window is unknown or that can't be used are listed after the ones too small; the listing outside the TUI shows off as `""`.
+- **One structural test** (`one-clock.test.ts`) asserted two places in `index.ts` that send a paid request; the fallback model's summary is a third, inside `fallbackSummary`.
+- **Small additions:** `fallbackModelParts`, `fallbackChoiceParts` and `fitFallbackLine` in the module; `formatWindow` in `trace.ts`; models whose window is unknown or that can't be used are listed after the ones too small; the listing outside the TUI shows off as `""`.
 
 ### Decided after the review (round 1)
 
-1. **A reply that doesn't end in a normal stop is a failure**, whether it ends `error`, `aborted` (a provider or gateway cancelled it while the compaction's own signal was live) or at the output limit, whatever text came before. A failure stops the cold path before any further request, and Pi's own compaction runs (a cancel for a real local abort). Section 3.
+1. **A reply that doesn't end in a normal stop is a failure**, whether it ends `error`, `aborted` (a provider or gateway cancelled it while the compaction's own signal was live) or at the output limit, whatever text came before. A failure stops the fallback model's path before any further request, and Pi's own compaction runs (a cancel for a real local abort). Section 3.
 2. **Emptiness is checked after the file lists are taken out**: a reply holding only `<read-files>`/`<modified-files>` is no summary.
 3. **The privacy note says what Pi's summarizer sends**: user messages in full, so the full output of shell commands run with `!`; tool calls with their arguments; and, on Pi before 1.2 (checked: 1.1.0 sends them, 1.2.0 doesn't), the assistant's thinking. Section 6, and the picker row's description.
 4. **Oversized requests.** (a) The output cap the fit computed is passed as `maxTokens` with every request, less the thinking a model that can't turn it off adds. (b) The need is counted by words (round 2, replacing round 1's one token per byte, which counted English 4-5 times its size so that a big cold session would almost never fit): an ASCII word of up to 20 characters at a third of its length, at least one; any other word at a token a UTF-8 byte. The reviewer's base64 attachment (221,872 characters, 151,599 tokens in o200k_base) is refused by a 128k window; 20,000 rare CJK characters (46,512 tokens in cl100k_base) are counted at 60,000; a paragraph of English prose of 122 tokens (o200k_base) at 155. A request the provider still rejects ends in the fallback.
@@ -478,14 +478,25 @@ The owner's answers to section 9: **1. yes**, the picked model takes every fallb
 7. **`/cache-keeper` makes no prediction** of which model would compact: it shows the setting, the model, its window and its price or `subscription`, and says the choice is made at each compaction, from where Pi cuts. Section 5.
 8. **No comparison with the session's model** on the card: the picked model's own cost only. `sessionModelCost` is gone from the record.
 9. **The cost label is what the request recorded**: a recorded cost is shown as that cost (also through a route announced as a subscription); no cost on a subscription login reads `on a subscription`.
-10. **The picker in a narrow terminal** keeps the end of a model id that doesn't fit (`fitColdLine`), so two models of one provider stay distinct; tested at 40 and 60 columns. Replaced in round 2 (below, 3).
+10. **The picker in a narrow terminal** keeps the end of a model id that doesn't fit (`fitFallbackLine`), so two models of one provider stay distinct; tested at 40 and 60 columns. Replaced in round 2 (below, 3).
 
 ### Decided after the review (round 2)
 
-1. **One fit for the list and the compaction.** `coldModelFit(model, need)` is the only fit: it picks the thinking level the request is sent at (the model's lowest, `clampThinkingLevel(model, "off")`) and calls `coldFit` with what that level adds kept out of the cap. The list (`coldChoiceOf`) and the compaction (`coldSummary`) both call it, so they can't disagree. A model whose output limit, less that thinking, can never reach the summary's minimum (16k, or its whole limit where smaller) fails with `never` whatever the session's size, and the list shows it among the models that can't be used: `can't be used: output limit too small` (`OUTPUT_TOO_SMALL`). Cloudflare's `@cf/openai/gpt-oss-120b` is such a model: its limit is 16,384, and its lowest thinking level is low (2,048). `/cache-keeper` says the same of such a pick. The session's own model, which the compaction refuses, reads `can't be used: it is the session's own model` in the list. Tested in Pi's session runtime: the list's line and the compaction's decision agree for every model of Pi 1.6.0's and Pi 0.87.0's built-in catalogs (fixtures of them in `tests/fixtures`), for a small session and one of about 150k tokens.
+1. **One fit for the list and the compaction.** `fallbackModelFit(model, need)` is the only fit: it picks the thinking level the request is sent at (the model's lowest, `clampThinkingLevel(model, "off")`) and calls `fallbackFit` with what that level adds kept out of the cap. The list (`fallbackChoiceOf`) and the compaction (`fallbackSummary`) both call it, so they can't disagree. A model whose output limit, less that thinking, can never reach the summary's minimum (16k, or its whole limit where smaller) fails with `never` whatever the session's size, and the list shows it among the models that can't be used: `can't be used: output limit too small` (`OUTPUT_TOO_SMALL`). Cloudflare's `@cf/openai/gpt-oss-120b` is such a model: its limit is 16,384, and its lowest thinking level is low (2,048). `/cache-keeper` says the same of such a pick. The session's own model, which the compaction refuses, reads `can't be used: it is the session's own model` in the list. Tested in Pi's session runtime: the list's line and the compaction's decision agree for every model of Pi 1.6.0's and Pi 0.87.0's built-in catalogs (fixtures of them in `tests/fixtures`), for a small session and one of about 150k tokens.
 2. **The output cap is passed to Pi, not promised on the wire.** Pi's adapter sends `maxTokens` to the provider, except some adapters of older Pi versions, which leave it out (on Pi 0.87.0, `openai-codex-responses`). A request the provider then rejects falls back as any failed reply does. The README says so; nothing else changes.
-3. **The picker's rows at 40 and 60 columns.** A model id that doesn't fit is shortened in the middle (`shortenModelRef`): the provider, the start of the id, an ellipsis, the end of the id. The cut starts with a third of the id's room kept at its start, and moves either way until no other reference in the list matches that start and that end. Where no single cut tells two references apart (Pi 1.6.0's `qwen-token-plan-individual-cn/qwen3.6-flash` and `qwen3.8-flash`, and Vercel's three `gemini-*-flash-lite-batch`, at 40 columns), the rows that would read the same show the whole id over two lines or more, then the rest of the line (`coldRowLines`). The rule covers the whole list, so a row never reads like another, visible or not. The list is drawn by the extension (`coldModelList`, with Pi's select-list theme and keys), since Pi's select list draws one line per row. Tested in Pi's session runtime: at 40 and 60 columns, every model of Pi 1.6.0's and Pi 0.87.0's catalogs has a row that reads differently from every other, among them the stock Bedrock `eu.` and `us.` Claude Haiku 4.5.
+3. **The picker's rows at 40 and 60 columns.** A model id that doesn't fit is shortened in the middle (`shortenModelRef`): the provider, the start of the id, an ellipsis, the end of the id. The cut starts with a third of the id's room kept at its start, and moves either way until no other reference in the list matches that start and that end. Where no single cut tells two references apart (Pi 1.6.0's `qwen-token-plan-individual-cn/qwen3.6-flash` and `qwen3.8-flash`, and Vercel's three `gemini-*-flash-lite-batch`, at 40 columns), the rows that would read the same show the whole id over two lines or more, then the rest of the line (`fallbackRowLines`). The rule covers the whole list, so a row never reads like another, visible or not. The list is drawn by the extension (`fallbackModelList`, with Pi's select-list theme and keys), since Pi's select list draws one line per row. Tested in Pi's session runtime: at 40 and 60 columns, every model of Pi 1.6.0's and Pi 0.87.0's catalogs has a row that reads differently from every other, among them the stock Bedrock `eu.` and `us.` Claude Haiku 4.5.
 4. **The request count** counts only requests really dispatched: a request counts once its body is built (every adapter of Pi's passes it to `onPayload` just before sending), or once a reply comes that a provider wrote (a normal end, or tokens counted). A credential failure at request time is an error reply with no tokens and no body (as Pi 0.87.0's and 1.6.0's registries return it), and counts no request.
-5. **The price comparison in the README** is for cached compactions only: a summary by the cold compaction model shows that model's own recorded cost, with no comparison.
+5. **The price comparison in the README** is for cached compactions only: a summary by the fallback compaction model shows that model's own recorded cost, with no comparison.
 6. **The expanded card's route** follows the cost line's rule: a recorded cost reads `(API key)`, also on a route announced as a subscription; no cost on a subscription reads `(subscription)`.
 
+## 11. The name, in 0.10.1
+
+The setting was named for a cold cache only, while the picked model writes the summary whenever the cached path can't. 0.10.1 renames it, with the owner's wording (2026-11-22):
+
+- **The setting** is `fallbackCompactionModel`. 0.10.0's `coldCompactionModel` keeps working, in `settings.json` (`cacheKeeper`) and in a session's own values (the `cache-keeper-settings` entry): it is read as the new name, and where both are present the new one wins. A bad value under the old name is named by the old name. The menu writes only the new name: a save of the defaults writes the old name's value under the new one (unless the new one is there) and takes the old one out; a session's own values are always saved whole, and so under the new name.
+- **The menu row** reads "When the cache can't be used, compact with"; the list's title starts the same way.
+- **What is shown:** `/cache-keeper`'s line is `fallback compaction model:`, the next compaction's says "the fallback compaction model writes the summary where it can", the card's header is `fallback model compaction`, and its expanded line starts `fallback model:`.
+- **The README** section is "Compacting with another model when the cache can't be used", with the opening bullet and its anchor (`#compacting-with-another-model-when-the-cache-cant-be-used`) to match.
+- **Kept as it was, because it is stored:** the log record's outcome `"cold"` and its `cold` field (in `~/.pi/agent/cache-keeper.jsonl` and in each session's card entries), and their type `ColdTrace`, named after the field. A card or a log line written by 0.10.0 reads the same as one written now.
+- **Renamed:** this document (`design/fallback-compaction-model.md`), the module (`fallback-compaction.ts`), its tests (`tests/fallback-compaction*.test.ts`) and the code's identifiers (`fallbackFit`, `fallbackModelFit`, `FallbackChoice`, `FALLBACK_SHORT_WORD` and the others that started `cold`). Local variables named `cold` that hold the record's `cold` field keep the field's name.
+- **Going back to 0.10.0** needs `fallbackCompactionModel` renamed back to `coldCompactionModel` in `cacheKeeper`: 0.10.0 refuses an unknown key there. A session's own value saved by 0.10.1 is left out by 0.10.0, which reads the rest of the entry.

@@ -4747,7 +4747,7 @@ test("stop, the last gate: the one reading that sees a new stop decides; a faili
 	}
 });
 
-// Finding 5 (review of 0.10.0): an unknown lifetime or expiry is never a reason to use the cold compaction model. The
+// Finding 5 (review of 0.10.0): an unknown lifetime or expiry is never a reason to use the fallback compaction model. The
 // reviewer's probe: a period kept warm on a declared lifetime that then can't be read any more (the expiry is unknown),
 // and /compact. With the setting off (absent, so the same test runs on 0.9.0), 0.10.0 does exactly what 0.9.0 does; with
 // it on, the same, and the picked model is never asked.
@@ -4797,14 +4797,14 @@ const UNKNOWN_EXPIRY_ON_090 = {
 	},
 };
 
-test("review 5: an expiry that became unknown in a keep-warm period, the cold compaction model off: exactly what 0.9.0 does", async (t) => {
+test("review 5: an expiry that became unknown in a keep-warm period, the fallback compaction model off: exactly what 0.9.0 does", async (t) => {
 	t.after(() => mock.timers.reset());
 	assert.deepEqual(await unknownExpiryProbe({}), UNKNOWN_EXPIRY_ON_090);
 });
 
-test("review 5: the same with the cold compaction model on: Pi's own compaction as in 0.9.0, and the picked model is never asked", async (t) => {
+test("review 5: the same with the fallback compaction model on: Pi's own compaction as in 0.9.0, and the picked model is never asked", async (t) => {
 	t.after(() => mock.timers.reset());
-	const on = await unknownExpiryProbe({ coldCompactionModel: "scratch/target" });
+	const on = await unknownExpiryProbe({ fallbackCompactionModel: "scratch/target" });
 	assert.ok(!on.requests.includes("scratch"), `the picked model was asked: ${on.requests.join(", ")}`);
 	assert.deepEqual(on, UNKNOWN_EXPIRY_ON_090);
 });
