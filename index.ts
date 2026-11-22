@@ -44,6 +44,7 @@ import {
 	sameSessionSettings,
 	saveConfig,
 	SESSION_KEYS,
+	settingsStamp,
 	SESSION_SETTINGS_TYPE,
 	sessionSettingsOn,
 	SETTINGS_KEY,
@@ -398,7 +399,35 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// on the current branch, read at session_start and after /tree; the menu changes it and saves it when it closes).
 	let config = loadConfig();
 	let own: SessionSettings = {};
-	const inEffect = (): CacheKeeperConfig => settingsInEffect(config, own);
+	// The defaults as saved now: settings.json is read again whenever it changed since the last reading (another window, or
+	// another session of this process, may have saved them), at every decision, in the menu and in /cache-keeper. A file
+	// that can't be read leaves the last defaults read. cacheRetention and modelData keep their own path (`config`): a
+	// change of them is applied where it is made.
+	let latest = config;
+	let latestStamp = settingsStamp();
+	const defaultsNow = (): CacheKeeperConfig => {
+		const stamp = settingsStamp();
+		if (stamp !== latestStamp) {
+			try {
+				const read = loadConfig();
+				if (read.compactAtPercent !== latest.compactAtPercent || read.compactAtTokens !== latest.compactAtTokens) {
+					fullStuck = false;
+					lastFullSkip = undefined;
+				}
+				latest = read;
+				latestStamp = stamp;
+			} catch {
+				// Read again at the next decision.
+			}
+		}
+		return latest;
+	};
+	const inEffect = (): CacheKeeperConfig => {
+		const now = defaultsNow();
+		const defaults = { ...config };
+		for (const name of SESSION_KEYS) (defaults as Record<string, unknown>)[name] = now[name];
+		return settingsInEffect(defaults, own);
+	};
 
 	let pendingTranscript: AgentMessage[] | undefined;
 	let captured: CapturedRequest | undefined;
@@ -1395,7 +1424,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// expiry; Pi is idle and nothing is queued; the last safe moment, from that expiry, has not passed; the payload's output limit is within the API's proven refresh limit. "hold": a
 	// passing reason, tried again per R2 (a cancelled refresh, by the run that cancelled it); "refuse": withheld for good,
 	// and warming ends for the period where it has not ended yet.
-	type GateVerdict = { pass: true } | { hold: "cancelled" | "busy" | "late" | "settling" | "out"; reason: string } | { refuse: string; ended?: Handed };
+	type GateVerdict = { pass: true } | { hold: "cancelled" | "busy" | "late" | "settling" | "out"; reason: string } | { refuse: string; ended?: Handed; stop?: WarmStop };
 	const lastGate = (
 		ctx: ExtensionContext,
 		p: WarmPeriod & { fixed: NonNullable<WarmPeriod["fixed"]> },
@@ -1436,6 +1465,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const view = look(ctx, {}, (handed) => (ended = handed));
 		if (view.against) return { refuse: view.against.reason, ...(ended ? { ended } : {}) };
 		if (view.sendBy === undefined || !view.lifetime) return { refuse: "the cache's expiry is unknown" };
+		// The time limit in effect now (the session's own, or the default as saved now): a cache that lasts to its end is not
+		// refreshed, also when the limit was shortened while this refresh was being prepared.
+		if (!wantsWarm(view.sendBy, p.idleSince, setting.minutes)) return { refuse: limitReason(), stop: "limit" };
 		if (running || !ctx.isIdle() || ctx.hasPendingMessages()) return { hold: "busy", reason: "Pi is busy or has queued messages" };
 		// The last safe moment, from the expiry read here: half the warm lead before it.
 		const lastSafe = view.sendBy - Math.floor(warmLeadMs(view.lifetime.ms, EXPIRY_LEAD_MS) / 2);
@@ -1512,6 +1544,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		let refused: string | undefined;
 		// Warming ended at the last gate, on evidence against the period: said where the refresh settles.
 		let refusedEnded: Handed | undefined;
+		// How warming ends where it was refused for a reason of its own (the time limit).
+		let refusedStop: WarmStop | undefined;
 		// Its number in the period, once it leaves.
 		let refreshNo = 0;
 
@@ -1557,6 +1591,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 							if ("refuse" in verdict) {
 								refused = verdict.refuse;
 								refusedEnded = verdict.ended;
+								refusedStop = verdict.stop;
 								throw new Error(verdict.refuse);
 							}
 							// It goes out: reserved at the larger of its expected cost and what the last refresh really cost.
@@ -1632,7 +1667,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				p.warm = settled.state;
 				if (settled.hitSentAt !== undefined) p.clock.hit(settled.hitSentAt);
 				if (!ended && why && p.warm !== before) ended = { stop: why[0], reason: why[1] };
-			} else if (refused) ended = refusedEnded ?? endWarm(p, "unable", refused);
+			} else if (refused) ended = refusedEnded ?? endWarm(p, refusedStop ?? "unable", refused);
 			else if (failed) ended = endWarm(p, "failed", failure);
 			// Then the cache's clock is read, where the session is alive: a refresh that read 95% and wrote the rest into a cache
 			// of another lifetime is a hit for the budget and still evidence against the period's lifetime. Against it, the
@@ -2207,19 +2242,29 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 
 	const percentLabel = (percent: number) => (percent === 0 ? "off" : `${percent}%`);
 	const capLabel = (tokens: number) => (tokens === 0 ? "off" : `${formatTokens(tokens)} tokens`);
-	const fullNote = (model: Model<Api> | undefined): string => {
+	// `marked`: each value shown says where it comes from, " (this session)" after one of the session's own (/cache-keeper).
+	const fullNote = (model: Model<Api> | undefined, marked = false): string => {
 		const { compactAtPercent: percent, compactAtTokens: cap } = inEffect();
-		if (percent === 0 && cap === 0) return "off: Pi compacts only when the window is nearly full, often with too little room left for a cached summary";
+		const m = (name: SessionKey) => (marked ? ownMark(name) : "");
+		if (percent === 0 && cap === 0) {
+			const mine = marked ? (["compactAtPercent", "compactAtTokens"] as const).filter((name) => own[name] !== undefined) : [];
+			const from = mine.length === 2 ? " (this session)" : mine.length === 1 ? ` (${mine[0]} this session's, ${mine[0] === "compactAtPercent" ? "compactAtTokens" : "compactAtPercent"} the default)` : "";
+			return `off${from}: Pi compacts only when the window is nearly full, often with too little room left for a cached summary`;
+		}
 		const at = model ? fullThreshold(model, percent, cap) : undefined;
-		if (!model || at === undefined) return `at ${percent}% of the window; the current model declares no window, so not here`;
+		if (!model || at === undefined) return `at ${percent}%${m("compactAtPercent")} of the window; the current model declares no window, so not here`;
 		const byCap = cap > 0 && at === cap;
 		const budget = summaryBudget(model, at);
 		const room = budget === undefined ? "" : `, leaving ${formatTokens(budget)} for the summary`;
 		const tight = budget !== undefined && budget < MIN_SUMMARY_TOKENS ? `, too little for a cached summary: pick a lower ${byCap ? "cap" : "percentage"}` : "";
-		const mark = byCap ? `at the ${formatTokens(cap)}-token cap` : `at ${percent}%: ${formatTokens(at)} of ${formatTokens(model.contextWindow)}`;
+		const mark = byCap ? `at the ${formatTokens(cap)}-token cap${m("compactAtTokens")}` : `at ${percent}%${m("compactAtPercent")}: ${formatTokens(at)} of ${formatTokens(model.contextWindow)}`;
 		return `${mark} on ${model.provider}/${model.id}${room}${tight}`;
 	};
-	const expiryNote = () => (inEffect().compactBeforeExpiry ? `on, from ${formatTokens(inEffect().minContextTokens)} tokens of context` : "off");
+	const expiryNote = (marked = false) => {
+		const { compactBeforeExpiry, minContextTokens } = inEffect();
+		const m = (name: SessionKey) => (marked ? ownMark(name) : "");
+		return compactBeforeExpiry ? `on${m("compactBeforeExpiry")}, from ${formatTokens(minContextTokens)} tokens of context${m("minContextTokens")}` : `off${m("compactBeforeExpiry")}`;
+	};
 	const keepWarmNote = (model: Model<Api> | undefined) => {
 		const minutes = warmMinutes(true);
 		if (minutes <= 0) return "off";
@@ -2276,14 +2321,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		return keepWarmLabel(value as number);
 	};
 	// The default as saved now: keep-warm is read afresh (a change in another window holds here too), the others as loaded.
-	const defaultOf = (name: SessionKey): number | boolean => {
-		if (name !== "keepWarmMinutes") return config[name];
-		try {
-			return loadConfig().keepWarmMinutes;
-		} catch {
-			return config.keepWarmMinutes;
-		}
-	};
+	const defaultOf = (name: SessionKey): number | boolean => defaultsNow()[name];
 	const ownKeys = (values: SessionSettings = own) => SESSION_KEYS.filter((name) => values[name] !== undefined);
 	// "keepWarmMinutes 4 h (default off), compactAtPercent 80% (default 90%)".
 	const describeOwn = (values: SessionSettings, withDefaults: boolean) =>
@@ -2291,7 +2329,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			.map((name) => `${name} ${valueLabel(name, values[name] as number | boolean)}${withDefaults ? ` (default ${valueLabel(name, defaultOf(name))})` : ""}`)
 			.join(", ");
 	// " (this session)" after what one of the session's own values decides.
-	const ownMark = (...names: SessionKey[]) => (names.some((name) => own[name] !== undefined) ? " (this session)" : "");
+	const ownMark = (name: SessionKey) => (own[name] !== undefined ? " (this session)" : "");
 
 	// A change of the session's own settings, shown where it was made and again on resume (never sent to the model).
 	pi.registerEntryRenderer<{ settings?: unknown }>(SESSION_SETTINGS_TYPE, (entry, _options, theme) => {
@@ -2503,6 +2541,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				else patch = { cacheRetention: value === "long" ? "long" : "short" };
 				try {
 					config = saveConfig(patch);
+					latest = config;
+					latestStamp = settingsStamp();
 				} catch (error) {
 					ctx.ui.notify(`pi-cache-keeper could not save the setting: ${error instanceof Error ? error.message : String(error)}`, "error");
 					return build(id);
@@ -2667,10 +2707,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					`pi-cache-keeper · ${model ? `${model.provider}/${model.id}` : "no model"}`,
 					`cache: ${cache}`,
 					`next compaction: ${next}`,
-					`when full${ownMark("compactAtPercent", "compactAtTokens")}: ${fullNote(model)}`,
+					`when full: ${fullNote(model, true)}`,
 					`keep warm${ownMark("keepWarmMinutes")}: ${keepWarmNote(model)}`,
 					...(stopped ? [`stopped: ${stopped}`] : []),
-					`before expiry${ownMark("compactBeforeExpiry", "minContextTokens")}: ${expiryNote()} · retention ${model?.api === BRIDGE_API ? "set by Claude Code" : (process.env.PI_CACHE_RETENTION ?? "short")}`,
+					`before expiry: ${expiryNote(true)} · retention ${model?.api === BRIDGE_API ? "set by Claude Code" : (process.env.PI_CACHE_RETENTION ?? "short")}`,
 					`model data: ${dataNote(ctx)}`,
 					`settings: ${ownKeys().length > 0 ? `this session's own: ${describeOwn(own, true)}; every other follows the defaults` : "the defaults (this session has none of its own)"} · /cache-keeper-settings`,
 					`log: ${TRACE_PATH_LABEL}`,

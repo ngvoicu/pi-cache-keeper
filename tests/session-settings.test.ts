@@ -28,6 +28,7 @@ const {
 	SESSION_SETTINGS_TYPE,
 	sessionSettingsOn,
 	settingsInEffect,
+	saveConfig,
 	withSessionValue,
 } = await import("../config.ts");
 
@@ -150,6 +151,10 @@ interface Window {
 	footer: () => string | undefined;
 	/** The log's warm records. */
 	warmLog: () => Any[];
+	/** When the extension started each compaction (Pi's compaction itself is not run). */
+	compactAt: number[];
+	/** The refreshes the extension has sent so far. */
+	refreshCount: () => number;
 }
 
 // Pi's real session runtime with this extension in its TUI mode, Claude Sonnet 4.6 on Anthropic's API with the 5-minute
@@ -190,8 +195,12 @@ async function inWindow(scenario: (w: Window) => Promise<void>, o: { persisted?:
 	const notes: string[] = [];
 	let shown: { component: Any; done: Promise<void> } | undefined;
 	let refreshes = 0;
+	const compactAt: number[] = [];
 	const bind = async (session: Any) => {
 		const runner = session.extensionRunner;
+		session.compact = async () => {
+			compactAt.push(Date.now());
+		};
 		const theme = { fg: (_tone: string, text: string) => text, bg: (_tone: string, text: string) => text, bold: (text: string) => text };
 		const uiContext = {
 			...runner.getUIContext(),
@@ -220,6 +229,8 @@ async function inWindow(scenario: (w: Window) => Promise<void>, o: { persisted?:
 	};
 	const window: Window = {
 		runtime,
+		compactAt,
+		refreshCount: () => refreshes,
 		manager: () => runtime.session.sessionManager,
 		answer: async () => {
 			const r = runner();
@@ -338,7 +349,7 @@ test("the menu opens on this session; values set there are saved in the session 
 			await (await w.menu()).close();
 			assert.equal(ownEntries(first).length, 1);
 			const status = await w.status();
-			assert.match(status, /\nwhen full \(this session\): at 80%: 800k of 1000k on anthropic\/claude-sonnet-4-6/);
+			assert.match(status, /\nwhen full: at 80% \(this session\): 800k of 1000k on anthropic\/claude-sonnet-4-6/);
 			assert.match(status, /\nkeep warm \(this session\): up to 4 h after Pi goes idle/);
 			assert.match(status, /\nbefore expiry: on, from 140k tokens of context · retention short\n/, "a key it didn't set: unmarked");
 			assert.equal(lineOf(status, "settings:"), OWN);
@@ -606,3 +617,150 @@ for (const turn of ["on", "off"] as const) {
 		}
 	});
 }
+
+// ------------------------------------------------------------------------------------------- after the review
+
+// The limit in effect is the one at the moment a refresh would leave. At 32 min 05 s idle, refresh 7 is being prepared
+// (its adapter has not built the payload yet) when the limit becomes 30 min: the session goes back to its 30-minute
+// default, or another window saves a 30-minute default. Nothing leaves past the limit, and warming ends with it.
+for (const change of ["back to the defaults", "the default, saved in another window"] as const) {
+	test(`a refresh being prepared when the time limit is shortened to 30 min (${change}) does not go out`, { skip }, async () => {
+		writeDefaults({ keepWarmMinutes: change === "the default, saved in another window" ? 120 : 30, compactBeforeExpiry: false });
+		const seen: Any = {};
+		const result = await inWindow(
+			async (w) => {
+				if (change !== "the default, saved in another window") {
+					const menu = await w.menu();
+					menu.set(KEEP_WARM, "2 h · this session");
+					await menu.close();
+				}
+				await w.answer();
+				const registry = w.runtime.session.extensionRunner.createContext().modelRegistry;
+				const stream = registry.streamSimple.bind(registry);
+				let release: () => void = () => {};
+				const held = new Promise<void>((resolve) => (release = resolve));
+				let pending = false;
+				let calls = 0;
+				registry.streamSimple = (...args: Any[]) => {
+					calls++;
+					if (calls !== 7) return stream(...args);
+					return {
+						result: async () => {
+							pending = true;
+							await held;
+							return stream(...args).result();
+						},
+					};
+				};
+				await w.ticks(1925);
+				assert.equal(pending, true, "refresh 7 is being prepared");
+				seen.before = w.refreshCount();
+				if (change === "back to the defaults") {
+					const menu = await w.menu();
+					menu.press("Back to the defaults");
+					await menu.close();
+				} else saveConfig({ keepWarmMinutes: 30 });
+				seen.status = lineOf(await w.status(), "keep warm");
+				release();
+				for (let i = 0; i < 8; i++) await flush();
+				seen.after = w.refreshCount();
+				seen.last = w.warmLog().at(-1);
+				await w.ticks(600);
+				seen.end = w.refreshCount();
+			},
+			{ persisted: true },
+		);
+		assert.deepEqual(result.thrown, []);
+		assert.equal(seen.before, 6);
+		assert.match(seen.status, /up to 30 min after Pi goes idle/, "/cache-keeper shows the 30-minute limit");
+		assert.equal(seen.after, 6, "refresh 7 did not go out");
+		assert.equal(seen.end, 6, "nor any later one");
+		assert.equal(seen.last?.stop, "limit");
+		assert.equal(seen.last?.reason, "the cache lasts to the end of the 30 min limit after Pi went idle");
+	});
+}
+
+// The defaults another window saved (here written to settings.json, as that window's menu does) hold at the next decision
+// of every session that has no value of its own for them: dropping the session's own value, or never having one.
+test("back to the defaults after another window turned compactBeforeExpiry off: no compaction before expiry", { skip }, async () => {
+	writeDefaults({ compactBeforeExpiry: true, minContextTokens: 100_000, keepWarmMinutes: 0 });
+	const seen: Any = {};
+	const result = await inWindow(
+		async (w) => {
+			let menu = await w.menu();
+			menu.set(EXPIRY, "on · this session");
+			await menu.close();
+			await w.answer();
+			const start = Date.now();
+			await w.ticks(100);
+			saveConfig({ compactBeforeExpiry: false });
+			menu = await w.menu();
+			menu.press("Back to the defaults");
+			assert.match(menu.text(), /\n {2}Compact before the cache expires +off · default\n/, "the menu shows the default as saved now");
+			await menu.close();
+			seen.status = lineOf(await w.status(), "before expiry");
+			await w.ticks(182);
+			seen.compactions = w.compactAt.map((at) => (at - start) / 1000);
+		},
+		{ persisted: true },
+	);
+	assert.deepEqual(result.thrown, []);
+	assert.equal(seen.status, "before expiry: off · retention short");
+	assert.deepEqual(seen.compactions, [], "nothing compacted at 280 s");
+});
+
+for (const kind of ["expiry", "full"] as const) {
+	test(`a default saved in another window after this one started holds here: ${kind === "expiry" ? "compactBeforeExpiry turned off" : "the compactAtTokens cap turned off"}`, { skip }, async () => {
+		writeDefaults({ keepWarmMinutes: 0, compactAtPercent: 0, compactAtTokens: kind === "full" ? 100_000 : 0, compactBeforeExpiry: kind === "expiry", minContextTokens: 100_000 });
+		const seen: Any = {};
+		const result = await inWindow(
+			async (w) => {
+				if (kind === "expiry") {
+					await w.answer();
+					await w.ticks(100);
+				}
+				saveConfig(kind === "expiry" ? { compactBeforeExpiry: false } : { compactAtTokens: 0 });
+				seen.status = lineOf(await w.status(), kind === "expiry" ? "before expiry" : "when full");
+				if (kind === "full") await w.answer();
+				else await w.ticks(182);
+				seen.compactions = w.compactAt.length;
+			},
+			{ persisted: true },
+		);
+		assert.deepEqual(result.thrown, []);
+		assert.equal(seen.status, kind === "expiry" ? "before expiry: off · retention short" : "when full: off: Pi compacts only when the window is nearly full, often with too little room left for a cached summary");
+		assert.equal(seen.compactions, 0);
+	});
+}
+
+test("/cache-keeper marks each value by where it comes from", { skip }, async () => {
+	writeDefaults({ keepWarmMinutes: 0, compactAtPercent: 90, compactAtTokens: 0, compactBeforeExpiry: false, minContextTokens: 140_000 });
+	const result = await inWindow(
+		async (w) => {
+			await w.answer();
+			let menu = await w.menu();
+			menu.set("Or once it holds", "off · this session");
+			menu.set("Before expiry, only from", "200k · this session");
+			await menu.close();
+			let status = await w.status();
+			// The session's own cap (off) and minimum (200k) decide nothing shown: the 90% and "off" are the defaults'.
+			assert.equal(lineOf(status, "when full"), "when full: at 90%: 900k of 1000k on anthropic/claude-sonnet-4-6, leaving 96k for the summary");
+			assert.equal(lineOf(status, "before expiry"), "before expiry: off · retention short");
+			assert.equal(lineOf(status, "settings:"), "settings: this session's own: compactAtTokens off (default off), minContextTokens 200k (default 140k); every other follows the defaults · /cache-keeper-settings");
+			menu = await w.menu();
+			menu.set(EXPIRY, "on · this session");
+			menu.set("Or once it holds", "400k tokens · this session");
+			await menu.close();
+			status = await w.status();
+			assert.equal(lineOf(status, "when full"), "when full: at the 400k-token cap (this session) on anthropic/claude-sonnet-4-6, leaving 128k for the summary");
+			assert.equal(lineOf(status, "before expiry"), "before expiry: on (this session), from 200k tokens of context (this session) · retention short");
+			menu = await w.menu();
+			menu.set("Compact when the context is", "off · this session");
+			menu.set("Or once it holds", "off · this session");
+			await menu.close();
+			assert.equal(lineOf(await w.status(), "when full"), "when full: off (this session): Pi compacts only when the window is nearly full, often with too little room left for a cached summary");
+		},
+		{ persisted: true },
+	);
+	assert.deepEqual(result.thrown, []);
+});
