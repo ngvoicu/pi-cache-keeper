@@ -2,17 +2,25 @@
 
 The design of 0.10.0, not built yet. It is written against pi-cache-keeper 0.9.0 (the model data is providers.dev's safe values) and Pi 1.6.0. It says what the software is; the build chooses nothing about that. Where the build finds this document wrong, the document is corrected.
 
-The ask: when a session is compacted and its prompt cache can't be read, the summary request pays the full input price of the session's own model for the whole conversation. On a large session with an expensive model that is dollars per compaction, or subscription quota. The user picks another model (a cheaper one, or one on a login with spare quota) to write that summary. The session goes on with its own model.
+The ask: when a session is compacted and its prompt cache can't be read, the summary request pays the full input price of the session's own model for the whole conversation. On a large session with an expensive model that is dollars per compaction, or subscription quota. The user picks another model (a cheaper one, or one on a login with spare quota) to write that summary. The same picked model also writes it when the session's own model refuses the summary, and when the conversation no longer fits the session's model. The session goes on with its own model.
 
 This is a small first version: one setting, one new module, one branch in the compaction handler.
 
 ## 0. The rule
 
-**Where Pi's own compaction would run today, and a cold compaction model is set and can take the request, that model writes the summary, with Pi's own summarizer. Where it can't, or its request fails, Pi's own compaction runs exactly as today.**
+**The cached path writes the summary when it can. When it can't, the picked model writes it, with Pi's own summarizer. When the picked model can't either, Pi's own compaction runs exactly as today.**
+
+That one rule holds the three triggers, with one picked model for all of them:
+
+1. **The cache is cold.**
+2. **The session's own model refuses the summary,** for quota or a rate limit.
+3. **The conversation to summarize doesn't fit the session's model** (after a switch to a smaller window, say) **and fits the picked one.**
+
+They need no code of their own: each is a case in which the handler already falls back to Pi's own compaction today (section 2). The setting keeps the name of the first and most common of them, the cold compaction model.
 
 Two things never change:
 
-- **A cache that can be read.** The cached path writes the summary from the warm cache, on the session's model, as in 0.9.0.
+- **A warm cache and a session model that can do it.** The cached path writes the summary from the cache, on the session's model, as in 0.9.0.
 - **Compacting before expiry.** It runs only while the cache is warm, and is cancelled when the cached path can't write the summary. The cold model never writes it.
 
 The session's model and thinking level are never touched. Nothing is switched and switched back: the summary request goes to the picked model directly, beside the session.
@@ -60,7 +68,7 @@ Two compatibility facts, both already true of every key added so far:
 | Value, editing the defaults | `off` or `google/gemini-2.5-flash` |
 | Enter | opens a list (the row's `submenu`), instead of stepping through values: there can be a hundred models |
 
-The description under the row says what it does in two sentences, and carries the privacy sentence of section 6.
+The description under the row names the three cases in which the model writes the summary (the cache is cold, the session's model refuses it, the conversation doesn't fit the session's model), says that Pi's own compaction follows when it can't, and carries the privacy sentence of section 6.
 
 **The list** holds, in this order:
 
@@ -116,14 +124,14 @@ It matters most there, because compacting before expiry is what normally keeps a
 
 Two things follow from those settings being off, and the README says both:
 
-- **With compacting when full off, Pi's threshold compaction rarely fits the cached path, warm or cold.** With Pi's default settings it starts when under `reserveTokens` (16,384) of the window are left, and a cached summary needs 16k of room beside the whole conversation. So the handler falls back with "only … tokens of the context window are left for the summary", and under the rule of section 2 the picked model writes those summaries too, in the middle of a run with a warm cache. Under the narrower reading of "cold" (section 9, question 1) they would stay with the session's model at full price.
+- **With compacting when full off, Pi's threshold compaction rarely fits the cached path, warm or cold.** With Pi's default settings it starts when under `reserveTokens` (16,384) of the window are left, and a cached summary needs 16k of room beside the whole conversation. So the handler falls back with "only … tokens of the context window are left for the summary", and that is trigger 3: the picked model writes those summaries too, in the middle of a run with a warm cache.
 - **With the model data off, fewer models have a known cache lifetime,** so more of them fall under "An unknown lifetime" below (section 9, question 2).
 
 ## 2. When it applies
 
 ### The compactions
 
-| Trigger | Cold model |
+| What started the compaction | Picked model |
 |---|---|
 | `/compact` (`manual`) | yes |
 | Pi's threshold compaction (`threshold`) | yes |
@@ -131,37 +139,31 @@ Two things follow from those settings being off, and the README says both:
 | Compacting when full (`full`) | yes |
 | Compacting before expiry (`expiry`) | never |
 
-### How "cold" is decided
+### The three triggers, at one point in the code
 
-Nothing new is measured. **The cache is cold for a summary exactly where the handler falls back to Pi's own compaction today**: the single point `fallBack` in `session_before_compact`, for every trigger but `expiry`. Those are the cases where the summary request would read nothing from the cache and Pi's compaction would pay the session model's full price:
+Nothing new is measured and no error is interpreted. **The picked model is asked exactly where the handler falls back to Pi's own compaction today**: the single point `fallBack` in `session_before_compact`, for every kind of compaction but `expiry` (the table above). Each of the three triggers is a set of the reasons the handler already words:
 
-| Group | The reasons, as the handler already words them |
-|---|---|
-| No live cache | no request since the session started or compacted, or since the model or branch changed · the model changed since the last request · the last request did not use the prompt cache · the prompt cache has expired · the prompt cache's expiry is unknown (in a keep-warm period: the route changed, or no lifetime can be read) |
-| A cache the summary can't be read from | the last request overflowed the context window · the request's API is not supported · the conversation changed since the last request · the request no longer repeats the last one (prefix mismatch) · under 16k tokens of the window are left for a cached summary · no kept message has text to mark where the summary ends |
-| The cached request was sent and gave no summary | it failed · it hit the output limit · the model called a tool · it returned no text |
+| Trigger | The handler's reasons that are this trigger | What it means |
+|---|---|---|
+| **1. The cache is cold** | no request since the session started or compacted, or since the model or branch changed · the model changed since the last request · the last request did not use the prompt cache · the prompt cache has expired · the prompt cache's expiry is unknown (in a keep-warm period: the route changed, or no lifetime can be read) | nothing of the summary request would be read from a cache |
+| **2. The session's model refuses the summary** | the summary request failed: `<the provider's error>` (thrown, or an error answer) | the cached path asked the session's model and got no summary back |
+| **3. The conversation doesn't fit the session's model** | the last request overflowed the context window · only `<n>` tokens of the context window are left for the summary (it needs 16k) · and, after a switch to a smaller model, the reasons of trigger 1, since the new model has no request and no cache yet | the conversation and its summary don't fit the session model's window; the picked model's own window decides whether it can (the fit rule of section 3) |
 
-The second and third groups include caches that are still warm. They are in, because the cost is the same as on a cold cache: Pi's compaction reads nothing from it either, and after any compaction the next request writes the context again. The card says which reason it was. (This is the first question for the owner in section 9.)
+**Trigger 1.** The expiry is read where it always is: `look()`, the one reading of the cache (`cache-clock.ts`), through `checkCachedPath`. No second clock.
 
-The expiry itself is read where it always is: `look()`, the one reading of the cache (`cache-clock.ts`), through `checkCachedPath`. No second clock.
+**Trigger 2.** The only summary request the extension sends to the session's model is the cached path's, so that is where a refusal shows. The error is not read for what kind it is: a used-up quota, a rate limit, an overloaded provider and a dropped connection all hand the summary to the picked model, and no list of providers' error messages is kept. The card shows the provider's own words. On a cold cache the session's model is not asked at all. When the picked model can't either, Pi's own compaction asks the session's model and fails as it would have.
+
+**Trigger 3.** A model switch forgets the captured request, so the cached path has none; where the model was not switched and the context outgrew it, the reason is the overflow or the missing room. This is the one trigger where the picked model does more than save money: Pi's own compaction, on a model the text doesn't fit, has no request it can send whole, and when it fails the session stays too large to continue.
+
+**The rest of the fallbacks go the same way.** The handler also falls back, on a warm cache, where the session's model could still write the summary through Pi's own compaction at full price: the request's API is not supported · the conversation changed since the last request · the request no longer repeats the last one (prefix mismatch) · no kept message has text to mark where the summary ends · the cached summary hit the output limit, was a tool call, or was empty. These are in, because one rule is simpler than a list of exceptions and the cost is the same: nothing is read from the cache either way. Taking them out later is a mark on those reasons and nothing else. (Section 9, question 1.)
 
 ### An unknown lifetime
 
-A model with no cache lifetime at all (no countdown in the footer) is **not counted as cold**. There `look()` gives neither an expiry nor a reason, the cached path is tried as today, and what the request read shows on the card. The cold model writes the summary only if that path falls back for one of the reasons above.
+A model with no cache lifetime at all (no countdown in the footer) is **not counted as cold**. There `look()` gives neither an expiry nor a reason, the cached path is tried as today, and what the request read shows on the card. The picked model writes the summary only if that path falls back for one of the reasons above.
 
 Why: nothing the extension knows says such a cache is gone, and while it may be alive the rule "a warm cache changes nothing" holds. The price of this choice is the case where it was in fact gone: the cached request then pays the session model's full price, as in 0.9.0. With the model data off this covers more models: every one whose lifetime neither Pi's catalog nor its own answers give. (The second question for the owner in section 9.)
 
 A model whose answers report no cache use at all is different: the reason is "the last request did not use the prompt cache", which is cold.
-
-### Two cases the same rule already covers
-
-Both were weighed as triggers of their own. Neither needs one: each already ends at the same fallback, so both are in 0.10.0 at no extra code, each with a test.
-
-**The session's own model refuses the summary** (its quota is used up, or it is rate-limited). The only summary request the extension sends to the session's model is the cached path's. When that request fails, for any reason, the handler falls back with "the summary request failed: …", and the picked model writes the summary. The error is not read for what kind it is: no list of providers' quota and rate-limit messages is kept. On a cold cache the session's model is not asked at all. What stays as today: when the picked model can't either, Pi's own compaction asks the session's model, and fails as it would have.
-
-**The conversation doesn't fit the session's model**, for example after a switch to a model with a smaller window. A model switch forgets the captured request, so the cached path has none ("no request since … the model or branch changed"); where the model was not switched and the context outgrew it, the reason is the overflow or the missing room. Either way the handler falls back, and the picked model writes the summary if its own window holds the text (the fit rule of section 3). This is the one case where the picked model does more than save money: Pi's own compaction, on a model the text doesn't fit, has no request it can send whole, and when it fails the session stays too large to continue.
-
-Later, not in 0.10.0: telling a quota refusal from other failures (to say so on the card, or to skip Pi's own compaction when it is bound to fail the same way), and a hint to pick a cold compaction model when Pi's own compaction fails for size and none is set.
 
 ## 3. When it can't
 
@@ -289,14 +291,20 @@ The README is part of 0.10.0: the release is not done without it. It gets five t
 
 **1. A bullet in the opening "What it does:" list**, after "Compacts just before the cache expires", with its link:
 
-> - **Compacts a cold cache with a model you pick.** When the cache can't be read, the summary would cost your session model's full input price; a cheaper model, or one on a login with spare quota, writes it instead, and the session goes on with its own model (off until you pick one). [More](#compacting-a-cold-cache-with-another-model).
+> - **Compacts a cold cache with a model you pick.** When the cache can't be read, the summary would cost your session model's full input price; a cheaper model, or one on a login with spare quota, writes it instead. The same model steps in when your session's model refuses the summary or the conversation no longer fits it, and the session goes on with its own model (off until you pick one). [More](#compacting-a-cold-cache-with-another-model).
 
 That list is being brought up to date for 0.8.0 and 0.9.0 by other work. The bullet is added to the list as that work leaves it, in its wording and order, not to the list as it stands in 0.9.0.
 
 **2. Its own section, "Compacting a cold cache with another model"**, after "Compacting from the cache". Four parts, in this order:
 
-- **What it does:** the rule of section 0, that it needs no other setting of the extension switched on (section 1, "With every other setting off": Pi's own threshold, overflow and `/compact` compactions use the picked model, and what follows with compacting when full off), and what the summary is (section 4): Pi's own summary, written by the picked model, with no thinking or its lowest level; the session's model and thinking level untouched. One comparison with the cached path: the cold model sees what Pi's compaction sees, tool results cut to 2,000 characters, not the whole conversation.
-- **When it applies:** the table of triggers and the three groups of reasons of section 2, the two cases the rule covers (a summary the session's model refuses, a conversation too large for it), and the unknown lifetime.
+- **What it does:** the rule of section 0 with its three triggers, that it needs no other setting of the extension switched on (section 1, "With every other setting off": Pi's own threshold, overflow and `/compact` compactions use the picked model, and what follows with compacting when full off), and what the summary is (section 4): Pi's own summary, written by the picked model, with no thinking or its lowest level; the session's model and thinking level untouched. One comparison with the cached path: the cold model sees what Pi's compaction sees, tool results cut to 2,000 characters, not the whole conversation.
+- **When it applies:** one line for each trigger, as worded below, then the table of compactions of section 2, the rest of the fallbacks, and the unknown lifetime.
+
+> - **The cache is cold.** It has expired, was never written, or belongs to the model you switched away from. The picked model writes the summary, at its own price instead of your session model's full input price.
+> - **Your session's model refuses the summary.** Its quota is used up, it is rate-limited, or the request for the summary fails for another reason. The picked model writes it instead, so the session is compacted all the same.
+> - **The conversation no longer fits your session's model.** You switched to a model with a smaller window, or the context outgrew the window. If the picked model's window holds the text, it writes the summary.
+>
+> While the cache is warm and your session's model can write the summary from it, nothing changes. And whenever the picked model can't write it, Pi's own compaction runs as before.
 - **When it falls back:** the cases of section 3, each ending in Pi's own compaction, the abort, and that nothing is lost.
 - **The privacy note,** as worded here:
 
@@ -308,7 +316,7 @@ The menu row's description carries the note's first sentence.
 
 | Setting | Menu | Default | Per session | What it does |
 |---|---|---|---|---|
-| `coldCompactionModel` | Compact a cold cache with | `""` | yes | when the cache can't be read, this model (`"provider/modelId"`) writes the summary instead of the session's own, also with every other setting here off; `""` turns it off |
+| `coldCompactionModel` | Compact a cold cache with | `""` | yes | this model (`"provider/modelId"`) writes the summary when the cache is cold, when the session's model refuses it, or when the conversation doesn't fit the session's model, also with every other setting here off; `""` turns it off |
 
 The paragraph above the table that names the session's own values gains `coldCompactionModel`.
 
@@ -316,7 +324,7 @@ The paragraph above the table that names the session's own values gains `coldCom
 
 **5. "Limitations":** the items of section 9.
 
-**The CHANGELOG entry**, under `## [0.10.0]`, `### Added`: one item, "A cold compaction model", saying the rule, the setting and its two layers, when it falls back, where the conversation goes, and that going back to 0.9.0 needs the key removed from `settings.json` (section 1).
+**The CHANGELOG entry**, under `## [0.10.0]`, `### Added`: one item, "A cold compaction model", saying the rule and its three triggers, the setting and its two layers, when it falls back, where the conversation goes, and that going back to 0.9.0 needs the key removed from `settings.json` (section 1).
 
 ## 7. Tests
 
@@ -340,7 +348,7 @@ Fake models and a fake registry everywhere; no test sends a real request (the ha
 
 9. Off: on a cold cache the handler returns nothing and the registry is never called.
 10. Set, warm cache: the cached path writes the summary; the cold model gets no request.
-11. Set, cold cache, for each of `manual`, `threshold`, `overflow` and `full`: the handler returns a compaction whose summary is the fake model's text, whose `firstKeptEntryId` and `tokensBefore` are the preparation's, whose `usage` is the fake's, and whose file lists include the previous compaction's.
+11. **Trigger 1, the cache is cold:** an expired cache, a session with no request yet, and a model changed since the last request, for each of `manual`, `threshold`, `overflow` and `full`: the handler returns a compaction whose summary is the fake model's text, whose `firstKeptEntryId` and `tokensBefore` are the preparation's, whose `usage` is the fake's, and whose file lists include the previous compaction's.
 12. The request it sent: to the picked model; Pi's summarizer system prompt; the conversation inside `<conversation>`; no `maxTokens` above the model's limit; no reasoning for a model that can turn it off, its lowest level for one that can't; no cache retention.
 13. A previous summary is sent as `<previous-summary>`; a split turn sends two requests and sums their usage; `/compact` instructions are in the prompt.
 14. `expiry`: a cache that went cold at the gate cancels, and the cold model gets no request.
@@ -350,8 +358,8 @@ Fake models and a fake registry everywhere; no test sends a real request (the ha
 18. After a cold summary: `pi.setModel` and `pi.setThinkingLevel` were not called, `ctx.model` is the same object, and the keeper's captured request was not replaced by the cold one.
 19. A model with no lifetime whose last answer used the cache: the cached path is tried, not the cold model.
 20. Every other setting off (`compactAtPercent: 0`, `compactAtTokens: 0`, `compactBeforeExpiry: false`, `keepWarmMinutes: 0`, `modelData: false`): `manual`, `threshold` and `overflow` on a cold cache are written by the cold model.
-21. The cached path's request is refused with a rate-limit error on a warm cache: the cold model writes the summary, and the record's `reason` is the refusal.
-22. After a switch to a session model with a smaller window than the text to summarize: the cold model, whose window holds it, writes the summary.
+21. **Trigger 2, the session's model refuses the summary,** on a warm cache: (a) the cached path's request throws a rate-limit error; (b) it comes back as an error answer saying the quota is used up. In both the cold model writes the summary and the record's `reason` holds the provider's words. (c) The same with a cold model that can't take it: nothing is returned, so Pi's own compaction runs.
+22. **Trigger 3, the conversation doesn't fit the session's model:** (a) after a switch to a session model with a smaller window than the text to summarize; (b) the last request overflowed; (c) under 16k tokens of the window are left for a cached summary, on a warm cache. In each the cold model, whose window holds the text, writes the summary. (d) The same with a cold model whose window doesn't hold it either: nothing is returned, no request is sent, and the record says what it needs and what its window is.
 
 **The words** (`tests/trace.test.ts`):
 
@@ -432,8 +440,10 @@ export function orderColdChoices(choices: ColdChoice[]): ColdChoice[];
 - One attempt: a cold request that fails is not retried, Pi's own compaction follows.
 - The cold model sees what Pi's compaction sees, tool results cut to 2,000 characters, not the whole conversation the cached path reads from the cache.
 - The footer says nothing about the setting.
+- A refusal is not told from any other failed summary request: the card shows the provider's words, not "quota".
+- No hint to pick a cold compaction model when Pi's own compaction fails for size and none is set.
 
-**Two questions only the owner can answer.** The design takes the first answer of each; the other is a small change.
+**Two questions only the owner can answer.** The three triggers are decided. The design takes the first answer of each question below; the other is a small change.
 
-1. **Is a warm cache the summary can't be read from "cold"?** The design says yes: the cold model writes every summary Pi's own compaction would have written, also after an overflow, a prefix mismatch or on an unsupported API while the cache is warm, because the cost is the same full price. The narrower reading, "only an expired or never-written cache", leaves those to Pi's compaction on the session's model. What hangs on it: with compacting when full off, Pi's threshold and overflow compactions mostly happen in a run, on a warm cache the summary can't be read from (section 1), so under the narrower reading the picked model would write little more than `/compact` and the first compaction after a break; and a summary the session's model refuses would then need a trigger of its own, which is later work.
+1. **Does the picked model also take the rest of the fallbacks?** Beyond the three triggers, the handler falls back on a warm cache where the session's model could still write the summary at full price through Pi's own compaction: a prefix mismatch, an unsupported API, a conversation that changed, a cached summary that came back cut, as a tool call or empty. The design says yes, as one rule: the picked model writes every summary the cached path doesn't. Saying no leaves those to Pi's compaction on the session's model, and is a mark on those reasons.
 2. **Is a cache of unknown lifetime "cold"?** The design says no: the cached path is tried as today. Saying yes sends every compaction of such a model to the cold model, which is cheaper when the cache was in fact gone and gives up a cached, whole-conversation summary when it was not. With the model data off, more models are of this kind.
