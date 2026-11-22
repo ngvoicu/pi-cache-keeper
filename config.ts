@@ -68,22 +68,112 @@ export function loadConfig(): CacheKeeperConfig {
 		keepWarmMinutes = DEFAULTS.keepWarmMinutes,
 		modelData = DEFAULTS.modelData,
 	} = raw;
-	if (cacheRetention !== "short" && cacheRetention !== "long") throw new Error(`${key}.cacheRetention in ${path} must be "short" or "long"`);
-	if (typeof compactBeforeExpiry !== "boolean") throw new Error(`${key}.compactBeforeExpiry in ${path} must be true or false`);
-	if (typeof minContextTokens !== "number" || !Number.isInteger(minContextTokens) || minContextTokens < 0) {
-		throw new Error(`${key}.minContextTokens in ${path} must be a whole number of tokens`);
+	const values = { cacheRetention, compactBeforeExpiry, minContextTokens, compactAtPercent, compactAtTokens, keepWarmMinutes, modelData };
+	for (const name of Object.keys(DEFAULTS) as (keyof CacheKeeperConfig)[]) {
+		const problem = valueProblem(name, values[name]);
+		if (problem) throw new Error(`${key}.${name} in ${path} ${problem}`);
 	}
-	if (typeof compactAtPercent !== "number" || !Number.isInteger(compactAtPercent) || compactAtPercent < 0 || compactAtPercent > 99) {
-		throw new Error(`${key}.compactAtPercent in ${path} must be a whole percentage from 1 to 99, or 0 for off`);
+	return values as CacheKeeperConfig;
+}
+
+const wholeNumber = (value: unknown, max = Infinity): boolean => typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= max;
+
+/** What is wrong with a value of a setting ("must be …"), or undefined when it is valid. */
+function valueProblem(name: keyof CacheKeeperConfig, value: unknown): string | undefined {
+	switch (name) {
+		case "cacheRetention":
+			return value === "short" || value === "long" ? undefined : 'must be "short" or "long"';
+		case "compactBeforeExpiry":
+		case "modelData":
+			return typeof value === "boolean" ? undefined : "must be true or false";
+		case "minContextTokens":
+			return wholeNumber(value) ? undefined : "must be a whole number of tokens";
+		case "compactAtPercent":
+			return wholeNumber(value, 99) ? undefined : "must be a whole percentage from 1 to 99, or 0 for off";
+		case "compactAtTokens":
+			return wholeNumber(value) ? undefined : "must be a whole number of tokens, or 0 for off";
+		case "keepWarmMinutes":
+			return wholeNumber(value, 1440) ? undefined : "must be a whole number of minutes from 0 (off) to 1440";
 	}
-	if (typeof compactAtTokens !== "number" || !Number.isInteger(compactAtTokens) || compactAtTokens < 0) {
-		throw new Error(`${key}.compactAtTokens in ${path} must be a whole number of tokens, or 0 for off`);
+}
+
+/**
+ * The settings a session can set for itself, over the defaults: its own value wins for each key it set, every other key
+ * follows the defaults. cacheRetention (the process-wide PI_CACHE_RETENTION) and modelData (Pi's models.json) are the
+ * same for every session.
+ */
+export const SESSION_KEYS = ["compactAtPercent", "compactAtTokens", "compactBeforeExpiry", "minContextTokens", "keepWarmMinutes"] as const;
+export type SessionKey = (typeof SESSION_KEYS)[number];
+export type SessionSettings = Partial<Pick<CacheKeeperConfig, SessionKey>>;
+/** The settings that stay the same for every session. */
+export const GLOBAL_ONLY_KEYS = ["cacheRetention", "modelData"] as const;
+const isSessionKey = (name: string): name is SessionKey => (SESSION_KEYS as readonly string[]).includes(name);
+
+/**
+ * The custom entry (Pi's `appendEntry`, never sent to the model) that holds a session's own settings: `{ settings }`,
+ * the whole set of the session's own values. The latest one on the current branch decides; `{ settings: {} }` is "back
+ * to the defaults".
+ */
+export const SESSION_SETTINGS_TYPE = "cache-keeper-settings";
+
+/**
+ * The session's own values from one entry's data: only keys a session may set, with valid values. Anything else (a
+ * global-only key, an unknown key, a bad value: a hand-edited file or another version) is left out and named.
+ */
+export function readSessionSettings(data: unknown): { settings: SessionSettings; ignored: string[] } {
+	const raw = isPlainObject(data) && isPlainObject(data.settings) ? data.settings : {};
+	const settings: Record<string, unknown> = {};
+	const ignored: string[] = [];
+	for (const [name, value] of Object.entries(raw)) {
+		if (isSessionKey(name) && valueProblem(name, value) === undefined) settings[name] = value;
+		else ignored.push(name);
 	}
-	if (typeof keepWarmMinutes !== "number" || !Number.isInteger(keepWarmMinutes) || keepWarmMinutes < 0 || keepWarmMinutes > 1440) {
-		throw new Error(`${key}.keepWarmMinutes in ${path} must be a whole number of minutes from 0 (off) to 1440`);
+	return { settings: settings as SessionSettings, ignored };
+}
+
+interface BranchEntry {
+	type: string;
+	customType?: string;
+	data?: unknown;
+}
+
+/** The session's own values on a branch (root to leaf): those of its latest settings entry, none without one. */
+export function sessionSettingsOn(branch: readonly BranchEntry[]): SessionSettings {
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const entry = branch[i];
+		if (entry?.type === "custom" && entry.customType === SESSION_SETTINGS_TYPE) return readSessionSettings(entry.data).settings;
 	}
-	if (typeof modelData !== "boolean") throw new Error(`${key}.modelData in ${path} must be true or false`);
-	return { cacheRetention, compactBeforeExpiry, minContextTokens, compactAtPercent, compactAtTokens, keepWarmMinutes, modelData };
+	return {};
+}
+
+/** The settings in effect: the session's own value for each key it set, the defaults for every other. */
+export function settingsInEffect(defaults: CacheKeeperConfig, own: SessionSettings): CacheKeeperConfig {
+	const merged = { ...defaults };
+	for (const name of SESSION_KEYS) if (own[name] !== undefined) (merged as Record<string, unknown>)[name] = own[name];
+	return merged;
+}
+
+/**
+ * The session's own values with one key set (a value) or dropped (undefined), checked: a global-only or unknown key, or
+ * a bad value, throws, and nothing changes.
+ */
+export function withSessionValue(own: SessionSettings, name: string, value: unknown): SessionSettings {
+	if ((GLOBAL_ONLY_KEYS as readonly string[]).includes(name)) throw new Error(`${name} is the same for every session: change it in the defaults`);
+	if (!isSessionKey(name)) throw new Error(`${name} is not a setting a session can set`);
+	const next: SessionSettings = { ...own };
+	if (value === undefined) {
+		delete next[name];
+		return next;
+	}
+	const problem = valueProblem(name, value);
+	if (problem) throw new Error(`${name} ${problem}`);
+	(next as Record<string, unknown>)[name] = value;
+	return next;
+}
+
+/** Whether two sets of a session's own values are the same. */
+export function sameSessionSettings(a: SessionSettings, b: SessionSettings): boolean {
+	return SESSION_KEYS.every((name) => a[name] === b[name]);
 }
 
 /**

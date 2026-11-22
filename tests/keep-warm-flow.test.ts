@@ -956,7 +956,7 @@ test("R6: what the settings and /cache-keeper say", async (t) => {
 	fresh();
 	const h = harness({ lifetime: 300, cost: WITH_WRITE });
 	h.emit("agent_settled");
-	assert.match(await h.command("cache-keeper-settings"), /\nkeepWarmMinutes: 120 \(up to 2 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; so far \$0 spent, a miss costs \$2\.07\)\n/);
+	assert.match(await h.command("cache-keeper-settings"), /\nkeepWarmMinutes: 120 \[default\] \(up to 2 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; so far \$0 spent, a miss costs \$2\.07\)\n/);
 	assert.match(await h.command("cache-keeper"), /\nkeep warm: up to 2 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; so far \$0 spent/);
 	fresh({ keepWarmMinutes: 0 });
 	const off = harness({ lifetime: 300, cost: WITH_WRITE });

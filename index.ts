@@ -40,11 +40,20 @@ import {
 	loadConfig,
 	MIN_CONTEXT_CHOICES,
 	MIN_SUMMARY_TOKENS,
+	readSessionSettings,
+	sameSessionSettings,
 	saveConfig,
+	SESSION_KEYS,
+	SESSION_SETTINGS_TYPE,
+	sessionSettingsOn,
 	SETTINGS_KEY,
+	settingsInEffect,
 	settingsKeyInUse,
 	summaryBudget,
+	withSessionValue,
 	type CacheKeeperConfig,
+	type SessionKey,
+	type SessionSettings,
 } from "./config.ts";
 import {
 	appendTrace,
@@ -385,7 +394,11 @@ const hhmm = (at: number) => new Date(at).toTimeString().slice(0, 5);
 export default function cacheKeeper(pi: ExtensionAPI) {
 	// The /cache-keeper-stop record in place when the process first loaded the extension stops nothing (stop-record.ts).
 	rememberLoad();
+	// The defaults (cacheKeeper in the global settings), and this session's own values over them (the latest settings entry
+	// on the current branch, read at session_start and after /tree; the menu changes it and saves it when it closes).
 	let config = loadConfig();
+	let own: SessionSettings = {};
+	const inEffect = (): CacheKeeperConfig => settingsInEffect(config, own);
 
 	let pendingTranscript: AgentMessage[] | undefined;
 	let captured: CapturedRequest | undefined;
@@ -412,15 +425,36 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const now = Date.now();
 		if (!fresh && keepWarmRead?.at === now) return keepWarmRead.value;
 		let value: { minutes: number } | undefined;
-		try {
-			value = { minutes: loadConfig().keepWarmMinutes };
-		} catch {
-			value = undefined;
+		// This session's own value wins; without one, the defaults as saved now.
+		if (own.keepWarmMinutes !== undefined) value = { minutes: own.keepWarmMinutes };
+		else {
+			try {
+				value = { minutes: loadConfig().keepWarmMinutes };
+			} catch {
+				value = undefined;
+			}
 		}
 		keepWarmRead = { at: now, value };
 		return value;
 	};
 	const warmMinutes = (fresh = false) => keepWarmSetting(fresh)?.minutes ?? 0;
+	// This session's own values change (read from the branch, or set in the menu): keep-warm is read again at once, and
+	// compacting when full may try again, as after a change of the defaults.
+	const setOwn = (next: SessionSettings) => {
+		const full = own.compactAtPercent !== next.compactAtPercent || own.compactAtTokens !== next.compactAtTokens;
+		own = next;
+		keepWarmRead = undefined;
+		if (full) {
+			fullStuck = false;
+			lastFullSkip = undefined;
+		}
+	};
+	// The values saved on the current branch: what the menu compares with when it closes.
+	let ownSaved: SessionSettings = {};
+	const readOwn = (ctx: ExtensionContext) => {
+		ownSaved = sessionSettingsOn(ctx.sessionManager.getBranch());
+		setOwn(ownSaved);
+	};
 	// The /cache-keeper-stop record, read as the settings are: once per millisecond, `fresh` reads again.
 	let stopRead: { at: number; value: StopRead } | undefined;
 	const stopRecord = (fresh = false): StopRead => {
@@ -1136,7 +1170,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		traced: Set<string>,
 		timer: TimerContext = {},
 	): "compacting" | "postponed" | "skipped" => {
-		if (!config.compactBeforeExpiry) return "skipped";
+		if (!inEffect().compactBeforeExpiry) return "skipped";
 		const secondsLeft = Math.ceil(remainingMs / 1000);
 		const contextTokens = ctx.getContextUsage()?.tokens ?? undefined;
 		const skip = (reason: string, outcome: "postponed" | "skipped" = "skipped") => {
@@ -1153,8 +1187,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (!compactionOn) return skip("automatic compaction is off in Pi's settings");
 		if (!ctx.isIdle() || ctx.hasPendingMessages()) return skip("Pi is busy or has queued messages", "postponed");
 		if (contextTokens === undefined) return skip("the context size is unknown");
-		if (contextTokens < config.minContextTokens) {
-			return skip(`the context holds ${formatTokens(contextTokens)} tokens, under minContextTokens (${formatTokens(config.minContextTokens)})`);
+		const { minContextTokens } = inEffect();
+		if (contextTokens < minContextTokens) {
+			return skip(`the context holds ${formatTokens(contextTokens)} tokens, under minContextTokens (${formatTokens(minContextTokens)})`);
 		}
 		const check = checkCachedPath(ctx, ctx.sessionManager.getBranch(), ctx.model);
 		if ("reason" in check) return skip(check.reason);
@@ -1186,15 +1221,16 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		// cut off before its request is sent. There, Pi's own between-turn check (compaction.reserveTokens) starts
 		// compaction during the run, and session_before_compact still writes that summary from the cache.
 		if (!ctx.hasUI) return false;
-		const threshold = ctx.model ? fullThreshold(ctx.model, config.compactAtPercent, config.compactAtTokens) : undefined;
+		const { compactAtPercent, compactAtTokens } = inEffect();
+		const threshold = ctx.model ? fullThreshold(ctx.model, compactAtPercent, compactAtTokens) : undefined;
 		const contextTokens = ctx.getContextUsage()?.tokens ?? undefined;
 		if (threshold === undefined || contextTokens === undefined || contextTokens < threshold) {
 			lastFullSkip = undefined;
 			fullStuck = false;
 			return false;
 		}
-		const cap = config.compactAtTokens > 0 && threshold === config.compactAtTokens ? config.compactAtTokens : undefined;
-		const base = { contextTokens, threshold, percent: config.compactAtPercent, ...(cap === undefined ? {} : { tokens: cap }) };
+		const cap = compactAtTokens > 0 && threshold === compactAtTokens ? compactAtTokens : undefined;
+		const base = { contextTokens, threshold, percent: compactAtPercent, ...(cap === undefined ? {} : { tokens: cap }) };
 		const skip = (reason: string) => {
 			if (reason !== lastFullSkip) trace(ctx, { event: "full", action: "skip", reason, ...base });
 			lastFullSkip = reason;
@@ -1214,7 +1250,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		ownTrigger = "full";
 		stopTimer(ctx);
 		if (ctx.hasUI) {
-			const mark = cap === undefined ? `${config.compactAtPercent}% of the model's window` : `your ${formatTokens(cap)}-token cap`;
+			const mark = cap === undefined ? `${compactAtPercent}% of the model's window` : `your ${formatTokens(cap)}-token cap`;
 			ctx.ui.notify(`The context holds ${formatTokens(contextTokens)} tokens, past ${mark}. Compacting now, while the cache is warm.`, "info");
 		}
 		ctx.compact({
@@ -1813,6 +1849,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		sessionCtx = ctx;
 		sessionId = ctx.sessionManager.getSessionId();
+		// This session's own settings (a resumed or forked session's latest entry on its branch), before anything reads them.
+		readOwn(ctx);
 		ownWriter.hasUI = ctx.hasUI;
 		lineWriters().set(sessionId, ownWriter);
 		// A new session, a reload or a restart starts a new idle period (its state is in memory).
@@ -1966,6 +2004,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		showData(ctx);
 	});
 	pi.on("session_tree", (_event, ctx) => {
+		// Another branch may hold other settings of the session's own: the latest entry on the branch now decides, from here
+		// on as a change made in the menu would.
+		readOwn(ctx);
 		forget(ctx);
 		startTimer(ctx);
 		// The request the footer says was sent is forgotten with the branch.
@@ -2167,7 +2208,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const percentLabel = (percent: number) => (percent === 0 ? "off" : `${percent}%`);
 	const capLabel = (tokens: number) => (tokens === 0 ? "off" : `${formatTokens(tokens)} tokens`);
 	const fullNote = (model: Model<Api> | undefined): string => {
-		const { compactAtPercent: percent, compactAtTokens: cap } = config;
+		const { compactAtPercent: percent, compactAtTokens: cap } = inEffect();
 		if (percent === 0 && cap === 0) return "off: Pi compacts only when the window is nearly full, often with too little room left for a cached summary";
 		const at = model ? fullThreshold(model, percent, cap) : undefined;
 		if (!model || at === undefined) return `at ${percent}% of the window; the current model declares no window, so not here`;
@@ -2178,7 +2219,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const mark = byCap ? `at the ${formatTokens(cap)}-token cap` : `at ${percent}%: ${formatTokens(at)} of ${formatTokens(model.contextWindow)}`;
 		return `${mark} on ${model.provider}/${model.id}${room}${tight}`;
 	};
-	const expiryNote = () => (config.compactBeforeExpiry ? `on, from ${formatTokens(config.minContextTokens)} tokens of context` : "off");
+	const expiryNote = () => (inEffect().compactBeforeExpiry ? `on, from ${formatTokens(inEffect().minContextTokens)} tokens of context` : "off");
 	const keepWarmNote = (model: Model<Api> | undefined) => {
 		const minutes = warmMinutes(true);
 		if (minutes <= 0) return "off";
@@ -2206,7 +2247,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		}
 		const p = period;
 		if (!p?.stopped || running) return undefined;
-		const expiry = config.compactBeforeExpiry ? "; compacting before expiry still runs" : "";
+		const expiry = inEffect().compactBeforeExpiry ? "; compacting before expiry still runs" : "";
 		const amounts = p.taken && p.budget ? `; this idle period's refreshes: ${spendingText(p.budget, p.spending)}` : "";
 		return `by /cache-keeper-stop at ${hhmm(p.stopped.at)}, until your next message: nothing is sent to keep this window's cache warm, and Pi's own warming is told to stop when it asks${expiry}${amounts}`;
 	};
@@ -2226,143 +2267,278 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		return `${found} (${DATA_SOURCE}, checked ${formatDuration(Date.now() - data.checkedAt)} ago${failed}; /cache-keeper-refresh fetches it again)`;
 	};
 
+	// A session's own value, as the menu and the transcript say it.
+	const valueLabel = (name: SessionKey, value: number | boolean): string => {
+		if (name === "compactAtPercent") return percentLabel(value as number);
+		if (name === "compactAtTokens") return capLabel(value as number);
+		if (name === "compactBeforeExpiry") return value ? "on" : "off";
+		if (name === "minContextTokens") return formatTokens(value as number);
+		return keepWarmLabel(value as number);
+	};
+	// The default as saved now: keep-warm is read afresh (a change in another window holds here too), the others as loaded.
+	const defaultOf = (name: SessionKey): number | boolean => {
+		if (name !== "keepWarmMinutes") return config[name];
+		try {
+			return loadConfig().keepWarmMinutes;
+		} catch {
+			return config.keepWarmMinutes;
+		}
+	};
+	const ownKeys = (values: SessionSettings = own) => SESSION_KEYS.filter((name) => values[name] !== undefined);
+	// "keepWarmMinutes 4 h (default off), compactAtPercent 80% (default 90%)".
+	const describeOwn = (values: SessionSettings, withDefaults: boolean) =>
+		ownKeys(values)
+			.map((name) => `${name} ${valueLabel(name, values[name] as number | boolean)}${withDefaults ? ` (default ${valueLabel(name, defaultOf(name))})` : ""}`)
+			.join(", ");
+	// " (this session)" after what one of the session's own values decides.
+	const ownMark = (...names: SessionKey[]) => (names.some((name) => own[name] !== undefined) ? " (this session)" : "");
+
+	// A change of the session's own settings, shown where it was made and again on resume (never sent to the model).
+	pi.registerEntryRenderer<{ settings?: unknown }>(SESSION_SETTINGS_TYPE, (entry, _options, theme) => {
+		const values = readSessionSettings(entry.data).settings;
+		const text = ownKeys(values).length > 0
+			? `pi-cache-keeper · this session's own settings: ${describeOwn(values, false)}; every other setting follows the defaults`
+			: "pi-cache-keeper · this session follows the defaults again";
+		return new Text(theme.fg("dim", text), 1, 0);
+	});
+
+	// Outside the TUI: both layers, and what is in effect.
+	const settingsListing = (ctx: ExtensionContext): string => {
+		const layer = (name: SessionKey) => {
+			const mine = own[name];
+			const shown = (value: number | boolean) => String(value);
+			return mine === undefined ? `${shown(defaultOf(name))} [default]` : `${shown(mine)} [this session; default ${shown(defaultOf(name))}]`;
+		};
+		return [
+			`pi-cache-keeper settings: the defaults for all sessions (${settingsKeyInUse()} in ~/.pi/agent/settings.json), and over them this session's own values (saved in the session); /cache-keeper-settings in the TUI changes either`,
+			`compactAtPercent: ${layer("compactAtPercent")} · compactAtTokens: ${layer("compactAtTokens")} (${fullNote(ctx.model)})`,
+			`compactBeforeExpiry: ${layer("compactBeforeExpiry")} · minContextTokens: ${layer("minContextTokens")}`,
+			`keepWarmMinutes: ${layer("keepWarmMinutes")} (${keepWarmNote(ctx.model)})`,
+			`cacheRetention: ${config.cacheRetention} (all sessions)`,
+			`modelData: ${config.modelData} (all sessions) (${dataNote(ctx)})`,
+			ownKeys().length > 0 ? `This session's own: ${describeOwn(own, true)}; every other setting follows the defaults.` : "This session has no settings of its own: every setting follows the defaults.",
+		].join("\n");
+	};
+
+	// What follows a change of a setting in effect, whichever layer it was made in.
+	const afterChange = (ctx: ExtensionCommandContext, names: string[]) => {
+		if (names.includes("keepWarmMinutes")) {
+			keepWarmSetting(true);
+			showData(ctx);
+			// Keep-warm switched on or off changes how a taken period's cache is read: the countdown starts again from
+			// that reading (from another window, the countdown sees it when it reads next).
+			if (!running && ctx.isIdle() && ctx.model && timerRegime !== undefined && look(ctx).regime !== timerRegime) startTimer(ctx);
+		}
+		if (names.includes("compactAtPercent") || names.includes("compactAtTokens")) {
+			fullStuck = false;
+			lastFullSkip = undefined;
+		}
+	};
+
+	const DEFAULT_SUFFIX = " · default";
+	const OWN_SUFFIX = " · this session";
+	const SESSION_SCOPE = "this session";
+	const DEFAULTS_SCOPE = "defaults for all sessions";
+
 	const openSettings = async (ctx: ExtensionCommandContext) => {
 		if (ctx.mode !== "tui") {
-			ctx.ui.notify(
-				[
-					`pi-cache-keeper settings (${settingsKeyInUse()} in ~/.pi/agent/settings.json; /cache-keeper-settings in the TUI changes them and saves them to ${SETTINGS_KEY})`,
-					`compactAtPercent: ${config.compactAtPercent} · compactAtTokens: ${config.compactAtTokens} (${fullNote(ctx.model)})`,
-					`compactBeforeExpiry: ${config.compactBeforeExpiry} · minContextTokens: ${config.minContextTokens}`,
-					`keepWarmMinutes: ${warmMinutes(true)} (${keepWarmNote(ctx.model)})`,
-					`cacheRetention: ${config.cacheRetention}`,
-					`modelData: ${config.modelData} (${dataNote(ctx)})`,
-				].join("\n"),
-				"info",
-			);
+			ctx.ui.notify(settingsListing(ctx), "info");
 			return;
 		}
-		const percents = [...new Set([...COMPACT_AT_PERCENTS, config.compactAtPercent])].sort((a, b) => a - b);
-		const caps = [...new Set([...COMPACT_AT_TOKEN_CHOICES, config.compactAtTokens])].sort((a, b) => a - b);
-		const minimums = [...new Set([...MIN_CONTEXT_CHOICES, config.minContextTokens])].sort((a, b) => a - b);
-		const warmChoices = [...new Set([...KEEP_WARM_CHOICES, config.keepWarmMinutes])].sort((a, b) => a - b);
-		const fullItem: SettingItem = {
-			id: "compactAtPercent",
-			label: "Compact when the context is",
-			currentValue: percentLabel(config.compactAtPercent),
-			values: percents.map(percentLabel),
-			description: "",
+		// The menu opens on this session; the defaults are one Enter away, on the first row.
+		let scope: "session" | "defaults" = "session";
+		const choicesOf = (name: SessionKey, current: number | boolean): (number | boolean)[] => {
+			if (name === "compactBeforeExpiry") return [true, false];
+			const offered = { compactAtPercent: COMPACT_AT_PERCENTS, compactAtTokens: COMPACT_AT_TOKEN_CHOICES, minContextTokens: MIN_CONTEXT_CHOICES, keepWarmMinutes: KEEP_WARM_CHOICES }[name];
+			return [...new Set([...offered, current as number])].sort((a, b) => a - b);
 		};
-		const describeFull = () => {
-			fullItem.description = `After a turn, once the context fills this share of the model's window, compact from the warm cache so the summary still fits beside it. Now ${fullNote(ctx.model)}.`;
-		};
-		describeFull();
-		const warmItem: SettingItem = {
-			id: "keepWarmMinutes",
-			label: "Keep the cache warm when idle",
-			currentValue: keepWarmLabel(config.keepWarmMinutes),
-			values: warmChoices.map(keepWarmLabel),
-			description: "",
-		};
-		const describeWarm = () => {
-			warmItem.description = `Up to this long after Pi goes idle, re-send the last request with a one-token answer shortly before the cache expires, so your next message still reads it cheaply. Each refresh reads the whole context from the cache (about a tenth of the input price on Anthropic), and warming stops once refreshing has cost as much as one cache miss (writing the context again, less the cached read); a model without prices gets at most ${MAX_UNPRICED_REFRESHES} refreshes. While keep-warm is on, this extension is the only thing that keeps an idle cache warm, and Pi's own idle warming is told to stop; Pi still warms during a run. Sessions this extension cannot refresh itself are left to Pi's own warming: no cache lifetime or one under a minute, or a request that cannot be re-sent (Claude through pi-claude-bridge, Claude's budget-based thinking, or an API other than Anthropic Messages, OpenAI Completions and OpenAI Responses, whose answer the extension cannot cap). When warming ends, compact before expiry takes over. Now: ${keepWarmNote(ctx.model)}.`;
-		};
-		describeWarm();
-		const items: SettingItem[] = [
-			fullItem,
+		const ROWS: { name: SessionKey; label: string; describe: () => string }[] = [
 			{
-				id: "compactAtTokens",
+				name: "compactAtPercent",
+				label: "Compact when the context is",
+				describe: () => `After a turn, once the context fills this share of the model's window, compact from the warm cache so the summary still fits beside it. Now ${fullNote(ctx.model)}.`,
+			},
+			{
+				name: "compactAtTokens",
 				label: "Or once it holds",
-				currentValue: capLabel(config.compactAtTokens),
-				values: caps.map(capLabel),
-				description:
+				describe: () =>
 					"Also compact after a turn once the context holds this many tokens, on any model, whichever comes first. Every request reads the whole context from the cache, so a smaller context makes each request cheaper; older detail is summarized sooner.",
 			},
 			{
-				id: "compactBeforeExpiry",
+				name: "compactBeforeExpiry",
 				label: "Compact before the cache expires",
-				currentValue: config.compactBeforeExpiry ? "on" : "off",
-				values: ["on", "off"],
-				description: "20 s before the prompt cache expires, when Pi is idle, compact from the still-warm cache instead of paying to write the whole session again with your next message.",
+				describe: () => "20 s before the prompt cache expires, when Pi is idle, compact from the still-warm cache instead of paying to write the whole session again with your next message.",
 			},
-			warmItem,
 			{
-				id: "minContextTokens",
-				label: "Before expiry, only from",
-				currentValue: formatTokens(config.minContextTokens),
-				values: minimums.map(formatTokens),
-				description: "The smallest context compacted before the cache expires; smaller sessions are cheap to write again, so they are left to cool. Keeping the cache warm doesn't use it: its budget grows and shrinks with the context.",
+				name: "keepWarmMinutes",
+				label: "Keep the cache warm when idle",
+				describe: () =>
+					`Up to this long after Pi goes idle, re-send the last request with a one-token answer shortly before the cache expires, so your next message still reads it cheaply. Each refresh reads the whole context from the cache (about a tenth of the input price on Anthropic), and warming stops once refreshing has cost as much as one cache miss (writing the context again, less the cached read); a model without prices gets at most ${MAX_UNPRICED_REFRESHES} refreshes. While keep-warm is on, this extension is the only thing that keeps an idle cache warm, and Pi's own idle warming is told to stop; Pi still warms during a run. Sessions this extension cannot refresh itself are left to Pi's own warming: no cache lifetime or one under a minute, or a request that cannot be re-sent (Claude through pi-claude-bridge, Claude's budget-based thinking, or an API other than Anthropic Messages, OpenAI Completions and OpenAI Responses, whose answer the extension cannot cap). When warming ends, compact before expiry takes over. /cache-keeper-stop stops it in every window. Now: ${keepWarmNote(ctx.model)}.`,
 			},
+			{
+				name: "minContextTokens",
+				label: "Before expiry, only from",
+				describe: () => "The smallest context compacted before the cache expires; smaller sessions are cheap to write again, so they are left to cool. Keeping the cache warm doesn't use it: its budget grows and shrinks with the context.",
+			},
+		];
+		const retentionText = "long asks for the longer cache in interactive sessions (2× the write price on Anthropic and Kimi); short keeps Pi's default. Applies from the next request.";
+		const dataText = `Once a day, read each model's input window, cache lifetimes and prices from ${DATA_SOURCE} (a public API: no key, and nothing about your sessions is sent) and put them into ~/.pi/agent/models.json: the window replaces Pi's, lifetimes and prices fill what Pi has none for, and values you set there yourself are never touched. The footer shows the current model's values and marks a guess. off takes these values out again.`;
+		const ALL_SESSIONS = "The same for every session (a session can't set its own): a change here changes the default.";
+		const globalItems = (marked: boolean): SettingItem[] => [
 			{
 				id: "cacheRetention",
-				label: "Cache retention",
+				label: marked ? "Cache retention · all sessions" : "Cache retention",
 				currentValue: config.cacheRetention,
 				values: ["short", "long"],
-				description: "long asks for the longer cache in interactive sessions (2× the write price on Anthropic and Kimi); short keeps Pi's default. Applies from the next request.",
+				description: `${retentionText} ${ALL_SESSIONS} It works through the process-wide PI_CACHE_RETENTION.`,
 			},
 			{
 				id: "modelData",
-				label: "Model data from providers.dev",
+				label: marked ? "Model data · all sessions" : "Model data from providers.dev",
 				currentValue: config.modelData ? "on" : "off",
 				values: ["on", "off"],
-				description: `Once a day, read each model's input window, cache lifetimes and prices from ${DATA_SOURCE} (a public API: no key, and nothing about your sessions is sent) and put them into ~/.pi/agent/models.json: the window replaces Pi's, lifetimes and prices fill what Pi has none for, and values you set there yourself are never touched. The footer shows the current model's values and marks a guess. off takes these values out again.`,
+				description: `${dataText} ${ALL_SESSIONS} It writes Pi's models.json, which every session reads.`,
 			},
 		];
+		const scopeItem = (): SettingItem => ({
+			id: "scope",
+			label: "Editing",
+			currentValue: scope === "session" ? SESSION_SCOPE : DEFAULTS_SCOPE,
+			values: [SESSION_SCOPE, DEFAULTS_SCOPE],
+			description:
+				scope === "session"
+					? "The warming and compaction values you pick below hold for this session only, saved in it: after a resume, and in a fork made after them. Every value marked default follows the defaults, also when they change later. Enter edits the defaults for all sessions instead."
+					: "The defaults every session uses, except where a session set its own value. Saved to cacheKeeper in ~/.pi/agent/settings.json. Enter goes back to editing this session.",
+		});
+		const sessionItems = (): SettingItem[] => {
+			const rows = ROWS.map(({ name, label, describe }): SettingItem => {
+				const fallback = defaultOf(name);
+				const mine = own[name];
+				// Enter steps from the default as it would from that value in the defaults: to the next one up (the other one, for
+				// on and off), so raising a value never passes through off on its way.
+				const all = choicesOf(name, mine ?? fallback);
+				const choices = typeof fallback === "boolean" ? [!fallback, fallback] : [...all.filter((value) => (value as number) > fallback), ...all.filter((value) => (value as number) <= fallback)];
+				const defaultValue = `${valueLabel(name, fallback)}${DEFAULT_SUFFIX}`;
+				return {
+					id: name,
+					label,
+					currentValue: mine === undefined ? defaultValue : `${valueLabel(name, mine)}${OWN_SUFFIX}`,
+					values: [defaultValue, ...choices.map((value) => `${valueLabel(name, value)}${OWN_SUFFIX}`)],
+					description: `${describe()} ${mine === undefined ? `This session follows the default (${valueLabel(name, fallback)}).` : `This session's own value; the default is ${valueLabel(name, fallback)}.`}`,
+				};
+			});
+			const count = ownKeys().length;
+			const drop = count > 0 ? `drop ${count} own value${count === 1 ? "" : "s"}` : "nothing to drop";
+			return [
+				scopeItem(),
+				...rows,
+				{ id: "reset", label: "Back to the defaults", currentValue: drop, values: [drop], description: "Drops this session's own values: every setting follows the defaults again, here and in what you resume or fork from here on." },
+				...globalItems(true),
+			];
+		};
+		const defaultItems = (): SettingItem[] => {
+			const rows = ROWS.map(({ name, label, describe }): SettingItem => {
+				const value = defaultOf(name);
+				const mine = own[name];
+				return {
+					id: name,
+					label,
+					currentValue: valueLabel(name, value),
+					values: choicesOf(name, value).map((choice) => valueLabel(name, choice)),
+					description: `${describe()}${mine === undefined ? "" : ` This session has its own value (${valueLabel(name, mine)}), which wins in it.`}`,
+				};
+			});
+			return [scopeItem(), ...rows, ...globalItems(false)];
+		};
+		// The value a row's label stands for.
+		const parse = (name: SessionKey, label: string, current: number | boolean) => choicesOf(name, current).find((value) => valueLabel(name, value) === label);
+
 		await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-			const list = new SettingsList(
-				items,
-				items.length + 2,
-				getSettingsListTheme(),
-				(id, value) => {
-					let patch: Partial<CacheKeeperConfig>;
-					if (id === "compactAtPercent") patch = { compactAtPercent: percents.find((p) => percentLabel(p) === value) ?? config.compactAtPercent };
-					else if (id === "compactAtTokens") patch = { compactAtTokens: caps.find((n) => capLabel(n) === value) ?? config.compactAtTokens };
-					else if (id === "compactBeforeExpiry") patch = { compactBeforeExpiry: value === "on" };
-					else if (id === "keepWarmMinutes") patch = { keepWarmMinutes: warmChoices.find((m) => keepWarmLabel(m) === value) ?? config.keepWarmMinutes };
-					else if (id === "minContextTokens") patch = { minContextTokens: minimums.find((n) => formatTokens(n) === value) ?? config.minContextTokens };
-					else if (id === "modelData") patch = { modelData: value === "on" };
-					else patch = { cacheRetention: value === "long" ? "long" : "short" };
-					try {
-						config = saveConfig(patch);
-					} catch (error) {
-						ctx.ui.notify(`pi-cache-keeper could not save the setting: ${error instanceof Error ? error.message : String(error)}`, "error");
-						return;
-					}
-					if (id === "cacheRetention") {
-						applyRetention(config.cacheRetention === "long", ctx.hasUI);
-						showData(ctx);
-					}
-					if (id === "modelData") {
-						// On: fetch and apply. Off: take this extension's values out of models.json again.
-						if (config.modelData) void refreshAndReport(ctx, false, true);
-						else {
-							void applyData(ctx)
-								.then(() => ifSessionAlive(() => showData(ctx)))
-								.catch((error: unknown) => ifSessionAlive(() => ctx.ui.notify(`pi-cache-keeper could not update models.json: ${error instanceof Error ? error.message : String(error)}`, "error")));
-						}
-					}
-					if (id === "keepWarmMinutes") {
-						describeWarm();
-						keepWarmSetting(true);
-						showData(ctx);
-						// Keep-warm switched on or off changes how a taken period's cache is read: the countdown starts again from
-						// that reading (from another window, the countdown sees it when it reads next).
-						if (!running && ctx.isIdle() && ctx.model && timerRegime !== undefined && look(ctx).regime !== timerRegime) startTimer(ctx);
-					}
-					if (id === "compactAtPercent" || id === "compactAtTokens") {
-						fullStuck = false;
-						lastFullSkip = undefined;
-						describeFull();
-					}
-					list.invalidate();
-				},
-				() => done(),
-			);
 			const container = new Container();
-			container.addChild(new Text(`${theme.fg("accent", theme.bold("pi-cache-keeper"))} ${theme.fg("dim", `saved to ${SETTINGS_KEY} in ~/.pi/agent/settings.json`)}`, 0, 0));
-			container.addChild(new Text("", 0, 0));
-			container.addChild(list);
+			let list: SettingsList;
+			const header = () =>
+				scope === "session"
+					? `${theme.fg("accent", theme.bold("pi-cache-keeper"))} ${theme.bold("· editing this session")} ${theme.fg("dim", "· its own values are saved in the session; every other follows the defaults")}`
+					: `${theme.fg("accent", theme.bold("pi-cache-keeper"))} ${theme.bold("· editing the defaults for all sessions")} ${theme.fg("dim", `· saved to ${SETTINGS_KEY} in ~/.pi/agent/settings.json`)}`;
+			// The session's own values are saved once, when the menu closes, if they changed.
+			const close = () => {
+				if (!sameSessionSettings(own, ownSaved)) {
+					try {
+						pi.appendEntry<{ settings: SessionSettings }>(SESSION_SETTINGS_TYPE, { settings: { ...own } });
+						ownSaved = { ...own };
+					} catch (error) {
+						ctx.ui.notify(`pi-cache-keeper could not save this session's settings: ${error instanceof Error ? error.message : String(error)}`, "error");
+					}
+				}
+				done();
+			};
+			const onChange = (id: string, value: string) => {
+				if (id === "scope") {
+					scope = value === SESSION_SCOPE ? "session" : "defaults";
+					return build(id);
+				}
+				if (id === "reset") {
+					const dropped = ownKeys();
+					setOwn({});
+					afterChange(ctx, dropped);
+					return build(id);
+				}
+				const name = SESSION_KEYS.find((key) => key === id);
+				if (scope === "session" && name) {
+					const mine = own[name];
+					const picked = value.endsWith(OWN_SUFFIX) ? parse(name, value.slice(0, -OWN_SUFFIX.length), mine ?? defaultOf(name)) : undefined;
+					try {
+						setOwn(withSessionValue(own, name, picked));
+					} catch (error) {
+						ctx.ui.notify(`pi-cache-keeper could not set it for this session: ${error instanceof Error ? error.message : String(error)}`, "error");
+						return build(id);
+					}
+					afterChange(ctx, [name]);
+					return build(id);
+				}
+				let patch: Partial<CacheKeeperConfig>;
+				if (name === "compactBeforeExpiry") patch = { compactBeforeExpiry: value === "on" };
+				else if (name) patch = { [name]: parse(name, value, defaultOf(name)) ?? defaultOf(name) };
+				else if (id === "modelData") patch = { modelData: value === "on" };
+				else patch = { cacheRetention: value === "long" ? "long" : "short" };
+				try {
+					config = saveConfig(patch);
+				} catch (error) {
+					ctx.ui.notify(`pi-cache-keeper could not save the setting: ${error instanceof Error ? error.message : String(error)}`, "error");
+					return build(id);
+				}
+				if (id === "cacheRetention") {
+					applyRetention(config.cacheRetention === "long", ctx.hasUI);
+					showData(ctx);
+				}
+				if (id === "modelData") {
+					// On: fetch and apply. Off: take this extension's values out of models.json again.
+					if (config.modelData) void refreshAndReport(ctx, false, true);
+					else {
+						void applyData(ctx)
+							.then(() => ifSessionAlive(() => showData(ctx)))
+							.catch((error: unknown) => ifSessionAlive(() => ctx.ui.notify(`pi-cache-keeper could not update models.json: ${error instanceof Error ? error.message : String(error)}`, "error")));
+					}
+				}
+				// A default this session has its own value for changes nothing in effect here.
+				if (name && own[name] === undefined) afterChange(ctx, [name]);
+				build(id);
+			};
+			const build = (select?: string) => {
+				const items = scope === "session" ? sessionItems() : defaultItems();
+				list = new SettingsList(items, items.length + 2, getSettingsListTheme(), onChange, close);
+				if (select) list.selectItem(select);
+				container.clear();
+				container.addChild(new Text(header(), 0, 0));
+				container.addChild(new Text("", 0, 0));
+				container.addChild(list);
+				container.invalidate();
+			};
+			build();
 			return {
-				capturesViewportInput: list.capturesViewportInput,
+				get capturesViewportInput() {
+					return list.capturesViewportInput;
+				},
 				render: (width: number) => container.render(width),
 				invalidate: () => container.invalidate(),
 				handleInput: (data: string) => {
@@ -2418,7 +2594,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					here,
 					'Other windows: each reads the stop before it sends anything, and its footer says "warming stopped" within a second where it shows a countdown. How many there are can\'t be known from here, and a window that has not loaded this version (no /reload since the update) doesn\'t read it.',
 					"A refresh already on its way is not called back. A stop can't be taken back: a window warms again as usual after the answer to the next message you send it.",
-					...(config.compactBeforeExpiry ? ["Compacting before the cache expires still runs where it is on (compactBeforeExpiry); it starts no warming again."] : []),
+					...(inEffect().compactBeforeExpiry ? ["Compacting before the cache expires still runs where it is on (compactBeforeExpiry); it starts no warming again."] : []),
 				].join("\n"),
 			});
 		},
@@ -2491,12 +2667,12 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					`pi-cache-keeper · ${model ? `${model.provider}/${model.id}` : "no model"}`,
 					`cache: ${cache}`,
 					`next compaction: ${next}`,
-					`when full: ${fullNote(model)}`,
-					`keep warm: ${keepWarmNote(model)}`,
+					`when full${ownMark("compactAtPercent", "compactAtTokens")}: ${fullNote(model)}`,
+					`keep warm${ownMark("keepWarmMinutes")}: ${keepWarmNote(model)}`,
 					...(stopped ? [`stopped: ${stopped}`] : []),
-					`before expiry: ${expiryNote()} · retention ${model?.api === BRIDGE_API ? "set by Claude Code" : (process.env.PI_CACHE_RETENTION ?? "short")}`,
+					`before expiry${ownMark("compactBeforeExpiry", "minContextTokens")}: ${expiryNote()} · retention ${model?.api === BRIDGE_API ? "set by Claude Code" : (process.env.PI_CACHE_RETENTION ?? "short")}`,
 					`model data: ${dataNote(ctx)}`,
-					"settings: /cache-keeper-settings",
+					`settings: ${ownKeys().length > 0 ? `this session's own: ${describeOwn(own, true)}; every other follows the defaults` : "the defaults (this session has none of its own)"} · /cache-keeper-settings`,
 					`log: ${TRACE_PATH_LABEL}`,
 					"",
 					...log,

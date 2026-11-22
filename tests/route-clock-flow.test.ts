@@ -298,7 +298,9 @@ async function session(s: Setup) {
 	const switchOffInMenu = async () => {
 		await commands.get("cache-keeper-settings")?.("", ctx);
 		assert.ok(menu, "Pi's settings menu");
-		for (let i = 0; i < 3; i++) menu.handleInput("\x1b[B");
+		// The menu opens on this session: the first row switches it to the defaults for all sessions.
+		menu.handleInput(" ");
+		for (let i = 0; i < 4; i++) menu.handleInput("\x1b[B");
 		for (let i = 0; i < 24 && JSON.parse(readFileSync(join(dir, "settings.json"), "utf8")).cacheKeeper.keepWarmMinutes !== 0; i++) menu.handleInput(" ");
 		assert.equal(JSON.parse(readFileSync(join(dir, "settings.json"), "utf8")).cacheKeeper.keepWarmMinutes, 0);
 	};
