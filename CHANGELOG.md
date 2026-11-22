@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-22
+
+### Changed
+- **The model data is providers.dev's safe values** — providers.dev's API 1.4.0 gives one safe value per quantity (`safe` on every entry: the input window, the maximum output, the short and the long cache lifetime, the price), with the source it comes from (a measurement, providers.dev, models.dev or Pi's catalog, the first that states a value) and every source's own value beside it. The extension now reads `safe`: the input window and whether it is only a lower bound, the output limit, both lifetimes, and `pricing`, which is the safe price whole, with its tiers and its write price per lifetime. An answer without `safe` (an API before 1.4.0) is read from the fields as before. What is written into `models.json`, and where, does not change.
+- **Pi's own values are not written back** — A safe value whose source is Pi's catalog (`pi.dev`; for the price, `safe.price.source`) is not taken: it is Pi's own value as providers.dev last copied it, and written into `models.json` it would pin that copy over the value Pi ships, and keep it after Pi corrects it. In providers.dev's data at 1.4.0 that leaves out 3 input windows and 5 output limits on `openai-codex` and Vercel entries, which 0.8.0 would read from the same answers; Pi's own values stay in use there.
+- **What the new values change** — With providers.dev's new rule a measured value counts where one exists, the most direct measurement first. Users of OpenRouter's Claude Opus with the long lifetime see 30 minutes where it was an hour, and two OpenRouter GPT entries a shorter short lifetime (25 minutes, 150 seconds); three OpenRouter entries measured only through a proxy have no lifetime any more. On the ChatGPT login GPT-6.1 Sol and Terra get a short lifetime of 5 and 30 minutes, and on Devin two models 2 hours and 15 minutes: what the vendor's own client held, which Pi's requests through the same login may not get. The ChatGPT login's window becomes "at least 921,500" and "at least 920,870", which raises Pi's window as before.
+- **The saved data is read again once** — The saved data (`cache-keeper-models.json`) now records how it was read (`reading`). Data saved by an earlier version is fetched again at the next session start, also when it is fresh and the dataset has not changed, so the values above take effect without waiting a day. The file keeps its format, so the note of which `models.json` values are the extension's own is kept.
+
 ## [0.8.0] - 2026-11-22
 
 ### Added

@@ -412,10 +412,13 @@ Pi's model catalog doesn't say how long most providers keep a prompt cache, and 
 | Cache lifetimes (`promptCache.short`, `promptCache.long`) | only for a tier Pi has no lifetime for. "No safe lifetime" is never declared |
 | Prices (`cost`, with a tier per context size) and output limit (`maxTokens`) | only where Pi has none |
 
+**Which value.** providers.dev gives one safe value per quantity, with the source it comes from and what every source states beside it. The sources come in a fixed order, and the first that states a value gives it: a measurement (on an API key, requests sent straight to the provider; on a subscription login, the vendor's own client, else a proxy), providers.dev's own reading of the provider's documentation, [models.dev](https://models.dev), and last Pi's own catalog. The extension takes the safe value as it is, except one whose source is Pi's catalog: that is Pi's own value as providers.dev last copied it, and written into `models.json` it would pin that copy over the value Pi ships, and keep it after Pi corrects it. Pi's own value stays in use there instead.
+
 **What you should know before it changes how Pi behaves:**
 
 - A model that gets a cache lifetime also gets what comes with one: Pi's own warming (`cacheWarming` in Pi's settings) and this extension's countdown and compacting before expiry. A model with a 5-minute lifetime and a context over `minContextTokens` is compacted after about 5 idle minutes, unless Pi's warming or `keepWarmMinutes` keeps it warm; then it is compacted when that warming ends. A smaller context is left to expire.
 - A larger window means larger, more expensive requests before anything compacts. `compactAtTokens` caps that on every model.
+- On a subscription login, a cache lifetime is the one the vendor's own client held (Codex CLI on the ChatGPT login, Devin's CLI on Devin) where one was measured. Requests from Pi through the same login can be kept for less; providers.dev lists what each client held on the entry's page.
 - Values you set in `models.json` yourself are never touched. The extension keeps a note of what it wrote (in `~/.pi/agent/cache-keeper-models.json`) and only updates or removes those values. If `models.json` has comments, it is left alone.
 
 **How a model is looked up.** A provider you signed in to with a subscription is looked up as that subscription (the Claude and Meta logins have entries of their own); with an API key, as the API. Pi's ChatGPT sign-in on the `openai` provider has no entry of its own, so the login's and the API's values are both possible: the smaller is used and marked `⚠` (`⚠ no entry for this login: shorter values`).
@@ -434,7 +437,7 @@ A model is then looked up like the same model used directly. When several upstre
 
 ### Fetching, privacy, turning it off
 
-**When it fetches.** At the start of an interactive session, when the saved data is a day old or Pi can use a provider there is no data for. One small request asks whether the dataset changed; only then are the providers you can use downloaded (a few dozen kilobytes). A failed fetch keeps the saved data, and [the footer](#the-footer) says so. Until a first fetch works, Pi has no cache lifetime from here, so a model whose lifetime only providers.dev gives (through a proxy, most of them) gets no countdown and is not compacted before expiry; compacting when full still works. Nothing is fetched on its own in print or JSON mode or with `PI_OFFLINE` set. `/cache-keeper-refresh` fetches now.
+**When it fetches.** At the start of an interactive session, when the saved data is a day old, was read by an earlier version of the extension, or Pi can use a provider there is no data for. One small request asks whether the dataset changed; only then are the providers you can use downloaded (a few dozen kilobytes). A failed fetch keeps the saved data, and [the footer](#the-footer) says so. Until a first fetch works, Pi has no cache lifetime from here, so a model whose lifetime only providers.dev gives (through a proxy, most of them) gets no countdown and is not compacted before expiry; compacting when full still works. Nothing is fetched on its own in print or JSON mode or with `PI_OFFLINE` set. `/cache-keeper-refresh` fetches now.
 
 **What is sent.** The names of the providers Pi has credentials for, as query parameters to a public read-only API. No key, no account, nothing about your sessions or prompts.
 
