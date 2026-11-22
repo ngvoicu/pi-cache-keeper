@@ -10,8 +10,11 @@ What it does:
 - **Compacts when the context is full,** at 90% of the model's window by default or at a token cap you set, while a summary still fits. [More](#compacting-when-the-context-is-full).
 - **Compacts just before the cache expires** when you step away, so your next message doesn't pay to write the whole session again. [More](#compacting-before-the-cache-expires).
 - **Keeps the cache warm through a break,** for up to as long as you choose, and stops once refreshing has cost as much as one cache miss (off until you set it). [More](#keeping-the-cache-warm).
-- **Fills in model data from providers.dev:** input window, cache lifetimes and prices, written where Pi reads them. [More](#model-data-from-providersdev).
+- **Lets each session set its own compaction and keep-warm values** over the defaults, with `/cache-keeper-settings`. [More](#settings).
+- **Fills in model data from providers.dev:** one safe value per quantity (input window, output limit, cache lifetimes and prices), measured values first; values marked as Pi's own aren't written back. [More](#model-data-from-providersdev).
 - **Shows it in the footer:** the cache countdown, the cache lifetimes and the one in use, what the last request asked for, the price, and what went wrong, right after the countdown, fitted to the terminal's width. [The footer](#the-footer).
+
+See the [CHANGELOG](CHANGELOG.md) for what changed in each version.
 
 pi-cache-keeper is based on pi-cached-compaction by Nico Bailon (MIT). Compaction from the warm cache, the compaction card, the countdown, compacting before expiry and the longer cache are his work; see [Origins and credit](#origins-and-credit).
 
@@ -412,7 +415,7 @@ Pi's model catalog doesn't say how long most providers keep a prompt cache, and 
 | Cache lifetimes (`promptCache.short`, `promptCache.long`) | only for a tier Pi has no lifetime for. "No safe lifetime" is never declared |
 | Prices (`cost`, with a tier per context size) and output limit (`maxTokens`) | only where Pi has none |
 
-**Which value.** providers.dev gives one safe value per quantity, with the source it comes from and what every source states beside it. The sources come in a fixed order, and the first that states a value gives it: a measurement (on an API key, requests sent straight to the provider; on a subscription login, the vendor's own client, else a proxy), providers.dev's own reading of the provider's documentation, [models.dev](https://models.dev), and last Pi's own catalog. The extension takes the safe value as it is, except one whose source is Pi's catalog: that is Pi's own value as providers.dev last copied it, and written into `models.json` it would pin that copy over the value Pi ships, and keep it after Pi corrects it. Pi's own value stays in use there instead.
+**Which value.** providers.dev gives one safe value per quantity, with the source it comes from and what every source states beside it. The sources come in a fixed order, and the first that states a value gives it: a measurement (on an API key, requests sent straight to the provider; on a subscription login, the vendor's own client, else a proxy), providers.dev's own reading of the provider's documentation, [models.dev](https://models.dev), and last Pi's own catalog. The extension takes the safe value as it is, except one whose source is Pi's catalog: that is Pi's own value as providers.dev last copied it, and written into `models.json` it would pin that copy over the value Pi ships, and keep it after Pi corrects it. Pi's own value stays in use there instead. An answer from an older API without safe values is read from its earlier fields instead.
 
 **What you should know before it changes how Pi behaves:**
 
@@ -437,7 +440,7 @@ A model is then looked up like the same model used directly. When several upstre
 
 ### Fetching, privacy, turning it off
 
-**When it fetches.** At the start of an interactive session, when the saved data is a day old, was read by an earlier version of the extension, or Pi can use a provider there is no data for. One small request asks whether the dataset changed; only then are the providers you can use downloaded (a few dozen kilobytes). A failed fetch keeps the saved data, and [the footer](#the-footer) says so. Until a first fetch works, Pi has no cache lifetime from here, so a model whose lifetime only providers.dev gives (through a proxy, most of them) gets no countdown and is not compacted before expiry; compacting when full still works. Nothing is fetched on its own in print or JSON mode or with `PI_OFFLINE` set. `/cache-keeper-refresh` fetches now.
+**When it fetches.** At the start of an interactive session, when the saved data is a day old, was read by an earlier version of the extension, or Pi can use a provider there is no data for. One small request asks whether the dataset changed; if it did, the providers you can use are downloaded (a few dozen kilobytes). They are also downloaded if a provider is missing or the saved data was read by an earlier version, even when the dataset is unchanged. A failed fetch keeps the saved data, and [the footer](#the-footer) says so. Until a first fetch works, Pi has no cache lifetime from here, so a model whose lifetime only providers.dev gives (through a proxy, most of them) gets no countdown and is not compacted before expiry; compacting when full still works. Nothing is fetched on its own in print or JSON mode or with `PI_OFFLINE` set. `/cache-keeper-refresh` fetches now.
 
 **What is sent.** The names of the providers Pi has credentials for, as query parameters to a public read-only API. No key, no account, nothing about your sessions or prompts.
 
