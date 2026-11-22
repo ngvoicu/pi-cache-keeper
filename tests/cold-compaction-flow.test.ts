@@ -313,8 +313,9 @@ test("a previous summary is sent as <previous-summary>; a split turn sends two r
 	assert.equal(h.coldCalls().length, 2);
 	assert.match(first, /<previous-summary>\nEarlier work\.\n<\/previous-summary>/);
 	assert.match(first, /Additional focus: keep the file names$/);
-	assert.match(second, /^# Conversation\n\[User\]: Now the tests\./);
-	assert.match(second, /Additional focus: keep the file names$/);
+	// The turn's prefix, in Pi's split-turn prompt (worded by the Pi installed: from 1.x it carries the instructions too).
+	assert.match(second, /\[User\]: Now the tests\./);
+	assert.doesNotMatch(second, /Fix the bug/);
 	assert.equal(result.compaction.usage.input, 96_000, "both requests' usage");
 	assert.equal(result.compaction.usage.output, 6_000);
 	assert.match(result.compaction.summary, /^Summary 1\.\s+---\n\n\*\*Turn Context \(split turn\):\*\*\n\nSummary 2\./);
