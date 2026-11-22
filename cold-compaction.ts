@@ -17,14 +17,31 @@ export function formatModelRef(model: { provider: string; id: string }): string 
 }
 
 /**
- * UTF-8 bytes per token the need is counted with: one. A token of a byte-level tokenizer covers at least one byte, so
- * this counts high for every kind of text, dense ones included. Measured (gpt-tokenizer 3.4.0): English prose 4.9 bytes a
- * token, code 4.0, hex 1.8, base64 1.4 (cl100k_base), common CJK 2.9, emoji 1.8, rare CJK 1.3 (cl100k_base). Counted in
- * characters instead, rare CJK would need 0.43 characters a token.
+ * How text is counted in tokens, high enough for dense text and near enough for prose: the text is split on whitespace;
+ * a word that is ASCII and at most `COLD_SHORT_WORD` characters long counts its length / 3 tokens (at least 1); any other
+ * word (non-ASCII, or longer: base64, hashes, minified code, CJK) counts one token per UTF-8 byte, since a token of a
+ * byte-level tokenizer covers at least one byte. Measured against OpenAI's o200k_base and cl100k_base (gpt-tokenizer
+ * 3.4.0): the README's prose 1.35 times its real size, this module's code 1.56, base64 1.39-1.47, rare CJK 1.29-1.58.
  */
-export const COLD_BYTES_PER_TOKEN = 1;
-/** Pi's summarizer prompt around the conversation, in UTF-8 bytes: 1,642 at most in Pi 0.87.0 and 1.6.0, rounded up. */
-export const COLD_PROMPT_BYTES = 2_000;
+export const COLD_SHORT_WORD = 20;
+/**
+ * Pi's summarizer prompt around the conversation, in tokens: at most 1,642 characters of English in Pi 0.87.0 and 1.6.0,
+ * about 600 by the count above; rounded up.
+ */
+export const COLD_PROMPT_TOKENS = 700;
+const encoder = new TextEncoder();
+const ASCII = /^[\x00-\x7f]*$/;
+
+/** The tokens `text` is counted at (see COLD_SHORT_WORD). */
+export function coldTextTokens(text: string): number {
+	let tokens = 0;
+	for (const word of text.split(/\s+/)) {
+		if (!word) continue;
+		tokens += ASCII.test(word) && word.length <= COLD_SHORT_WORD ? Math.max(1, word.length / 3) : encoder.encode(word).length;
+	}
+	return Math.ceil(tokens);
+}
+
 /**
  * The output a model that can't turn thinking off adds for its lowest level (Pi's default thinking budgets): an adapter
  * that budgets thinking adds it to the output cap passed, so it is kept out of the cap.
@@ -41,28 +58,26 @@ const FOCUS_PREFIX = "\n\nAdditional focus: ";
 /** Pi's compaction preparation (not exported by name from the package). */
 type CompactionPreparation = SessionBeforeCompactEvent["preparation"];
 
-const encoder = new TextEncoder();
-const bytes = (text: string) => encoder.encode(text).length;
-const conversationBytes = (messages: AgentMessage[]) => bytes(serializeConversation(convertToLlm(messages)));
+const conversationTokens = (messages: AgentMessage[]) => coldTextTokens(serializeConversation(convertToLlm(messages)));
 
-/** The requests Pi's compact() sends for a preparation, each in UTF-8 bytes: one, or two for a split turn. */
-export function coldRequestBytes(
+/** The requests Pi's compact() sends for a preparation, each in tokens as counted here: one, or two for a split turn. */
+export function coldRequestTokens(
 	preparation: Pick<CompactionPreparation, "messagesToSummarize" | "turnPrefixMessages" | "isSplitTurn" | "previousSummary">,
 	customInstructions?: string,
 ): number[] {
 	const { messagesToSummarize, turnPrefixMessages, isSplitTurn, previousSummary } = preparation;
-	const focus = customInstructions ? bytes(FOCUS_PREFIX + customInstructions) : 0;
+	const focus = customInstructions ? coldTextTokens(FOCUS_PREFIX + customInstructions) : 0;
 	const splitTurn = isSplitTurn && turnPrefixMessages.length > 0;
 	const requests: number[] = [];
 	// The history, with the previous summary; a split turn without earlier history sends only the turn's prefix.
-	if (!splitTurn || messagesToSummarize.length > 0) requests.push(conversationBytes(messagesToSummarize) + bytes(previousSummary ?? "") + COLD_PROMPT_BYTES + focus);
-	if (splitTurn) requests.push(conversationBytes(turnPrefixMessages) + COLD_PROMPT_BYTES + focus);
+	if (!splitTurn || messagesToSummarize.length > 0) requests.push(conversationTokens(messagesToSummarize) + coldTextTokens(previousSummary ?? "") + COLD_PROMPT_TOKENS + focus);
+	if (splitTurn) requests.push(conversationTokens(turnPrefixMessages) + COLD_PROMPT_TOKENS + focus);
 	return requests;
 }
 
 /** The larger request, in tokens. */
-export function coldNeedTokens(requestBytes: number[]): number {
-	return Math.ceil(Math.max(0, ...requestBytes) / COLD_BYTES_PER_TOKEN);
+export function coldNeedTokens(requestTokens: number[]): number {
+	return Math.max(0, ...requestTokens);
 }
 
 /** A reply's summary without the file lists Pi or the model added: what is checked for being empty. */

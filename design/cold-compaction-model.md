@@ -159,7 +159,7 @@ Nothing new is measured and no error is interpreted. **The picked model is asked
 
 ### An unknown lifetime
 
-An unknown lifetime is **never counted as cold**, with no exception. A model with no cache lifetime at all (no countdown in the footer): there `look()` gives neither an expiry nor a reason, the cached path is tried as today, and what the request read shows on the card. A keep-warm period whose expiry became unknown (the route changed, or no lifetime can be read any more): `look()` gives the reason, and for a compaction `checkCachedPath` tries the cached path all the same (a refresh is still never sent on it, and compacting before expiry is still cancelled at its gate). The picked model writes the summary only if that path falls back for one of the reasons above. (Decided after the review: section 10.)
+An unknown lifetime or expiry is **never a reason to use the picked model**, and with the setting off nothing changes from 0.9.0. A model with no cache lifetime at all (no countdown in the footer): there `look()` gives neither an expiry nor a reason, the cached path is tried as today, and what the request read shows on the card; the picked model writes the summary only if that path falls back for one of the reasons above. A keep-warm period whose expiry became unknown (the route changed, or no lifetime can be read any more): `checkCachedPath` gives `the prompt cache's expiry is unknown: …` as in 0.9.0, and Pi's own compaction runs on the session's model, as in 0.9.0, whatever the setting; that reason is not part of trigger 1. (Decided after the review, round 2: section 10.)
 
 Why: nothing the extension knows says such a cache is gone, and while it may be alive the rule "a warm cache changes nothing" holds. The price of this choice is the case where it was in fact gone: the cached request then pays the session model's full price, as in 0.9.0. With the model data off this covers more models: every one whose lifetime neither Pi's catalog nor its own answers give. (The second question for the owner in section 9.)
 
@@ -189,10 +189,10 @@ In every case below, **Pi's own compaction runs as today**: the handler returns 
 **The fit rule.** It uses the model as Pi's registry gives it, which carries the keeper's model data (the safe input window and output limit of 0.9.0, where `modelData` is on).
 
 1. **What would be sent.** Pi's summarizer sends one request, or two for a split turn (the history, and the turn's prefix). Each is the messages as text (`serializeConversation(convertToLlm(messages))`: tool results cut to 2,000 characters, thinking left out), plus the previous summary and the `/compact` instructions where there are any, plus Pi's prompt (the existing `PI_PROMPT_CHARS`). This is the arithmetic `piCompactionInput` already does, per request.
-2. **Counted high.** Each request in UTF-8 bytes, one token per byte (`COLD_BYTES_PER_TOKEN = 1`), with Pi's prompt counted as `COLD_PROMPT_BYTES = 2,000` (1,642 at most in Pi 0.87.0 and 1.6.0). A token of a byte-level tokenizer covers at least one byte, so this is high for any text. Measured with gpt-tokenizer 3.4.0: English prose 4.9 bytes a token, code 4.0, hex 1.8, common CJK 2.9, emoji 1.8, base64 1.4 (cl100k_base), rare CJK 1.3 (cl100k_base; 0.43 characters a token). The need is the larger request.
+2. **Counted by words.** Each request's text is split on whitespace: a word that is ASCII and at most 20 characters long (`COLD_SHORT_WORD`) counts its length / 3 tokens (at least 1); any other word (non-ASCII, or longer: base64, hashes, minified code, CJK) counts one token per UTF-8 byte, since a token of a byte-level tokenizer covers at least one byte. Pi's prompt is counted as `COLD_PROMPT_TOKENS = 700` (1,642 characters of English at most in Pi 0.87.0 and 1.6.0). Measured against o200k_base and cl100k_base (gpt-tokenizer 3.4.0): prose 1.27-1.35 times its real size, code 1.56, base64 1.39-1.47, rare CJK 1.29-1.58. The need is the larger request.
 3. **Room for the summary.** `summaryBudget(model, need)`, the existing function: the model's output limit, reduced so the prompt, a 4k margin and the summary fit the window, less the thinking a model that can't turn it off adds at its lowest level (Pi's default thinking budgets: minimal 1,024, low 2,048). The model fits when that is at least `MIN_SUMMARY_TOKENS` (16k), or at least its whole output limit where the limit is smaller. That room is the output cap passed with every request (`maxTokens`), so Pi can't ask for more than the fit assumed.
 
-Because tool results are cut down, a session larger than a model's window can still fit it; prose is counted about five times its size, so a model can be refused that would have fit.
+Because tool results are cut down, a session larger than a model's window can still fit it; counting high can refuse a model near the limit that would have fit.
 
 An unknown window is refused, not tried: a local server that silently truncates would return a summary of the last part only, with no error to fall back on.
 
@@ -396,17 +396,18 @@ Signatures only; every body is the build's.
 export function parseModelRef(value: string): { provider: string; id: string } | undefined;
 export function formatModelRef(model: { provider: string; id: string }): string;
 
-/** UTF-8 bytes per token the need is counted with: one, so the need is counted high for any text. */
-export const COLD_BYTES_PER_TOKEN = 1;
+/** The longest ASCII word counted at a third of its length; longer or non-ASCII words count a token a UTF-8 byte. */
+export const COLD_SHORT_WORD = 20;
+export function coldTextTokens(text: string): number;
 
-/** The requests Pi's compact() sends for a preparation, each in UTF-8 bytes: one, or two for a split turn. */
-export function coldRequestBytes(
+/** The requests Pi's compact() sends for a preparation, each in tokens as counted above: one, or two for a split turn. */
+export function coldRequestTokens(
 	preparation: Pick<CompactionPreparation, "messagesToSummarize" | "turnPrefixMessages" | "isSplitTurn" | "previousSummary">,
 	customInstructions?: string,
 ): number[];
 
 /** The larger request, in tokens. */
-export function coldNeedTokens(requestBytes: number[]): number;
+export function coldNeedTokens(requestTokens: number[]): number;
 
 /** Why a model can't write a summary this way whatever the session's size, or undefined. */
 export function coldUnusable(model: { api: string }): string | undefined;
@@ -469,8 +470,8 @@ The owner's answers to section 9: **1. yes**, the picked model takes every fallb
 1. **A reply that doesn't end in a normal stop is a failure**, whether it ends `error`, `aborted` (a provider or gateway cancelled it while the compaction's own signal was live) or at the output limit, whatever text came before. A failure stops the cold path before any further request, and Pi's own compaction runs (a cancel for a real local abort). Section 3.
 2. **Emptiness is checked after the file lists are taken out**: a reply holding only `<read-files>`/`<modified-files>` is no summary.
 3. **The privacy note says what Pi's summarizer sends**: user messages in full, so the full output of shell commands run with `!`; tool calls with their arguments; and, on Pi before 1.2 (checked: 1.1.0 sends them, 1.2.0 doesn't), the assistant's thinking. Section 6, and the picker row's description.
-4. **Oversized requests.** (a) The output cap the fit computed is passed as `maxTokens` with every request, less the thinking a model that can't turn it off adds. (b) The need is counted in UTF-8 bytes, one token each: the reviewer's base64 attachment (221,872 characters, 151,599 tokens in o200k_base) is refused by a 128k window, and 20,000 rare CJK characters (46,512 tokens in cl100k_base) are counted at 60,000. A request the provider still rejects ends in the fallback.
-5. **An unknown lifetime is never cold**, with no exception: the expiry made unknown in a keep-warm period is tried on the cached path too (trigger 1 no longer lists it). Section 2.
+4. **Oversized requests.** (a) The output cap the fit computed is passed as `maxTokens` with every request, less the thinking a model that can't turn it off adds. (b) The need is counted by words (round 2, replacing round 1's one token per byte, which counted English 4-5 times its size so that a big cold session would almost never fit): an ASCII word of up to 20 characters at a third of its length, at least one; any other word at a token a UTF-8 byte. The reviewer's base64 attachment (221,872 characters, 151,599 tokens in o200k_base) is refused by a 128k window; 20,000 rare CJK characters (46,512 tokens in cl100k_base) are counted at 60,000; a paragraph of English prose of 122 tokens (o200k_base) at 155. A request the provider still rejects ends in the fallback.
+5. **An unknown lifetime or expiry is never a reason to use the picked model** (round 2, replacing round 1, which tried the cached path where a keep-warm period's expiry became unknown and so changed 0.9.0). With the setting off, everything there is as in 0.9.0; with it on, where the only reason the cached path is not taken is an unknown expiry, Pi's own compaction runs on the session's model, as in 0.9.0. A model with no lifetime at all still has its cached path tried, as in 0.9.0. Section 2.
 6. **A split turn whose history summary is empty** sends no prefix (as 2). The record's `requests` counts the requests really sent: one after an Esc during the first.
 7. **`/cache-keeper` makes no prediction** of which model would compact: it shows the setting, the model, its window and its price or `subscription`, and says the choice is made at each compaction, from where Pi cuts. Section 5.
 8. **No comparison with the session's model** on the card: the picked model's own cost only. `sessionModelCost` is gone from the record.

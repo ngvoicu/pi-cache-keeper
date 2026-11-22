@@ -22,7 +22,7 @@ import {
 	coldFit,
 	coldModelParts,
 	coldNeedTokens,
-	coldRequestBytes,
+	coldRequestTokens,
 	coldUnusable,
 	fitColdLine,
 	formatModelRef,
@@ -362,6 +362,8 @@ const LEGACY_CARD_TYPE = "cached-compaction";
 const PREFIX_MISMATCH = "pi-cache-keeper: request prefix differs from the cached request";
 const BRIDGE_API = "claude-bridge";
 const COMPACTION_ABORTED = "the compaction was aborted";
+/** The cached path's reason where a taken period's expiry is unknown: Pi's own compaction runs, never the cold model. */
+const EXPIRY_UNKNOWN = "the prompt cache's expiry is unknown";
 const COLD_ROW_LABEL = "Compact a cold cache with";
 /** The cold model list's first line, editing a session: drop its own value. Never a model reference (it has no slash). */
 const COLD_DEFAULT_PICK = "default";
@@ -2128,11 +2130,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 	});
 
-	// For a compaction a cache whose expiry is unknown is not cold: the cached path is tried (a keep-warm refresh is never
-	// sent on one).
-	const checkCachedPath = (ctx: ExtensionContext, entries: SessionEntry[], model: Model<Api> | undefined): CachedPath | { reason: string } => checkRequestPath(ctx, entries, model, captured, true);
+	const checkCachedPath = (ctx: ExtensionContext, entries: SessionEntry[], model: Model<Api> | undefined): CachedPath | { reason: string } => checkRequestPath(ctx, entries, model, captured);
 	// The same check for a given request: a keep-warm period checks the request of its own answer.
-	const checkRequestPath = (ctx: ExtensionContext, entries: SessionEntry[], model: Model<Api> | undefined, request: CapturedRequest | undefined, unknownTried = false): CachedPath | { reason: string } => {
+	const checkRequestPath = (ctx: ExtensionContext, entries: SessionEntry[], model: Model<Api> | undefined, request: CapturedRequest | undefined): CachedPath | { reason: string } => {
 		if (!request) return { reason: "no request since the session started or compacted, or since the model or branch changed" };
 		if (model?.provider !== request.model.provider || model.id !== request.model.id) return { reason: "the model changed since the last request" };
 		let prefix: CachedPrefix | undefined;
@@ -2146,7 +2146,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const cache = look(ctx, { model: request.model, entries });
 		if (!cache.cached) return { reason: "the last request did not use the prompt cache" };
 		// A taken period's cache whose expiry is unknown: nothing is sent on it.
-		if (cache.unknown && !unknownTried) return { reason: `the prompt cache's expiry is unknown: ${cache.unknown}` };
+		if (cache.unknown) return { reason: `${EXPIRY_UNKNOWN}: ${cache.unknown}` };
 		if (cache.sendBy !== undefined && Date.now() >= cache.sendBy) return { reason: "the prompt cache has expired" };
 		return { request, prefix, trailing: trailing.messages, cache };
 	};
@@ -2171,7 +2171,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const coldSessionNeed = (ctx: ExtensionContext): number | undefined => {
 		try {
 			const messages = ctx.sessionManager.buildSessionProjection().messages;
-			return coldNeedTokens(coldRequestBytes({ messagesToSummarize: messages, turnPrefixMessages: [], isSplitTurn: false, previousSummary: undefined }));
+			return coldNeedTokens(coldRequestTokens({ messagesToSummarize: messages, turnPrefixMessages: [], isSplitTurn: false, previousSummary: undefined }));
 		} catch {
 			return undefined;
 		}
@@ -2245,7 +2245,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if ("why" in candidate) return skip(candidate.why);
 		const { model } = candidate;
 		cold.via = accessVia(accessReader(ctx)(model));
-		cold.needTokens = coldNeedTokens(coldRequestBytes(preparation, event.customInstructions));
+		cold.needTokens = coldNeedTokens(coldRequestTokens(preparation, event.customInstructions));
 		if (model.contextWindow > 0) cold.window = model.contextWindow;
 		const thinking = clampThinkingLevel(model, "off");
 		cold.thinking = thinking;
@@ -2323,6 +2323,12 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			if (fromExpiry) {
 				decision = trace(ctx, { ...record, outcome: "cancelled", reason, mismatch: diff });
 				return { cancel: true };
+			}
+			// An unknown lifetime or expiry is never a reason to use the cold compaction model: Pi's own compaction runs, as in
+			// 0.9.0.
+			if (reason.startsWith(EXPIRY_UNKNOWN)) {
+				decision = trace(ctx, { ...record, outcome: "fallback", reason, mismatch: diff });
+				return undefined;
 			}
 			return coldSummary(ctx, event, { ...record, reason, mismatch: diff });
 		};
@@ -3006,7 +3012,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			}
 			const check = checkCachedPath(ctx, entries, model);
 			const next = "reason" in check
-				? inEffect().coldCompactionModel
+				? inEffect().coldCompactionModel && !check.reason.startsWith(EXPIRY_UNKNOWN)
 					? `not from the cache, because ${check.reason}; the cold compaction model writes the summary where it can, else Pi's compaction`
 					: `Pi's compaction, because ${check.reason}`
 				: `cached path; last request ${formatDuration(Date.now() - check.request.at)} ago with ${check.request.transcript.length} messages, ${check.trailing.length} since. The request prefix is checked when it runs.`;

@@ -351,7 +351,7 @@ test("each case decided before sending: nothing is returned, no request is sent,
 		["a model Pi no longer lists", { cold: "google/gemini-9" }, "Pi no longer lists it"],
 		["no credentials", { noAuth: ["google"] }, "Pi has no credentials for google"],
 		["no window", { models: [opus(), { ...gemini(), contextWindow: 0 }] }, "it declares no context window"],
-		["too small", { models: [opus(), { ...gemini(), contextWindow: 4_000, maxTokens: 2_000 }] }, "it needs about 4k tokens and its window is 4k"],
+		["too small", { models: [opus(), { ...gemini(), contextWindow: 4_000, maxTokens: 2_000 }] }, "it needs about 3k tokens and its window is 4k"],
 		["a virtual model", { models: [opus(), { ...gemini(), api: "pi-virtual" }] }, "it is a virtual model"],
 		["through pi-claude-bridge", { models: [opus(), { ...gemini(), api: "claude-bridge" }] }, "it runs through pi-claude-bridge"],
 	];
@@ -538,7 +538,7 @@ test("trigger 3, the conversation doesn't fit the session's model: a switch to a
 	assert.equal(await tiny.compaction("overflow"), undefined);
 	assert.equal(tiny.calls.length, 0);
 	const record = lastRecord();
-	assert.deepEqual([record.outcome, record.cold.skipped, record.cold.window], ["fallback", "it needs about 4k tokens and its window is 8k", 8_000]);
+	assert.deepEqual([record.outcome, record.cold.skipped, record.cold.window], ["fallback", "it needs about 3k tokens and its window is 8k", 8_000]);
 });
 
 // ------------------------------------------------------------------- the review's findings (0.10.0, round 1)
@@ -601,8 +601,8 @@ test("review 6: an empty history summary on a split turn stops before the prefix
 
 // Finding 4a: the output cap the fit rule assumed is the one passed with the request.
 test("review 4a: the request carries the output cap the fit rule computed, less the thinking a model that can't turn it off adds", async (t) => {
-	const { coldFit, coldNeedTokens, coldRequestBytes } = await import("../cold-compaction.ts");
-	const need = coldNeedTokens(coldRequestBytes(preparation() as Any));
+	const { coldFit, coldNeedTokens, coldRequestTokens } = await import("../cold-compaction.ts");
+	const need = coldNeedTokens(coldRequestTokens(preparation() as Any));
 	for (const [label, model, reserve] of [
 		["thinking off", { ...gemini(), contextWindow: 200_000, maxTokens: 200_000 }, 0],
 		["lowest level low", { ...gemini(), contextWindow: 200_000, maxTokens: 200_000, thinkingLevelMap: { off: null, minimal: null } }, 2_048],

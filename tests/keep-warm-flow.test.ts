@@ -4747,25 +4747,22 @@ test("stop, the last gate: the one reading that sees a new stop decides; a faili
 	}
 });
 
-// Finding 5 (review of 0.10.0, round 1): an unknown lifetime is never cold. A period kept warm on a declared lifetime
-// that then can't be read any more (the expiry is unknown): /compact tries the cached path on the session's model, and
-// the cold compaction model gets nothing.
-test("review 5: a declared lifetime that disappears in a keep-warm period: the cached path is tried, not the cold compaction model", async (t) => {
-	t.after(() => mock.timers.reset());
+// Finding 5 (review of 0.10.0): an unknown lifetime or expiry is never a reason to use the cold compaction model. The
+// reviewer's probe: a period kept warm on a declared lifetime that then can't be read any more (the expiry is unknown),
+// and /compact. With the setting off (absent, so the same test runs on 0.9.0), 0.10.0 does exactly what 0.9.0 does; with
+// it on, the same, and the picked model is never asked.
+const unknownExpiryProbe = async (keeper: Record<string, unknown>) => {
 	clock();
-	fresh({ coldCompactionModel: "scratch/target", modelData: false, compactAtPercent: 0, compactAtTokens: 0, compactBeforeExpiry: false });
+	fresh({ modelData: false, compactAtPercent: 0, compactAtTokens: 0, compactBeforeExpiry: false, ...keeper });
 	const h = harness({ lifetime: 1800, ui: true, model: NO_BREAKDOWN, cost: WITH_WRITE });
 	const target = { ...h.model, provider: "scratch", id: "target" };
 	const requests: string[] = [];
 	Object.assign(h.ctx.modelRegistry, {
 		find: () => target,
 		hasConfiguredAuth: () => true,
-		streamSimple: (m: { provider: string; api: string; id: string }, _context: unknown, o: { onPayload?: (p: unknown) => unknown }) => {
+		streamSimple: (m: { provider: string; api: string; id: string }) => {
 			requests.push(m.provider);
-			const result = (async () => {
-				if (m.provider !== "scratch") await o.onPayload?.({ ...h.sent, messages: [...(h.sent as { messages: unknown[] }).messages, { role: "user", content: "Summarize." }] });
-				return { role: "assistant", api: m.api, provider: m.provider, model: m.id, content: [{ type: "text", text: "A full checkpoint" }], stopReason: "stop", usage: h.usage(), timestamp: Date.now() };
-			})();
+			const result = Promise.resolve({ role: "assistant", api: m.api, provider: m.provider, model: m.id, content: [{ type: "text", text: "A full checkpoint" }], stopReason: "stop", usage: h.usage(), timestamp: Date.now() });
 			return { result: () => result };
 		},
 	});
@@ -4773,16 +4770,41 @@ test("review 5: a declared lifetime that disappears in a keep-warm period: the c
 	await h.idle(10_000);
 	delete (h.model as { promptCache?: unknown }).promptCache;
 	await h.idle(15_000);
-	assert.match(await h.command("cache-keeper"), /cache: lifetime unknown, so no countdown/);
-	const result = (await h.emit("session_before_compact", {
+	const status = (await h.command("cache-keeper")).split("\n").filter((line) => line.startsWith("cache:") || line.startsWith("next compaction:"));
+	const result = await h.emit("session_before_compact", {
 		reason: "manual",
 		signal: new AbortController().signal,
 		branchEntries: [...h.branch],
 		preparation: { tokensBefore: 600_007, firstKeptEntryId: "u", messagesToSummarize: [{ role: "user", content: "earlier user text", timestamp: 0 }], turnPrefixMessages: [], isSplitTurn: false, fileOps: { read: new Set(), written: new Set(), edited: new Set() }, settings: { reserveTokens: 16_384, keepRecentTokens: 20_000 } },
-	})) as { compaction?: { summary: string } } | undefined;
-	const record = allTraces().filter((r) => r.event === "compact").at(-1);
-	assert.ok(!requests.includes("scratch"), `the cold model was asked: ${requests.join(", ")}`);
-	assert.ok(requests.length > 0, "the session's model was asked");
-	assert.equal(record.outcome, "cached", `${record.outcome}: ${record.reason}`);
-	assert.match(result?.compaction?.summary ?? "", /^A full checkpoint/);
+	});
+	const { at: _at, cwd: _cwd, ...record } = allTraces().filter((r) => r.event === "compact").at(-1);
+	mock.timers.reset();
+	return { status, result: result ?? null, requests, record };
+};
+// What 0.9.0 (v0.9.0, 4ef87ac) gives for the probe, captured by running this same test file there.
+const UNKNOWN_EXPIRY_ON_090 = {
+	status: ["cache: lifetime unknown, so no countdown", "next compaction: Pi's compaction, because the prompt cache's expiry is unknown: no lifetime can be read"],
+	result: null,
+	requests: [] as string[],
+	record: {
+		event: "compact",
+		trigger: "manual",
+		model: "cliproxyapi/sub/claude",
+		outcome: "fallback",
+		reason: "the prompt cache's expiry is unknown: no lifetime can be read",
+		tokensBefore: 600_007,
+		session: "s1",
+	},
+};
+
+test("review 5: an expiry that became unknown in a keep-warm period, the cold compaction model off: exactly what 0.9.0 does", async (t) => {
+	t.after(() => mock.timers.reset());
+	assert.deepEqual(await unknownExpiryProbe({}), UNKNOWN_EXPIRY_ON_090);
+});
+
+test("review 5: the same with the cold compaction model on: Pi's own compaction as in 0.9.0, and the picked model is never asked", async (t) => {
+	t.after(() => mock.timers.reset());
+	const on = await unknownExpiryProbe({ coldCompactionModel: "scratch/target" });
+	assert.ok(!on.requests.includes("scratch"), `the picked model was asked: ${on.requests.join(", ")}`);
+	assert.deepEqual(on, UNKNOWN_EXPIRY_ON_090);
 });
