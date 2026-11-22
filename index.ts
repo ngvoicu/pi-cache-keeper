@@ -438,8 +438,17 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	let piWarmAt: number | undefined;
 	// The session this instance runs (from its session_start), for what settles after its context went stale.
 	let sessionId: string | undefined;
-	// The expiry whose try to compact before it was spent: one try per expiry, across every start of the countdown.
-	let spentExpiry: number | undefined;
+	// The expiries whose try to compact before them was spent, for the answer the countdown read them from: one try per
+	// expiry, for every expiry that answer has had (a retention switched back returns to an expiry already tried), across
+	// every start of the countdown. A new answer starts with none.
+	const spent: { answer: number | undefined; expiries: Set<number> } = { answer: undefined, expiries: new Set() };
+	const spentFor = (answer: number | undefined): Set<number> => {
+		if (spent.answer !== answer) {
+			spent.answer = answer;
+			spent.expiries = new Set();
+		}
+		return spent.expiries;
+	};
 	// The one read of the cache everything reads (cache-clock.ts): the countdown and the footer, the refresh and its last
 	// gate, compacting before expiry and its last check, the cached path's check, /cache-keeper and what Pi's warming is
 	// told. For a period the extension took at its start, on its model and while the branch in front of the user still
@@ -1661,12 +1670,12 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// seen: the countdown then starts again from that reading. Where Pi warms such a period and nothing seen says its
 	// cache is gone yet (`goneBy`), the countdown shows that, for display only: nothing is sent on it.
 	// `triedFor`: the expiry whose try to compact before it is already spent (a failed compaction's); any other expiry the
-	// countdown reads gets its own try. The spent expiry is the window's (`spentExpiry`), so every start of the countdown
-	// carries it, whatever starts it (a run that sent nothing, a refresh landing, a change of regime): one try per expiry.
+	// countdown reads gets its own try. The spent expiries are the window's (`spent`, per answer), so every start of the
+	// countdown carries them, whatever starts it (a run that sent nothing, a refresh landing, a change of regime).
 	const startTimer = (ctx: ExtensionContext, triedFor?: number) => {
-		if (triedFor !== undefined) spentExpiry = triedFor;
 		stopTimer(ctx, false);
 		const first = look(ctx);
+		if (triedFor !== undefined) spentFor(first.answeredAt).add(triedFor);
 		timerRegime = first.regime;
 		if (first.regime === "period" && first.lifetime?.ms !== shownLifetimeMs) {
 			modelView = ctx.hasUI && ctx.model ? modelViewOf(ctx, ctx.model) : modelView;
@@ -1738,17 +1747,17 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				// Keep-warm off, or a period the extension did not take: as with keep-warm off.
 				if (remaining <= warmLead && !warmChecked) {
 					warmChecked = true;
-				} else if (expiresAt !== undefined && remaining <= EXPIRY_LEAD_MS && spentExpiry !== expiresAt) {
+				} else if (expiresAt !== undefined && remaining <= EXPIRY_LEAD_MS && !spentFor(view.answeredAt).has(expiresAt)) {
 					// Pi's own refresh may still be in flight; its usage entry moves the expiry when it lands.
 					if (piWarmAt !== undefined && Date.now() - piWarmAt < 30_000) return;
-					if (compactBeforeExpiry(ctx, remaining, expiresAt, skipsTraced) !== "postponed") spentExpiry = expiresAt;
+					if (compactBeforeExpiry(ctx, remaining, expiresAt, skipsTraced) !== "postponed") spentFor(view.answeredAt).add(expiresAt);
 				}
 			} else {
 				// A taken period, whoever warms it: its refresh where the extension warms it, and compacting before the expiry
 				// its own facts give (Pi's refreshes do not move it, so nothing waits for them).
 				if (remaining <= warmLead) keepWarm(ctx, timer);
-				if (!warming && !out && expiresAt !== undefined && remaining <= EXPIRY_LEAD_MS && spentExpiry !== expiresAt) {
-					if (compactBeforeExpiry(ctx, remaining, expiresAt, skipsTraced, timer) !== "postponed") spentExpiry = expiresAt;
+				if (!warming && !out && expiresAt !== undefined && remaining <= EXPIRY_LEAD_MS && !spentFor(view.answeredAt).has(expiresAt)) {
+					if (compactBeforeExpiry(ctx, remaining, expiresAt, skipsTraced, timer) !== "postponed") spentFor(view.answeredAt).add(expiresAt);
 				}
 			}
 		};

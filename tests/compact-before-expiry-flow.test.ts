@@ -18,7 +18,7 @@ const HOUR = 3_600_000;
 // The reply lands at 1 s and the model's cache lasts an hour.
 const EXPIRES = 1_000 + HOUR;
 
-function harness() {
+function harness(promptCache = { short: 3600, long: 3600 }) {
 	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 	const pi = {
 		on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(event, handler),
@@ -30,7 +30,7 @@ function harness() {
 	};
 	cacheKeeper(pi as never);
 
-	const model = { provider: "cliproxyapi", id: "sub/claude", api: "anthropic-messages", promptCache: { short: 3600, long: 3600 }, contextWindow: 1_000_000, maxTokens: 64_000 };
+	const model = { provider: "cliproxyapi", id: "sub/claude", api: "anthropic-messages", promptCache, contextWindow: 1_000_000, maxTokens: 64_000 };
 	const user = { role: "user", content: [{ type: "text", text: "hi" }], timestamp: 0 };
 	const reply = { role: "assistant", content: [{ type: "text", text: "hello" }], timestamp: 1_000, stopReason: "stop", usage: { input: 2, output: 5, cacheRead: 600_000, cacheWrite: 0 } };
 	const branch: unknown[] = [
@@ -92,14 +92,14 @@ const summary = () => traces().map((r) => `${r.action}${r.reason ? `: ${r.reason
 const BUSY = "skip: Pi is busy or has queued messages";
 
 // Starts at 1 s with the reply just landed and Pi idle; moves the clock to `at`.
-function start(t: { after: (fn: () => void) => void }) {
+function start(t: { after: (fn: () => void) => void }, promptCache?: { short: number; long: number }) {
 	mock.timers.enable({ apis: ["setInterval", "Date"], now: 1_000 });
 	t.after(() => {
 		mock.timers.reset();
 		writeSettings(true);
 	});
 	writeFileSync(join(dir, "cache-keeper.jsonl"), "");
-	const h = harness();
+	const h = harness(promptCache);
 	h.emit("agent_settled");
 	// A second at a time, so each tick of the countdown sees its own time.
 	const to = (at: number) => {
@@ -265,4 +265,32 @@ test("a run that sends nothing after a failed compaction does not give the same 
 	h.piWarms();
 	h.to(EXPIRES + HOUR - 20_000);
 	assert.equal(h.state.compacts, 2);
+});
+
+// The review's sequence (T-319, finding 6): a route whose short cache lasts 300 s and long one 305 s; the reply lands at
+// 1 s, so the expiries are 301 s and 306 s. Every compaction fails. The retention goes short -> long -> short for the
+// same answer: the first expiry, tried already, is not tried again on its return. One try per expiry the answer has had.
+test("a retention switched short -> long -> short for the same answer tries each expiry once: 300, 305, not 300 again", (t) => {
+	const h = start(t, { short: 300, long: 305 });
+	const retention = process.env.PI_CACHE_RETENTION;
+	t.after(() => {
+		if (retention === undefined) delete process.env.PI_CACHE_RETENTION;
+		else process.env.PI_CACHE_RETENTION = retention;
+	});
+	delete process.env.PI_CACHE_RETENTION;
+	h.state.fail = true;
+	h.to(281_000);
+	assert.equal(h.state.compacts, 1, "the short expiry, 20 s before it");
+	process.env.PI_CACHE_RETENTION = "long";
+	h.to(286_000);
+	assert.equal(h.state.compacts, 2, "the long expiry gets its own try");
+	process.env.PI_CACHE_RETENTION = "";
+	h.to(290_000);
+	h.to(301_000);
+	assert.equal(h.state.compacts, 2, "the short expiry again: tried already for this answer");
+	// Each try's expiry, from its trace record: when it was made plus the seconds left. Counted from the reply at 1 s.
+	const lifetimes = traces()
+		.filter((r) => r.action === "compact")
+		.map((r) => (Date.parse(r.at) + r.secondsLeft * 1_000 - 1_000) / 1_000);
+	assert.deepEqual(lifetimes, [300, 305], "one summary request per expiry: 300, 305, and not 300 again");
 });
