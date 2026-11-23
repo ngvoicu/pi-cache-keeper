@@ -44,6 +44,18 @@ const tools = [{ name: "read", description: "Read a file", parameters: { type: "
 const STORE = Symbol.for("pi-cache-keeper.warm-misses");
 const STOP_SEEN = Symbol.for("pi-cache-keeper.stop-seen");
 export const flush = () => new Promise((resolve) => setImmediate(resolve));
+/**
+ * Waits until `done()` holds, turning the event loop, for at most `ms` of real time (Date and the timers are mocked;
+ * performance.now is not). For what finishes after real I/O (Pi reading models.json and the credentials again), which
+ * takes no fixed number of turns: a slow disk takes many more.
+ */
+export const until = async (done: () => boolean, what: string, ms = 10_000) => {
+	const start = performance.now();
+	while (!done()) {
+		assert.ok(performance.now() - start < ms, `waited ${ms} ms for ${what}`);
+		await flush();
+	}
+};
 const encoder = new TextEncoder();
 const packet = (event: { type: string }) => encoder.encode(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
 const usage = (read: number, write: number) => ({

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { dir, flush, inWindow, lineOf, skip, writeDefaults, type Any } from "./session-runtime.ts";
+import { dir, inWindow, lineOf, skip, until, writeDefaults, type Any } from "./session-runtime.ts";
 
 process.env.ANTHROPIC_API_KEY = "sk-fixture";
 
@@ -44,16 +44,16 @@ const providersDev = (async (input: string) => {
 }) as typeof fetch;
 
 const modelsFile = () => (existsSync(join(dir, "models.json")) ? JSON.parse(readFileSync(join(dir, "models.json"), "utf8")) : {});
-const settle = async () => {
-	for (let i = 0; i < 50; i++) await flush();
-};
+// The refresh is taken up by Pi once it has read models.json again and the extension has selected the session's model
+// anew: then the session's model has the window. That takes real I/O, so no fixed number of turns of the event loop.
+const windowIs = (w: { runtime: Any }, tokens: number) => () => w.runtime.session.model?.contextWindow === tokens;
 
 test("a session's own compactAtPercent is taken of the window providers.dev's safe value gives; a window that is pi's own is not written, and the session's setting holds on Pi's window", { skip }, async () => {
 	writeDefaults({ modelData: true, keepWarmMinutes: 0, compactAtPercent: 90, compactAtTokens: 0, compactBeforeExpiry: false });
 	globalThis.fetch = providersDev;
 	const result = await inWindow(
 		async (w) => {
-			await settle();
+			await until(windowIs(w, 400_000), "the session's model to carry the 400k window");
 			assert.ok(asked.some((url) => url.includes("/entries?provider=anthropic")), `fetched: ${asked.join(", ")}`);
 			assert.deepEqual(modelsFile().providers?.anthropic?.modelOverrides?.[MODEL], { contextWindow: 400_000 }, "the safe window (models.dev) replaces Pi's");
 			await w.answer();
@@ -67,7 +67,7 @@ test("a session's own compactAtPercent is taken of the window providers.dev's sa
 			dataset = { version: "d2", window: 500_000, source: "pi.dev" };
 			const runner: Any = w.runtime.session.extensionRunner;
 			await runner.getCommand("cache-keeper-refresh").handler("", runner.createCommandContext());
-			await settle();
+			await until(windowIs(w, 1_000_000), "the session's model to carry Pi's own 1000k window again");
 			assert.equal(modelsFile().providers?.anthropic?.modelOverrides?.[MODEL], undefined, "pi's own window is not pinned in models.json");
 			const store = JSON.parse(readFileSync(join(dir, "cache-keeper-models.json"), "utf8"));
 			assert.equal(store.reading, 2);
