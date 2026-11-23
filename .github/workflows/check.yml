@@ -1,0 +1,50 @@
+# Tests every push to main and every pull request at once: npm run check, as publish.yml's test job runs it (the same
+# pinned Node image, npm install as there), so a change is checked when it lands, not only at the next publish
+# (publish.yml tests only a version npm lacks). It publishes nothing: contents: read, no secret, no environment.
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch or pull request replaces a check still running.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  # The same as publish.yml's.
+  NODE_IMAGE: node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
+
+jobs:
+  check:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The commit's tree written out by git (checkout-index: no .git), as publish.yml's test job does.
+      - name: The commit's tree (git only)
+        run: |
+          set -euo pipefail
+          GIT_INDEX_FILE="$RUNNER_TEMP/tree.index" git read-tree HEAD
+          GIT_INDEX_FILE="$RUNNER_TEMP/tree.index" git checkout-index -a --prefix="$RUNNER_TEMP/tree/"
+      # The container gets the tree and the network, and none of the runner's variables, tokens or caches. The
+      # repository keeps no lockfile: package.json pins pi's packages (the devDependencies) exactly.
+      - name: Install the dev dependencies
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE"
+          npm install --no-audit --no-fund --no-package-lock
+      - name: npm run check
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE"
+          sh -c 'npm ls @earendil-works/pi-coding-agent && npm run check'

@@ -6,6 +6,9 @@ provenance, then tags it and makes its GitHub release. The dry-run switch is off
 published by hand; 0.10.3 is the first the workflow published, and the first with provenance
 ([The owner's one-time steps](#the-owners-one-time-steps)).
 
+Every push to `main` and every pull request is tested at once by `.github/workflows/check.yml` (`npm run check` in
+the same pinned container as `publish.yml`'s `test` job; it publishes nothing), not only a push that names a new version.
+
 The workflow is pi-provimux's `publish.yml` (its `docs/FOLLOWING.md`, 4), cut down to publishing: there is no
 upstream to follow, so no `follow.yml`, no merge, no guard on someone else's changes.
 
