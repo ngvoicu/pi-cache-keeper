@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-11-23
+
+### Changed
+- **Published by GitHub, with provenance** — 0.10.3 is the first version GitHub Actions publishes to npm (`.github/workflows/publish.yml`, through npm's trusted publishing, no token), and the first with provenance: its page on npmjs.com links it to the commit and the workflow run that built it. 0.10.2 was published by hand and has none. The code is 0.10.2's; nothing else changed.
+
 ## [0.10.2] - 2026-11-23
 
 ### Changed
