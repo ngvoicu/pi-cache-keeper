@@ -1,0 +1,315 @@
+# Publishes the version main names, if npm does not have it (docs/publishing.md). It reads state, not events, so a
+# rerun is always safe. The only workflow npm trusts: the trusted publisher of pi-cache-keeper names this file and
+# the environment npm. There is no token and no secret anywhere.
+#
+# Started by a push to main, or by hand (gh workflow run publish.yml -R ngvoicu/pi-cache-keeper -f dry_run=no).
+#
+# DRY RUN. A push takes the default below, 'yes': every check runs, "publish" runs npm publish --dry-run on the
+# tested archive with the OIDC request variables removed (no token exchange, nothing uploaded), "tag" only says what
+# it would do, and no issue is closed. A run by hand can choose. To make pushes live, change 'yes' to 'no' in both
+# places marked "the switch" (docs/publishing.md).
+#
+# Every job runs on GitHub only and from refs/heads/main only, checked exactly by the shell before anything else;
+# every job that can write or holds the OIDC token is in an environment GitHub admits from the branch main alone:
+# npm for publish, main-only for tag and notify.
+#   plan     the publish guard (publish.sh plan): the version named first, no .npmrc, then npm view against the
+#            public registry from a neutral folder, npm pack --dry-run --ignore-scripts, what the tarball may hold
+#   test     the dev dependencies installed, the packed package loaded by pi (load.mjs), npm run check, in a
+#            container without the runner's credentials, on a tree written out by git (no .git, nothing a later step
+#            uses). The archive it packs, loads and checks is recorded (sha512) and uploaded (publish-archive) before
+#            any dependency code runs
+#   publish  that very archive (publish.sh archive: by the artifact's id and digest, its sha512 the recorded one,
+#            its files exactly the commit's), then, in one step, main checked to be that commit and npm publish
+#            --ignore-scripts of the archive; no install, no script, no pack; id-token: write and the environment npm
+#   tag      v<version> at the published commit of the live main, and the GitHub release; environment main-only
+#   notify   the issue "publish: <version> — failed", or closes it once npm shows the version (never in a dry run);
+#            after a publish, npm is given up to 15 minutes to show the version before it counts as failed
+name: publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: npm publish --dry-run, no tag, no release'
+        type: choice
+        options: ['yes', 'no']
+        # The switch (1 of 2).
+        default: 'yes'
+
+# One publish at a time, never cancelled midway.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  # The switch (2 of 2): what a push does.
+  DRY_RUN: ${{ inputs.dry_run || 'yes' }}
+  NODE_IMAGE: node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
+
+jobs:
+  plan:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      sha: ${{ steps.plan.outputs.sha }}
+      publish: ${{ steps.plan.outputs.publish }}
+      published: ${{ steps.plan.outputs.published }}
+    steps:
+      - name: Only refs/heads/main
+        run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "publish runs from refs/heads/main only"; exit 1; }'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: The publish guard
+        id: plan
+        run: |
+          cp -R .github/publish "$RUNNER_TEMP/publish"
+          bash "$RUNNER_TEMP/publish/publish.sh" plan
+
+  test:
+    needs: plan
+    if: github.server_url == 'https://github.com' && needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    # The archive this job tests is the one publish uploads: its artifact, and its sha512 taken before any install.
+    outputs:
+      archive_id: ${{ steps.upload.outputs.artifact-id }}
+      archive_digest: ${{ steps.upload.outputs.artifact-digest }}
+      integrity: ${{ steps.archive.outputs.integrity }}
+    steps:
+      - name: Only refs/heads/main
+        run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "publish runs from refs/heads/main only"; exit 1; }'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      # The commit's tree written out by git (checkout-index: no .git, no export attribute), and this run's scripts.
+      # The container sees these folders only, never the workspace, whose .git the checkout's cleanup opens.
+      - name: The commit's tree (git only)
+        env:
+          SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          set -euo pipefail
+          [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo "plan named no commit"; exit 1; }
+          GIT_INDEX_FILE="$RUNNER_TEMP/tree.index" git read-tree "$SHA"
+          GIT_INDEX_FILE="$RUNNER_TEMP/tree.index" git checkout-index -a --prefix="$RUNNER_TEMP/tree/"
+          cp -R .github/publish "$RUNNER_TEMP/publish"
+          mkdir "$RUNNER_TEMP/pack"
+      # What publication packs: the clean export, packed before anything is installed into it, into a folder of its
+      # own. The loader gets this archive read-only.
+      - name: Pack the clean tree
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w:ro" -v "$RUNNER_TEMP/pack:/pack" -w /w "$NODE_IMAGE"
+          npm pack --ignore-scripts --pack-destination /pack
+      # What publish will upload, fixed before any dependency code runs: its sha512 is this job's output, and a copy,
+      # in a folder no container ever sees, is uploaded as the artifact publish-archive.
+      - name: Record the tested archive
+        id: archive
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          set -- "$RUNNER_TEMP"/pack/*
+          [ "$#" -eq 1 ] && [ -f "$1" ] && [ ! -L "$1" ] && [ "${1##*/}" = "pi-cache-keeper-$VERSION.tgz" ] ||
+            { echo "the pack folder is not the one archive pi-cache-keeper-$VERSION.tgz"; exit 1; }
+          mkdir "$RUNNER_TEMP/archive"
+          cp "$1" "$RUNNER_TEMP/archive/"
+          integrity="sha512-$(openssl dgst -sha512 -binary "$RUNNER_TEMP/archive/pi-cache-keeper-$VERSION.tgz" | base64 -w0)"
+          [ "$integrity" = "sha512-$(openssl dgst -sha512 -binary "$1" | base64 -w0)" ] || { echo "the copy differs"; exit 1; }
+          echo "integrity=$integrity" >>"$GITHUB_OUTPUT"
+          echo "The tested archive: pi-cache-keeper-$VERSION.tgz, $integrity" | tee -a "$GITHUB_STEP_SUMMARY"
+          tar -tzf "$1" | sort | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload the tested archive
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: publish-archive
+          path: ${{ runner.temp }}/archive/
+          if-no-files-found: error
+          retention-days: 7
+      # The container gets the tree and the network, and none of the runner's variables, tokens or caches. The
+      # repository keeps no lockfile: package.json pins pi's packages (the devDependencies) exactly.
+      - name: Install the dev dependencies
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE"
+          npm install --no-audit --no-fund --no-package-lock
+      # The clean tree's archive, loaded by pi's own loader from a consumer folder of its own (load.mjs); the
+      # installed tree gives only pi itself, through the package's peers.
+      - name: The packed package loads
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w:ro" -v "$RUNNER_TEMP/pack:/pack:ro"
+          -v "$RUNNER_TEMP/publish:/publish:ro" -w /w "$NODE_IMAGE"
+          sh -c 'set -- /pack/*.tgz && [ "$#" -eq 1 ] && [ -f "$1" ] && node /publish/load.mjs "$1" /w/node_modules'
+      - name: npm run check
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE"
+          sh -c 'npm ls @earendil-works/pi-coding-agent && npm run check'
+
+  publish:
+    needs: [plan, test]
+    if: github.server_url == 'https://github.com' && needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The trusted publisher names this environment; GitHub admits only main to it.
+    environment: npm
+    concurrency:
+      group: pi-cache-keeper-main
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+      # To read the test job's artifact by its id (publish.sh archive).
+      actions: read
+    steps:
+      - name: Only refs/heads/main
+        run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "publish runs from refs/heads/main only"; exit 1; }'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      # No registry-url: setup-node would write an .npmrc whose _authToken npm would try instead of OIDC.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: The npm CLI (trusted publishing needs 11.5.1 or later)
+        run: |
+          v=$(npm --version)
+          echo "node $(node --version), npm $v"
+          [ "$(printf '%s\n%s\n' 11.5.1 "$v" | sort -V | head -n 1)" = 11.5.1 ] || { echo "npm $v is older than 11.5.1"; exit 1; }
+      # The archive the test job packed, loaded and checked, never a fresh pack (npm versions compress differently):
+      # by its artifact's id and digest, its sha512 the one recorded before any dependency code ran, its files exactly
+      # those npm packs from the commit, with the commit's bytes. Written outside the checkout.
+      - name: The tested archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ID: ${{ needs.test.outputs.archive_id }}
+          DIGEST: ${{ needs.test.outputs.archive_digest }}
+          INTEGRITY: ${{ needs.test.outputs.integrity }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          cp -R .github/publish "$RUNNER_TEMP/publish"
+          bash "$RUNNER_TEMP/publish/publish.sh" archive \
+            "$ID" "$DIGEST" "$INTEGRITY" "$SHA" "$VERSION" "$RUNNER_TEMP/release"
+      # One step: the archive is the tested one and main is this commit, right before the upload.
+      - name: Check main, then npm publish
+        env:
+          SHA: ${{ needs.plan.outputs.sha }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          INTEGRITY: ${{ needs.test.outputs.integrity }}
+        run: |
+          set -euo pipefail
+          fail() { echo "$*"; exit 1; }
+          archive="$RUNNER_TEMP/release/pi-cache-keeper-$VERSION.tgz"
+          [ -f "$archive" ] && [ ! -L "$archive" ] || fail "no tested archive"
+          [ "sha512-$(openssl dgst -sha512 -binary "$archive" | base64 -w0)" = "$INTEGRITY" ] || fail "the archive is not the tested one"
+          [ "$(git rev-parse HEAD)" = "$SHA" ] || fail "the checkout is not $SHA"
+          [ -z "$(git status --porcelain --ignored)" ] || fail "the checkout is not clean"
+          [ -z "$(git ls-files -- '*.npmrc' '.npmrc')" ] || fail "an .npmrc"
+          [ "$(jq -r .version package.json)" = "$VERSION" ] || fail "package.json does not say $VERSION"
+          live=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)
+          [ "$live" = "$SHA" ] || fail "main is $live now, not $SHA: nothing is published from an older main"
+          if [ "$DRY_RUN" != no ]; then
+            # The same command on the same archive, as a dry run. npm exchanges the OIDC token before it looks at
+            # --dry-run; without the request variables it skips that exchange, and a dry run uploads nothing.
+            env -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u NPM_ID_TOKEN \
+              npm publish --dry-run --ignore-scripts --access public --registry https://registry.npmjs.org/ "$archive"
+            echo "Dry run: would publish pi-cache-keeper $VERSION, $INTEGRITY." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          npm publish --ignore-scripts --access public --registry https://registry.npmjs.org/ "$archive"
+          echo "Published pi-cache-keeper $VERSION, $INTEGRITY." | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # The tag v<version> at the published commit and the GitHub release (publish.sh tag): the commit must be in the
+  # live main; when npm already had the version, the commit npm recorded (gitHead) or the existing tag; otherwise the
+  # job fails and notify says so.
+  tag:
+    needs: [plan, publish]
+    if: >-
+      always() && github.server_url == 'https://github.com' && needs.plan.result == 'success' &&
+      (needs.publish.result == 'success' || needs.plan.outputs.published == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # GitHub admits only the branch main to this environment.
+    environment: main-only
+    concurrency:
+      group: pi-cache-keeper-main
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - name: Only refs/heads/main
+        run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "publish runs from refs/heads/main only"; exit 1; }'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          PUBLISHED: ${{ needs.plan.outputs.published }}
+        run: bash .github/publish/publish.sh tag "$VERSION" "$SHA" "$PUBLISHED"
+
+  notify:
+    needs: [plan, test, publish, tag]
+    if: always() && github.server_url == 'https://github.com' && needs.plan.outputs.version != ''
+    runs-on: ubuntu-latest
+    # Up to 15 minutes of waiting for npm to show a version just published (publish.sh report-publish).
+    timeout-minutes: 20
+    environment: main-only
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Only refs/heads/main
+        run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "publish runs from refs/heads/main only"; exit 1; }'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: .github/publish
+          persist-credentials: false
+      # publish.sh needs npm 11.5.1 or later: Node 24's.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: The publish issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          RESULT: >-
+            ${{ (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+            && format('plan {0}, test {1}, publish {2}, tag {3}', needs.plan.result, needs.test.result, needs.publish.result, needs.tag.result)
+            || 'success' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash .github/publish/publish.sh report-publish "$VERSION" "$RESULT"
