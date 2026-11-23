@@ -15,21 +15,25 @@ import {
 	type SessionBeforeCompactEvent,
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import { Container, fuzzyFilter, getKeybindings, Input, SettingsList, Text, type Component, type SelectItem, type SettingItem } from "@earendil-works/pi-tui";
+import { Container, fuzzyFilter, getKeybindings, Input, SettingsList, Text, type Component, type SettingItem } from "@earendil-works/pi-tui";
 import { cacheTier, hasExplicitPromptCache, isKimiOnMoonshot, lifetimeFor } from "./cache-state.ts";
 import {
-	fallbackChoiceLabel,
+	fallbackChoiceParts,
 	fallbackModelFit,
+	fallbackModelLabel,
 	fallbackModelParts,
 	fallbackNeedTokens,
 	fallbackRequestTokens,
 	fallbackRowLines,
 	fallbackUnusable,
 	formatModelRef,
+	modelSearchText,
 	orderFallbackChoices,
 	parseModelRef,
 	summaryBody,
 	type FallbackChoice,
+	type FallbackRow,
+	type LinePart,
 } from "./fallback-compaction.ts";
 import { cacheView, PeriodClock, startFacts, type CacheView, type StartFacts } from "./cache-clock.ts";
 import { written } from "./lifetime-evidence.ts";
@@ -421,31 +425,51 @@ type Handed = { stop?: WarmStop; reason: string; handedOver: "evidence" | "let g
 /** A clock time for what the user reads: "14:02". */
 const hhmm = (at: number) => new Date(at).toTimeString().slice(0, 5);
 
+/** A row of the fallback compaction model's list: the value it picks, how it is drawn, and the text it is searched by. */
+interface FallbackEntry {
+	value: string;
+	row: FallbackRow;
+	search: string;
+}
+
 /**
- * The fallback compaction model's list, drawn as Pi's select list is (its theme, its keys, `maxVisible` rows around the
- * selection), each row by fallbackRowLines: one line, a model id that doesn't fit shortened in the middle; or, where two rows
- * would still read the same, the whole id over two lines or more.
+ * The fallback compaction model's list, drawn as Pi's /model picker draws its models (Pi 1.6.0, model-selector.js
+ * updateList): "→ " on the selected row and its id in the accent colour, "✓ " on the value in effect, the distinct name
+ * and the `[provider]` badge muted; then the window, access and fit, muted. Its keys and its `maxVisible` rows around
+ * the selection are Pi's select list's. Each row is laid out by fallbackRowLines: the id, name and badge whole, over a
+ * second line where they need it; the window, access and fit cut first.
  */
-function fallbackModelList(items: SelectItem[], maxVisible: number, done: (value?: string) => void): Component & { handleInput: (data: string) => void } {
-	let selected = 0;
-	let cached: { width: number; rows: string[][] } | undefined;
+function fallbackModelList(
+	items: FallbackEntry[],
+	current: string | undefined,
+	searched: boolean,
+	maxVisible: number,
+	done: (value?: string) => void,
+): Component & { handleInput: (data: string) => void } {
+	// As Pi's picker: the list opens on the value in effect; a search selects its best match, the first.
+	let selected = searched ? 0 : Math.max(0, items.findIndex((entry) => entry.value === current));
+	let cached: { width: number; rows: LinePart[][][] } | undefined;
 	const rowsAt = (width: number) => {
-		if (cached?.width !== width) cached = { width, rows: fallbackRowLines(items.map((item) => ({ label: item.label ?? item.value, ref: item.value === FALLBACK_DEFAULT_PICK ? "" : item.value })), width) };
+		if (cached?.width !== width) cached = { width, rows: fallbackRowLines(items.map((item) => item.row), width) };
 		return cached.rows;
 	};
 	return {
 		render: (width: number) => {
 			const theme = getSelectListTheme();
 			if (items.length === 0) return [theme.noMatch("  No matching models")];
-			// As Pi's select list: a 2-column marker, and 2 columns kept free at the right.
-			const rows = rowsAt(Math.max(1, width - 4));
+			// As Pi's picker: the selection marker and the mark of the current model, 2 columns each; and, as Pi's select
+			// list, 2 columns kept free at the right.
+			const rows = rowsAt(Math.max(1, width - 6));
 			const start = Math.max(0, Math.min(selected - Math.floor(maxVisible / 2), items.length - maxVisible));
 			const end = Math.min(start + maxVisible, items.length);
 			const lines: string[] = [];
 			for (let i = start; i < end; i++) {
-				rows[i].forEach((text, at) => {
-					const line = `${at === 0 && i === selected ? "→ " : "  "}${text}`;
-					lines.push(i === selected ? theme.selectedText(line) : line);
+				const isSelected = i === selected;
+				const draw = (part: LinePart) =>
+					part.kind === "gap" ? part.text : part.kind === "id" || part.kind === "label" ? (isSelected ? theme.selectedText(part.text) : part.text) : theme.description(part.text);
+				rows[i].forEach((parts, at) => {
+					const marks = at > 0 ? "    " : `${isSelected ? theme.selectedPrefix("→ ") : "  "}${items[i].value === current ? theme.selectedPrefix("✓ ") : "  "}`;
+					lines.push(`${marks}${parts.map(draw).join("")}`);
 				});
 			}
 			if (start > 0 || end < items.length) lines.push(theme.scrollInfo(`  (${selected + 1}/${items.length})`.slice(0, Math.max(0, width - 2))));
@@ -2229,6 +2253,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const unusable = fallbackUnusable(model);
 		return {
 			ref: formatModelRef(model),
+			...(model.name ? { name: model.name } : {}),
 			...(model.contextWindow > 0 ? { window: model.contextWindow } : {}),
 			...(hasPrices(model) ? { price: priceAt(model.cost, need) } : {}),
 			subscription: accessVia(accessOf(model)) === "sub",
@@ -2247,14 +2272,16 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const mark = ownMark("fallbackCompactionModel");
 		if (!ref) return `off${mark}: when the cache can't be read, Pi's compaction writes the summary on this session's model`;
 		const candidate = fallbackCandidate(ctx, ref);
-		if ("why" in candidate) return `${ref}${mark} · ${fallbackUnavailable(ctx, ref) ? "not available now" : "can't be used"}: ${candidate.why}`;
+		// As Pi's picker names it: "devin/claude-opus-5-5 [provimux]".
+		const shown = fallbackModelLabel(ref);
+		if ("why" in candidate) return `${shown}${mark} · ${fallbackUnavailable(ctx, ref) ? "not available now" : "can't be used"}: ${candidate.why}`;
 		const { model } = candidate;
 		// No prediction: whether it writes a summary depends on the part Pi cuts off at that compaction.
 		const parts = fallbackModelParts(fallbackChoiceOf(model, undefined, accessReader(ctx)));
-		if (!(model.contextWindow > 0)) return `${ref}${mark} · ${parts.join(" · ")} · can't be used: it declares no context window`;
+		if (!(model.contextWindow > 0)) return `${shown}${mark} · ${parts.join(" · ")} · can't be used: it declares no context window`;
 		const never = fallbackModelFit(model, 0).fit;
-		if (!never.fits && never.never) return `${ref}${mark} · ${parts.join(" · ")} · can't be used: ${never.why}`;
-		return `${ref}${mark} · ${parts.join(" · ")} · whether it writes a summary is decided at each compaction, from the part Pi cuts off`;
+		if (!never.fits && never.never) return `${shown}${mark} · ${parts.join(" · ")} · can't be used: ${never.why}`;
+		return `${shown}${mark} · ${parts.join(" · ")} · whether it writes a summary is decided at each compaction, from the part Pi cuts off`;
 	};
 
 	// Why a reply of the fallback compaction model is no summary, or undefined: anything but a normal stop (an error, an abort,
@@ -2614,7 +2641,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 
 	// A session's own value, as the menu and the transcript say it.
 	const valueLabel = (name: SessionKey, value: SessionValue): string => {
-		if (name === "fallbackCompactionModel") return value === "" ? "off" : String(value);
+		// A model as Pi's picker names it, "devin/claude-opus-5-5 [provimux]"; the value saved stays "provimux/devin/claude-opus-5-5".
+		if (name === "fallbackCompactionModel") return value === "" ? "off" : fallbackModelLabel(String(value));
 		if (name === "compactAtPercent") return percentLabel(value as number);
 		if (name === "compactAtTokens") return capLabel(value as number);
 		if (name === "compactBeforeExpiry") return value ? "on" : "off";
@@ -2744,18 +2772,24 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 						return { ...rest, unusable: "it is the session's own model" };
 					}),
 			);
-			const items: SelectItem[] = [
-				...(scope === "session" ? [{ value: FALLBACK_DEFAULT_PICK, label: `default (${valueLabel(FALLBACK, defaultOf(FALLBACK))})` }] : []),
-				{ value: "", label: "off" },
-				...choices.map((choice) => ({ value: choice.ref, label: fallbackChoiceLabel(choice) })),
+			const ownRow = (label: string, value: string): FallbackEntry => ({ value, row: { label }, search: label });
+			const entries: FallbackEntry[] = [
+				...(scope === "session" ? [ownRow(`default (${valueLabel(FALLBACK, defaultOf(FALLBACK))})`, FALLBACK_DEFAULT_PICK)] : []),
+				ownRow("off", ""),
+				...choices.map((choice): FallbackEntry => {
+					const parsed = parseModelRef(choice.ref) ?? { provider: "", id: choice.ref };
+					// Searched as Pi's picker searches: the provider, the id and the name.
+					return { value: choice.ref, row: { ref: choice.ref, name: choice.name, rest: fallbackChoiceParts(choice) }, search: modelSearchText({ ...parsed, name: choice.name }) };
+				}),
 			];
+			// The value in effect at this level, marked as Pi marks the current model, and selected when the list opens.
+			const current = scope === "session" ? (own[FALLBACK] ?? FALLBACK_DEFAULT_PICK) : (defaultOf(FALLBACK) as string);
 			const input = new Input();
 			input.focused = true;
 			let list: Component & { handleInput: (data: string) => void };
 			const filter = () => {
 				const query = input.getValue().trim();
-				// A line too wide shortens a model id in the middle; rows that would still read the same show their ids in full.
-				list = fallbackModelList(query ? fuzzyFilter(items, query, (item) => item.label) : items, 12, done);
+				list = fallbackModelList(query ? fuzzyFilter(entries, query, (entry) => entry.search) : entries, current, query !== "", 12, done);
 			};
 			filter();
 			const size = need === undefined ? "its size is unknown" : `about ${formatTokens(need)} tokens as text`;

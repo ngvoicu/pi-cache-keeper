@@ -1,6 +1,6 @@
 // The fallback compaction model's list against Pi's built-in model catalogs, in Pi's own session runtime (review of 0.10.0,
 // round 2): the list and the compaction use one fit, so they agree on every model; and every model's row reads
-// differently from every other at 40 and 60 columns. The catalogs are fixtures of Pi 1.6.0's and Pi 0.87.0's
+// differently from every other at 40 and 60 columns, its id and provider whole (0.10.4). The catalogs are fixtures of Pi 1.6.0's and Pi 0.87.0's
 // (tests/fixtures/catalog-fixture.mjs wrote them), so both are checked whichever Pi is installed.
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -39,11 +39,24 @@ const listLines = (raw: string[]) => {
 	assert.ok(from > 0 && to > from, raw.map(plain).join("\n"));
 	return raw.slice(from, to);
 };
-// The selected row's lines: the list styles each of them (its position marker is no row).
-const selectedRow = (raw: string[]) =>
-	listLines(raw)
-		.filter((line) => STYLED.test(line) && !/^\s*\(\d+\/\d+\)$/.test(plain(line)))
-		.map(plain);
+// The selected row's lines: its first starts with the styled "→ " (as in Pi's picker), its next ones are indented 6
+// columns, under its id; the marks (4 columns) and that indent are taken off.
+const selectedRow = (raw: string[]) => {
+	const lines = listLines(raw);
+	const first = lines.findIndex((line) => STYLED.test(line) && plain(line).startsWith("→ "));
+	assert.ok(first >= 0, lines.map(plain).join("\n"));
+	const row = [plain(lines[first]).slice(4)];
+	for (const line of lines.slice(first + 1).map(plain)) {
+		if (!/^ {6}\S/.test(line)) break;
+		row.push(line.slice(6));
+	}
+	return row;
+};
+// The reference a row names: "@cf/openai/gpt-oss-120b [cloudflare-workers-ai] · …" → "cloudflare-workers-ai/@cf/openai/gpt-oss-120b".
+const refOfRow = (row: string) => {
+	const match = /^(\S+) \[([^\]]+)\] · /.exec(row);
+	return match ? `${match[2]}/${match[1]}` : undefined;
+};
 
 // The catalog's models listed with credentials; a request to one of them is answered at once with a summary.
 const withCatalog = (w: Any, models: Any[]) => {
@@ -92,8 +105,8 @@ for (const version of CATALOGS) {
 				menu.press(FALLBACK);
 				const labels = new Map<string, string>();
 				for (const [row] of readRows(menu, models.length + 2, 400)) {
-					const label = row.replace(/^→ /, "");
-					if (label.includes("/")) labels.set(label.slice(0, label.indexOf(" · ")), label.split(" · ").at(-1) as string);
+					const ref = refOfRow(row);
+					if (ref) labels.set(ref, row.split(" · ").at(-1) as string);
 				}
 				menu.keys("\x1b");
 				await menu.close();
@@ -149,11 +162,11 @@ for (const version of CATALOGS) {
 			if (size === "large") assert.ok(counts["too small now"] > 0, `${size}: ${JSON.stringify(counts)}`);
 			assert.equal(seen.labels.get("cloudflare-workers-ai/@cf/openai/gpt-oss-120b"), "can't be used: output limit too small", size);
 			assert.equal(seen.labels.get(seen.own), "can't be used: it is the session's own model", size);
-			assert.match(seen.status, /fallback compaction model: cloudflare-workers-ai\/@cf\/openai\/gpt-oss-120b · 128k window · \$0\.35 in, \$0\.75 out per M · can't be used: output limit too small/, size);
+			assert.match(seen.status, /fallback compaction model: @cf\/openai\/gpt-oss-120b \[cloudflare-workers-ai\] · 128k window · \$0\.35 in, \$0\.75 out per M · can't be used: output limit too small/, size);
 		}
 	});
 
-	test(`round 2, blocker 3: at 40 and 60 columns every model of Pi ${version}'s catalog has a row that reads differently from every other`, { skip }, async () => {
+	test(`round 2, blocker 3: at 40 and 60 columns every model of Pi ${version}'s catalog has a row that reads differently from every other, its id and provider whole`, { skip }, async () => {
 		const models = catalog(version);
 		settings("");
 		const seen: Any = {};
@@ -169,7 +182,7 @@ for (const version of CATALOGS) {
 		for (const width of [40, 60]) {
 			const rows: string[][] = seen[width];
 			assert.equal(rows.length, models.length + 2);
-			const text = rows.map((row) => row.map((line) => line.replace(/^(→ | {2})/, "")).join("\n"));
+			const text = rows.map((row) => row.join("\n"));
 			const first = new Map<string, number>();
 			const same: string[] = [];
 			text.forEach((row, i) => {
@@ -177,13 +190,14 @@ for (const version of CATALOGS) {
 				else first.set(row, i);
 			});
 			assert.deepEqual(same, [], `${width} columns`);
-			for (const row of rows) for (const line of row) assert.ok(line.length <= width - 2, `${width}: ${line}`);
-			// The stock Bedrock rows of the review: the provider, the start of the id and its end.
-			const haiku = (region: string) => text.find((row) => row.startsWith(`amazon-bedrock/${region}.anth`) && row.endsWith("20251001-v1:0"));
-			if (width === 40) {
-				assert.ok(haiku("eu") && haiku("us"), text.filter((row) => row.includes("haiku") || row.includes("…2025100")).join(" | "));
-				assert.notEqual(haiku("eu"), haiku("us"));
-			}
+			// Each line within the width less the marks (4) and the free margin (2); a next line within it with its indent.
+			for (const row of rows) row.forEach((line, at) => assert.ok(line.length + (at === 0 ? 4 : 6) <= width - 2, `${width}: ${line}`));
+			// The stock Bedrock rows of the review: the whole id and the whole [amazon-bedrock] badge, wrapped, never cut.
+			const haiku = (region: string) => text.find((row) => row.replace(/\n/g, "").startsWith(`${region}.anthropic.claude-haiku-4-5-20251001-v1:0`) && /(^|\s)\[amazon-bedrock\]/.test(row));
+			assert.ok(haiku("eu") && haiku("us"), text.filter((row) => row.includes("haiku")).join(" | "));
+			assert.notEqual(haiku("eu"), haiku("us"));
+			// Every model's id and badge are in its row whole.
+			for (const model of models) assert.ok(text.some((row) => row.replace(/\n/g, "").startsWith(model.id) && row.includes(`[${model.provider}]`)), `${width}: ${refOf(model)}`);
 		}
 	});
 }

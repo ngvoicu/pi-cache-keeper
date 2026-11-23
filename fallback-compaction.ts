@@ -130,6 +130,11 @@ export function fallbackModelFit(model: Model<Api>, need: number): { fit: Fallba
 /** One model of the menu's list. */
 export interface FallbackChoice {
 	ref: string;
+	/**
+	 * The model's name as Pi has it: the list shows it where it says more than the id (distinctModelName), and the access
+	 * it states decides whether the line's own access part is shown (fallbackAccess).
+	 */
+	name?: string;
 	window?: number;
 	/** Dollars per million tokens at the size needed; absent without prices. */
 	price?: { input: number; output: number };
@@ -142,14 +147,39 @@ export interface FallbackChoice {
 /** A price per million tokens: "$0.30", "$15.00", "$0.075". */
 const perMillion = (dollars: number) => (dollars === 0 || dollars >= 0.1 ? `$${dollars.toFixed(2)}` : `$${Number(dollars.toPrecision(2))}`);
 
-/** A model's window and its price, or that it is a subscription: what /cache-keeper shows of the picked model. */
-export function fallbackModelParts(choice: Pick<FallbackChoice, "window" | "price" | "subscription">): string[] {
-	const window = choice.window ? `${formatWindow(choice.window)} window` : "window unknown";
-	const price = choice.subscription ? "subscription" : choice.price ? `${perMillion(choice.price.input)} in, ${perMillion(choice.price.output)} out per M` : "no price";
-	return [window, price];
+/** Lower-case words of letters and digits: "Claude Opus 5.5 · Anthropic sub, fallback api" → claude, opus, 5, 5, anthropic, sub, fallback, api. */
+const wordsOf = (value: string) => value.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+
+/**
+ * The access a model's name states, in the words pi-provimux adds to it ("Anthropic sub, fallback api", "Devin sub",
+ * "OpenRouter api"): a subscription login ("sub"), an API key ("api"), both, or neither (a name that says nothing of it).
+ */
+export function nameAccess(name: string | undefined): { sub: boolean; api: boolean } {
+	const words = wordsOf(name ?? "");
+	return { sub: words.includes("sub") || words.includes("subscription"), api: words.includes("api") };
 }
 
-/** The three parts of a model's line in the menu: its window, its price or that it is a subscription, and whether it holds this session now. */
+/**
+ * The access part of a model's line: "subscription", its price, or "no price", as this extension's own data has it.
+ * Left out where the model's name states an access that part would contradict: "subscription" beside a name that says
+ * "api" ("Anthropic sub, fallback api": a failed subscription request is paid by the key), a price beside a name that
+ * says "sub" ("Devin sub", or a subscription first). The name comes from the proxy that routes the model and says more
+ * than one word could; the window and the fit stay.
+ */
+export function fallbackAccess(choice: Pick<FallbackChoice, "name" | "price" | "subscription">): string | undefined {
+	const said = nameAccess(choice.name);
+	if (choice.subscription ? said.api : said.sub) return undefined;
+	return choice.subscription ? "subscription" : choice.price ? `${perMillion(choice.price.input)} in, ${perMillion(choice.price.output)} out per M` : "no price";
+}
+
+/** A model's window and its price, or that it is a subscription (fallbackAccess): what /cache-keeper shows of the picked model. */
+export function fallbackModelParts(choice: Pick<FallbackChoice, "name" | "window" | "price" | "subscription">): string[] {
+	const window = choice.window ? `${formatWindow(choice.window)} window` : "window unknown";
+	const access = fallbackAccess(choice);
+	return access === undefined ? [window] : [window, access];
+}
+
+/** The parts after the model in its line in the menu: its window, its access (fallbackAccess), and whether it holds this session now. */
 export function fallbackChoiceParts(choice: FallbackChoice): string[] {
 	const parts = fallbackModelParts(choice);
 	if (choice.unusable) parts.push(`can't be used: ${choice.unusable}`);
@@ -157,11 +187,6 @@ export function fallbackChoiceParts(choice: FallbackChoice): string[] {
 	else if (choice.fit && (choice.fit.window === undefined || choice.fit.never)) parts.push(`can't be used: ${choice.fit.why}`);
 	else if (choice.fit) parts.push(`too small now (needs about ${formatTokens(choice.fit.need)})`);
 	return parts;
-}
-
-/** "google/gemini-2.5-flash · 1M window · $0.30 in, $2.50 out per M · holds this session". */
-export function fallbackChoiceLabel(choice: FallbackChoice): string {
-	return [choice.ref, ...fallbackChoiceParts(choice)].join(" · ");
 }
 
 /**
@@ -174,60 +199,148 @@ export function orderFallbackChoices(choices: FallbackChoice[]): FallbackChoice[
 	return [...choices].sort((a, b) => group(a) - group(b) || cost(a) - cost(b) || (a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0));
 }
 
+// ------------------------------------------------------------- the list, drawn as Pi's /model picker draws a model
+
 /**
- * A model's reference shortened in the middle to `width` columns: the provider, the start of the id, an ellipsis, the end
- * of the id. The cut is placed where no other reference of `refs` reads the same (a third of the id's room kept at its
- * start where that is enough, the cut moved either way from there where not); where no single cut can, it stays at that
- * third, and fallbackRowLines shows the whole reference.
+ * The model's name where it says more than its id, else undefined. Pi's `getDistinctModelName` (Pi 1.6.0,
+ * dist/modes/interactive/model-search.js), which the package doesn't export: copied, the same in what it returns.
  */
-export function shortenModelRef(ref: string, width: number, refs: readonly string[] = []): string {
-	if (ref.length <= width) return ref;
-	const slash = ref.indexOf("/") + 1;
-	const provider = ref.slice(0, slash);
-	const id = ref.slice(slash);
-	const room = width - provider.length - 1;
-	// A provider too long to keep: the end of the reference.
-	if (room < 2) return width <= 1 ? "…".slice(0, Math.max(0, width)) : `…${ref.slice(ref.length - (width - 1))}`;
-	const preferred = Math.round(room / 3);
-	const cut = (head: number) => [provider + id.slice(0, head), id.slice(id.length - (room - head))] as const;
-	const alone = (start: string, end: string) => !refs.some((other) => other !== ref && other.length >= start.length + end.length && other.startsWith(start) && other.endsWith(end));
-	for (let step = 0; step <= room; step++) {
-		for (const head of step === 0 ? [preferred] : [preferred + step, preferred - step]) {
-			if (head < 0 || head > room) continue;
-			const [start, end] = cut(head);
-			if (alone(start, end)) return `${start}…${end}`;
-		}
-	}
-	const [start, end] = cut(preferred);
-	return `${start}…${end}`;
+export function distinctModelName(item: { id: string; name?: string }): string | undefined {
+	const name = item.name?.trim();
+	if (!name) return undefined;
+	const idWords = wordsOf(item.id);
+	const idTokens = new Set(idWords);
+	const compactId = idWords.join("");
+	// Single-character words must match a whole id token: "4" is not covered by "mistral-small-2603".
+	const covered = (word: string) => idTokens.has(word) || (word.length > 1 && compactId.includes(word));
+	return wordsOf(name).every(covered) ? undefined : name;
 }
 
 /**
- * A menu line fitted to `width` columns. Where the model's reference doesn't fit, the line is that reference shortened in
- * the middle (shortenModelRef, against the other references of the list, `refs`); otherwise the line is cut at its end.
+ * The text a model is searched by: its provider, its reference, its id and its name. Pi's `getModelSelectorSearchText`
+ * (Pi 1.6.0, dist/modes/interactive/model-search.js), which the package doesn't export: copied.
  */
-export function fitFallbackLine(line: string, ref: string, width: number, refs: readonly string[] = []): string {
-	if (line.length <= width) return line;
-	if (ref.length <= width && line.startsWith(ref)) return line.slice(0, width);
-	return shortenModelRef(ref, width, refs);
+export function modelSearchText(item: { id: string; provider: string; name?: string }): string {
+	const { id, provider } = item;
+	const name = item.name ? ` ${item.name}` : "";
+	return `${provider} ${provider}/${id} ${provider} ${id}${name}`;
+}
+
+/** A saved reference as Pi's model picker names a model: "devin/claude-opus-5-5 [provimux]"; a value that is no reference as it is. */
+export function fallbackModelLabel(ref: string): string {
+	const parsed = parseModelRef(ref);
+	return parsed ? `${parsed.id} [${parsed.provider}]` : ref;
 }
 
 /**
- * The menu's rows at `width` columns, each as its lines: one line fitted by fitFallbackLine; or, for rows that would still
- * read the same as another row of the list, the whole reference over as many lines as it takes, then the rest of the
- * row cut to the width. `ref` is "" for a row that is no model (off, the default).
+ * A piece of a list line and how it is drawn, as in Pi's picker: the model id (the accent colour on the selected row),
+ * its distinct name and the `[provider]` badge (muted), the window, access and fit after them (muted, as Pi's
+ * " · default"), a row's own label (off, the default: drawn as an id is), and the blanks between them.
  */
-export function fallbackRowLines(rows: readonly { label: string; ref: string }[], width: number): string[][] {
+export interface LinePart {
+	text: string;
+	kind: "id" | "name" | "badge" | "rest" | "label" | "gap";
+}
+
+/** A row of the list: a model (its reference, its name as Pi has it, the parts after it), or a line of its own (off, the default). */
+export type FallbackRow = { label: string } | { ref: string; name?: string; rest: readonly string[] };
+
+/** The text of a line's parts. */
+export const partsText = (parts: readonly LinePart[]): string => parts.map((part) => part.text).join("");
+
+/** The pieces that stay whole: the id, "(Name)" where Pi would show it, "[provider]"; or the row's own label. */
+function headOf(row: FallbackRow): LinePart[] {
+	if ("label" in row) return [{ text: row.label, kind: "label" }];
+	const parsed = parseModelRef(row.ref) ?? { id: row.ref, provider: "" };
+	const name = distinctModelName({ id: parsed.id, name: row.name });
+	return [{ text: parsed.id, kind: "id" }, ...(name ? [{ text: `(${name})`, kind: "name" as const }] : []), { text: `[${parsed.provider}]`, kind: "badge" }];
+}
+
+/** A row on one line, as wide as it is: "devin/claude-opus-5-5 (Claude Opus 5.5 (Devin) · Devin sub) [provimux] · 1M window · holds this session". */
+export function fallbackRowText(row: FallbackRow): string {
+	const head = headOf(row).map((part) => part.text).join(" ");
+	return "label" in row || row.rest.length === 0 ? head : `${head} · ${row.rest.join(" · ")}`;
+}
+
+/** A menu line of a model, as wide as it is (fallbackRowText). */
+export function fallbackChoiceLabel(choice: FallbackChoice): string {
+	return fallbackRowText({ ref: choice.ref, name: choice.name, rest: fallbackChoiceParts(choice) });
+}
+
+/** How far the lines after a row's first are indented, under its id. */
+export const CONTINUATION_INDENT = 2;
+/** The fewest columns the window, access and fit are cut to; with less room left, they are left out. */
+const LEAST_REST = 6;
+
+/**
+ * One row at `width` columns, as its lines of parts. The id, the name and the badge are never cut: each goes whole onto
+ * the next line (indented by CONTINUATION_INDENT) where the line has no room left for it; only a piece wider than a whole
+ * line is broken, a name between its words, an id or a badge (or a word) where the line ends. The window, access and
+ * fit follow on the last line and are what is cut: the fit kept first, then the access and the window where they still
+ * fit; the fit, where it alone doesn't, cut at its end ("…"), or left out where fewer than LEAST_REST columns are left. Every row shows its
+ * whole id and provider, so no two rows read the same.
+ */
+export function fallbackRowLayout(row: FallbackRow, width: number): LinePart[][] {
 	const columns = Math.max(1, width);
-	const refs = rows.map((row) => row.ref).filter(Boolean);
-	const lines = rows.map((row) => fitFallbackLine(row.label, row.ref, columns, refs));
-	const count = new Map<string, number>();
-	for (const line of lines) count.set(line, (count.get(line) ?? 0) + 1);
-	return rows.map((row, i) => {
-		if ((count.get(lines[i]) ?? 0) < 2 || !row.ref) return [lines[i]];
-		const full: string[] = [];
-		for (let at = 0; at < row.ref.length; at += columns) full.push(row.ref.slice(at, at + columns));
-		const rest = (row.label.startsWith(row.ref) ? row.label.slice(row.ref.length) : "").replace(/^ · /, "");
-		return rest ? [...full, rest.slice(0, columns)] : full;
-	});
+	const indent = columns > CONTINUATION_INDENT * 2 ? CONTINUATION_INDENT : 0;
+	const lines: LinePart[][] = [[]];
+	let used = 0;
+	let fresh = true;
+	const newLine = () => {
+		lines.push(indent ? [{ text: " ".repeat(indent), kind: "gap" }] : []);
+		used = indent;
+		fresh = true;
+	};
+	const put = (text: string, kind: LinePart["kind"]) => {
+		if (!fresh) {
+			lines[lines.length - 1].push({ text: " ", kind: "gap" });
+			used += 1;
+		}
+		lines[lines.length - 1].push({ text, kind });
+		used += text.length;
+		fresh = false;
+	};
+	// A piece on this line, else whole on the next; one wider than a line in pieces.
+	const place = (text: string, kind: LinePart["kind"], words: boolean) => {
+		if (used + (fresh ? 0 : 1) + text.length <= columns) return put(text, kind);
+		if (indent + text.length <= columns) {
+			newLine();
+			return put(text, kind);
+		}
+		if (words && text.includes(" ")) {
+			for (const word of text.split(" ")) place(word, kind, false);
+			return;
+		}
+		if (!fresh) newLine();
+		let left = text;
+		while (left) {
+			const take = left.slice(0, columns - used);
+			put(take, kind);
+			left = left.slice(take.length);
+			if (left) newLine();
+		}
+	};
+	for (const part of headOf(row)) place(part.text, part.kind, part.kind === "name" || part.kind === "label");
+	if ("ref" in row && row.rest.length > 0) {
+		// The parts that fit whole, taken from the last (the fit first, then the access, then the window) and shown in
+		// their order. Where not even the fit fits, it is cut at its end, if enough of it is left.
+		const room = columns - used;
+		const last = row.rest[row.rest.length - 1];
+		const keep = new Set<number>();
+		let taken = 0;
+		for (let i = row.rest.length - 1; i >= 0; i--) {
+			if (taken + 3 + row.rest[i].length > room) continue;
+			keep.add(i);
+			taken += 3 + row.rest[i].length;
+		}
+		const kept = row.rest.filter((_, i) => keep.has(i));
+		const shown = keep.has(row.rest.length - 1) ? ` · ${kept.join(" · ")}` : room - 3 >= LEAST_REST ? ` · ${last.slice(0, room - 4).trimEnd()}…` : "";
+		if (shown) lines[lines.length - 1].push({ text: shown, kind: "rest" });
+	}
+	return lines;
+}
+
+/** The menu's rows at `width` columns, each as its lines of parts (fallbackRowLayout). */
+export function fallbackRowLines(rows: readonly FallbackRow[], width: number): LinePart[][][] {
+	return rows.map((row) => fallbackRowLayout(row, width));
 }

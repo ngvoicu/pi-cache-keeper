@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { getSelectListTheme } from "@earendil-works/pi-coding-agent";
 import { fileURLToPath } from "node:url";
 import { FALLBACK, EXPIRY, flush, FULL, inWindow, KEEP_WARM, lineOf, NO_OWN, OWN, ownEntries, ownOf, settingsText, skip, writeDefaults, type Any } from "./session-runtime.ts";
 
@@ -657,7 +658,7 @@ const fallbackModels = (w: Any) => {
 };
 // What /cache-keeper says of the picked model: the setting, the model, its window and price; no prediction (review 7).
 const DECIDED = "whether it writes a summary is decided at each compaction, from the part Pi cuts off";
-const GEMINI_LINE = `fallback compaction model: google/gemini-2.5-flash · 1.05M window · $0.30 in, $2.50 out per M · ${DECIDED}`;
+const GEMINI_LINE = `fallback compaction model: gemini-2.5-flash [google] · 1.05M window · $0.30 in, $2.50 out per M · ${DECIDED}`;
 const NOT_CACHED = "the fallback compaction model writes the summary where it can, else Pi's compaction";
 
 // Design 0.10.0, test 7.
@@ -670,7 +671,7 @@ test("the fallback compaction model: a session's own value wins over the default
 			assert.equal(lineOf(await w.status(), "fallback compaction model:"), GEMINI_LINE, "the default, as saved");
 			// Off for this session over a default model: the list's second line.
 			let menu = await w.menu();
-			assert.match(menu.text(), /\n {2}When the cache can't be used, compact with +google\/gemini-2\.5-flash · default\n/);
+			assert.match(menu.text(), /\n {2}When the cache can't be used, compact with +gemini-2\.5-flash \[google\] · default\n/);
 			menu.press(FALLBACK);
 			menu.keys("\x1b[B\r");
 			assert.match(menu.text(), /\n→ When the cache can't be used, compact with +off · this session\n/);
@@ -680,25 +681,26 @@ test("the fallback compaction model: a session's own value wins over the default
 			// A default changed in another window: this session's off still wins.
 			saveConfig({ fallbackCompactionModel: "acme/tiny" });
 			assert.match(lineOf(await w.status(), "fallback compaction model:") ?? "", /^fallback compaction model: off \(this session\)/);
-			assert.match(lineOf(await w.status(), "settings:") ?? "", /fallbackCompactionModel off \(default acme\/tiny\)/);
+			assert.match(lineOf(await w.status(), "settings:") ?? "", /fallbackCompactionModel off \(default tiny \[acme\]\)/);
 			// Back to the defaults: the default as saved now.
 			menu = await w.menu();
 			menu.press("Back to the defaults");
 			await menu.close();
-			assert.equal(lineOf(await w.status(), "fallback compaction model:"), `fallback compaction model: acme/tiny · 8k window · $0.05 in, $0.10 out per M · ${DECIDED}`);
+			assert.equal(lineOf(await w.status(), "fallback compaction model:"), `fallback compaction model: tiny [acme] · 8k window · $0.05 in, $0.10 out per M · ${DECIDED}`);
 			// A session's own model over the default, picked by typing.
 			menu = await w.menu();
 			menu.press(FALLBACK);
 			menu.keys("gemini\r");
-			assert.match(menu.text(), /\n→ When the cache can't be used, compact with +google\/gemini-2\.5-flash · this session\n/);
+			assert.match(menu.text(), /\n→ When the cache can't be used, compact with +gemini-2\.5-flash \[google\] · this session\n/);
 			await menu.close();
 			assert.deepEqual(ownOf(w.manager()), { settings: { fallbackCompactionModel: "google/gemini-2.5-flash" } });
-			assert.match(lineOf(await w.status(), "fallback compaction model:") ?? "", /^fallback compaction model: google\/gemini-2\.5-flash \(this session\) · 1\.05M window/);
-			// The list's first line drops it again.
+			assert.match(lineOf(await w.status(), "fallback compaction model:") ?? "", /^fallback compaction model: gemini-2\.5-flash \[google\] \(this session\) · 1\.05M window/);
+			// The list opens on the session's own pick, marked as Pi marks the current model; its first line drops it again.
 			menu = await w.menu();
 			menu.press(FALLBACK);
-			menu.keys("\r");
-			assert.match(menu.text(), /\n→ When the cache can't be used, compact with +acme\/tiny · default\n/);
+			assert.match(menu.text(), /\n→ ✓ gemini-2\.5-flash \[google\] · 1\.05M window/);
+			menu.keys("\x1b[A\x1b[A\r");
+			assert.match(menu.text(), /\n→ When the cache can't be used, compact with +tiny \[acme\] · default\n/);
 			await menu.close();
 			assert.deepEqual(ownOf(w.manager()), { settings: {} });
 		},
@@ -719,23 +721,24 @@ test("the fallback compaction model's row, its list, its /cache-keeper lines and
 		menu.press(FALLBACK);
 		const list = menu.text().split("\n");
 		assert.match(list.find((line) => line.startsWith("When the cache can't be used, compact with,")) ?? "", /^When the cache can't be used, compact with, in this session · "holds this session" speaks of this session now \(about \d+k? tokens as text\)$/);
-		const lines = list.filter((line) => /^(→ )?\s*(default|off|google|acme|local|pi\/|anthropic)/.test(line)).map((line) => line.replace(/^→?\s*/, ""));
-		assert.deepEqual(lines.slice(0, 2), ["default (off)", "off"]);
-		assert.ok(lines.includes("google/gemini-2.5-flash · 1.05M window · $0.30 in, $2.50 out per M · holds this session"), lines.join("\n"));
-		assert.ok(lines.some((line) => /^acme\/tiny · 8k window · \$0\.05 in, \$0\.10 out per M · too small now \(needs about \d+k?\)$/.test(line)), lines.join("\n"));
-		assert.ok(lines.includes("local/llama · window unknown · no price · can't be used: it declares no context window"), lines.join("\n"));
-		assert.ok(!lines.some((line) => line.startsWith("pi/auto")), "a virtual model is not offered");
+		// Each row as Pi's picker draws a model: the selection marker, the mark of the value in effect, the id, the badge.
+		const lines = list.filter((line) => /^(→ |  )(✓ |  )(default|off|gemini|tiny|llama|auto|claude)/.test(line)).map((line) => line.slice(4));
+		assert.deepEqual(list.filter((line) => /^(→ |  )(✓ |  )(default|off)/.test(line)), ["→ ✓ default (off)", "    off"]);
+		assert.ok(lines.includes("gemini-2.5-flash [google] · 1.05M window · $0.30 in, $2.50 out per M · holds this session"), lines.join("\n"));
+		assert.ok(lines.some((line) => /^tiny \[acme\] · 8k window · \$0\.05 in, \$0\.10 out per M · too small now \(needs about \d+k?\)$/.test(line)), lines.join("\n"));
+		assert.ok(lines.includes("llama [local] · window unknown · no price · can't be used: it declares no context window"), lines.join("\n"));
+		assert.ok(!lines.some((line) => line.startsWith("auto [pi]")), "a virtual model is not offered");
 		// The models that hold this session come first.
-		assert.ok(lines.findIndex((line) => line.includes("holds this session")) < lines.findIndex((line) => line.startsWith("local/llama")));
+		assert.ok(lines.findIndex((line) => line.includes("holds this session")) < lines.findIndex((line) => line.startsWith("llama [local]")));
 		menu.keys("\x1b");
 		// The defaults: no default line in the list.
 		menu.press("Editing");
 		menu.press(FALLBACK);
 		assert.match(menu.text(), /\nWhen the cache can't be used, compact with, by default · "holds this session" speaks of the session this menu was opened in/);
-		assert.match(menu.text(), /\n→? *off\n/);
+		assert.match(menu.text(), /\n→ ✓ off\n/, "off, the default in effect, marked and selected");
 		assert.doesNotMatch(menu.text(), /default \(/);
 		menu.keys("gemini\r");
-		assert.match(menu.text(), /\n→ When the cache can't be used, compact with +google\/gemini-2\.5-flash\n/);
+		assert.match(menu.text(), /\n→ When the cache can't be used, compact with +gemini-2\.5-flash \[google\]\n/);
 		await menu.close();
 		assert.equal(JSON.parse(settingsText()).cacheKeeper.fallbackCompactionModel, "google/gemini-2.5-flash");
 		// /cache-keeper: the line, and the next compaction on a cold cache (none since the session's model last answered
@@ -751,13 +754,13 @@ test("the fallback compaction model's row, its list, its /cache-keeper lines and
 		saveConfig({ fallbackCompactionModel: "local/llama" });
 		status = await w.status();
 		assert.equal(lineOf(status, "next compaction:"), `next compaction: not from the cache, because the model changed since the last request; ${NOT_CACHED}`);
-		assert.equal(lineOf(status, "fallback compaction model:"), "fallback compaction model: local/llama · window unknown · no price · can't be used: it declares no context window");
+		assert.equal(lineOf(status, "fallback compaction model:"), "fallback compaction model: llama [local] · window unknown · no price · can't be used: it declares no context window");
 		session.agent.state.model = original;
 		// A pick Pi can't use now is kept, and marked on the row and in /cache-keeper.
 		saveConfig({ fallbackCompactionModel: "google/gemini-9" });
-		assert.equal(lineOf(await w.status(), "fallback compaction model:"), "fallback compaction model: google/gemini-9 · not available now: Pi no longer lists it");
+		assert.equal(lineOf(await w.status(), "fallback compaction model:"), "fallback compaction model: gemini-9 [google] · not available now: Pi no longer lists it");
 		menu = await w.menu();
-		assert.match(menu.text(), /\n {2}When the cache can't be used, compact with +google\/gemini-9 · not available now · default\n/);
+		assert.match(menu.text(), /\n {2}When the cache can't be used, compact with +gemini-9 \[google\] · not available now · default\n/);
 		await menu.close();
 		assert.equal(JSON.parse(settingsText()).cacheKeeper.fallbackCompactionModel, "google/gemini-9");
 	});
@@ -777,10 +780,10 @@ test("a session that set coldCompactionModel in 0.10.0: its own value and the de
 			await w.runtime.switchSession(w.manager().getSessionFile());
 			fallbackModels(w);
 			let status = await w.status();
-			assert.match(lineOf(status, "fallback compaction model:") ?? "", /^fallback compaction model: google\/gemini-2\.5-flash \(this session\) · 1\.05M window/);
-			assert.match(lineOf(status, "settings:") ?? "", /fallbackCompactionModel google\/gemini-2\.5-flash \(default acme\/tiny\)/);
+			assert.match(lineOf(status, "fallback compaction model:") ?? "", /^fallback compaction model: gemini-2\.5-flash \[google\] \(this session\) · 1\.05M window/);
+			assert.match(lineOf(status, "settings:") ?? "", /fallbackCompactionModel gemini-2\.5-flash \[google\] \(default tiny \[acme\]\)/);
 			let menu = await w.menu();
-			assert.match(menu.text(), /\n {2}When the cache can't be used, compact with +google\/gemini-2\.5-flash · this session\n/);
+			assert.match(menu.text(), /\n {2}When the cache can't be used, compact with +gemini-2\.5-flash \[google\] · this session\n/);
 			// A change of another row rewrites the session's values: the old name goes, its value stays under the new one.
 			menu.set(KEEP_WARM, "1 h · this session");
 			await menu.close();
@@ -803,7 +806,7 @@ test("a session that set coldCompactionModel in 0.10.0: its own value and the de
 			assert.equal(saved.fallbackCompactionModel, "google/gemini-2.5-flash");
 			assert.ok(!("coldCompactionModel" in saved), "the old name is gone from settings.json");
 			status = await w.status();
-			assert.match(lineOf(status, "settings:") ?? "", /fallbackCompactionModel acme\/tiny \(default google\/gemini-2\.5-flash\)/);
+			assert.match(lineOf(status, "settings:") ?? "", /fallbackCompactionModel tiny \[acme\] \(default gemini-2\.5-flash \[google\]\)/);
 		},
 		{ persisted: true },
 	);
@@ -830,9 +833,10 @@ test("a default saved as coldCompactionModel by 0.10.0: a change of another defa
 	assert.deepEqual(result.thrown, []);
 });
 
-// Findings 10 and 3 (review of 0.10.0, round 1): the picker's rows stay distinct in a narrow terminal, showing the end of
-// a model id that doesn't fit; and the row says what goes to the picked model's provider.
-test("review 10 and 3: at 40 and 60 columns the picker's rows keep the provider, the start and the end of a long model id and stay distinct; the row's description names what is sent", { skip }, async () => {
+// Findings 10 and 3 (review of 0.10.0, round 1), as 0.10.4 draws a row (Pi's /model picker): in a narrow terminal the
+// picker's rows keep the whole id and the whole [provider] badge, over a second line where they need it, and stay
+// distinct; and the row says what goes to the picked model's provider.
+test("review 10 and 3: at 40 and 60 columns the picker's rows keep the whole model id and provider, wrapping rather than cutting them, and stay distinct; the row's description names what is sent", { skip }, async () => {
 	writeDefaults({});
 	const result = await inWindow(async (w) => {
 		const registry = w.runtime.session.extensionRunner.createContext().modelRegistry;
@@ -847,22 +851,120 @@ test("review 10 and 3: at 40 and 60 columns the picker's rows keep the provider,
 		const menu = await w.menu();
 		menu.press(FALLBACK);
 		for (const width of [40, 60]) {
-			const rows = menu
-				.text(width)
-				.split("\n")
-				.filter((line) => /amazon-bedrock|claude-sonnet|…/.test(line) && !line.startsWith("Compact a cold"));
+			// The list's rows below "off": a row's first line after the 4 columns of marks, its next lines indented 2 more.
+			const lines = menu.text(width).split("\n");
+			const list = lines.slice(lines.findIndex((line) => /^(→ |  )(✓ |  )off$/.test(line)) + 1, lines.findIndex((line) => line.startsWith("Type to search")));
+			const rows: string[] = [];
+			for (const line of list) {
+				if (/^ {6}\S/.test(line)) rows[rows.length - 1] += `\n${line.slice(6)}`;
+				else rows.push(line.slice(4));
+			}
 			assert.equal(rows.length, 2, `${width}: ${rows.join(" | ")}`);
-			assert.notEqual(rows[0].replace(/^→?\s*/, ""), rows[1].replace(/^→?\s*/, ""), `${width}: distinct`);
-			for (const row of rows) assert.ok(row.length <= width, `${width}: ${row}`);
-			for (const row of rows) assert.match(row, /^(→ | {2})amazon-bedrock\/anthrop/, `${width}: ${row}`);
-			assert.ok(rows.some((row) => row.includes("sonnet-4-6")), `${width}: ${rows.join(" | ")}`);
-			assert.ok(rows.some((row) => row.includes("20250929-v1:0")), `${width}: ${rows.join(" | ")}`);
+			assert.notEqual(rows[0], rows[1], `${width}: distinct`);
+			for (const line of list) assert.ok(line.length <= width - 2, `${width}: ${line}`);
+			// Each row holds its whole id (an id wider than a line goes on where the line ends) and its whole badge.
+			for (const model of long) assert.ok(rows.some((row) => row.replace(/\n/g, "").startsWith(model.id)), `${width}: ${model.id} in ${rows.join(" | ")}`);
+			for (const row of rows) assert.match(row, /(^|\s)\[amazon-bedrock\]/, `${width}: ${row}`);
 		}
+		// At 60 columns, the long id and its badge over two lines; the shorter one on one.
+		assert.match(menu.text(60), /\n {4}anthropic\.claude-sonnet-4-5-20250929-v1:0\n {6}\[amazon-bedrock\] · [^\n]+\n/);
+		assert.match(menu.text(60), /\n {4}anthropic\.claude-sonnet-4-6 \[amazon-bedrock\] · [^\n]+\n/);
 		menu.keys("\x1b");
 		const description = menu.text();
 		assert.match(description, /full output of shell commands you ran with !/);
 		assert.match(description, /on Pi before 1\.2, the assistant's thinking/);
 		await menu.close();
 	});
+	assert.deepEqual(result.thrown, []);
+});
+
+// 0.10.4: pi-provimux 105.0.5's models (provider provimux, the service and the access in each name) beside a plain
+// anthropic one: the list draws each model as Pi's /model picker does, at 80 and 120 columns; it is searched by provider
+// and by name; the access part agrees with the name; the pick shows as `model-id [provider]` and is saved as provider/id.
+const PROVIMUX_MODEL = { provider: "provimux", api: "anthropic-messages", baseUrl: "http://127.0.0.1:18399", reasoning: true, input: ["text"], contextWindow: 1_000_000, maxTokens: 128_000, cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 } };
+const PROVIMUX_MODELS = [
+	{ ...PROVIMUX_MODEL, id: "claude-opus-5-5", name: "Claude Opus 5.5 · Anthropic sub, fallback api" },
+	{ ...PROVIMUX_MODEL, id: "devin/claude-opus-5-5", name: "Claude Opus 5.5 (Devin) · Devin sub" },
+	{ ...PROVIMUX_MODEL, id: "anthropic/claude-opus-5.5", name: "Claude Opus 5.5 · OpenRouter api" },
+];
+// As pi-provimux says where they come from (its model-upstreams event).
+const PROVIMUX_ROUTES = {
+	provider: "provimux",
+	models: {
+		"claude-opus-5-5": { upstreams: [{ provider: "anthropic", subscription: true }], fallbacks: [{ provider: "anthropic", subscription: false }] },
+		"devin/claude-opus-5-5": { upstreams: [{ provider: "devin", model: "claude-opus-5-5" }] },
+		"anthropic/claude-opus-5.5": { upstreams: [{ provider: "openrouter", subscription: false }] },
+	},
+};
+test("0.10.4: Provimux models in the list as Pi's /model picker shows them, at 80 and 120 columns; searched by provider and name; the pick as model-id [provider]", { skip }, async () => {
+	writeDefaults({ fallbackCompactionModel: "provimux/devin/claude-opus-5-5" });
+	const result = await inWindow(
+		async (w) => {
+			const registry = w.runtime.session.extensionRunner.createContext().modelRegistry;
+			const opus = { ...w.runtime.session.model, id: "claude-opus-4-5", name: "Claude Opus 4.5 (latest)", contextWindow: 200_000, maxTokens: 64_000, cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 } };
+			const listed = [...PROVIMUX_MODELS, opus];
+			registry.getAvailable = () => [...listed, w.runtime.session.model];
+			const find = registry.find.bind(registry);
+			registry.find = (provider: string, id: string) => listed.find((m) => m.provider === provider && m.id === id) ?? find(provider, id);
+			registry.hasConfiguredAuth = () => true;
+			w.runtime.services.resourceLoader.eventBus.emit("model-upstreams", PROVIMUX_ROUTES);
+			await w.answer();
+			// The current value and /cache-keeper: model-id [provider]; the Devin model's price is left out (its name says sub).
+			assert.equal(lineOf(await w.status(), "fallback compaction model:"), `fallback compaction model: devin/claude-opus-5-5 [provimux] · 1M window · ${DECIDED}`);
+			const menu = await w.menu();
+			assert.match(menu.text(), /\n {2}When the cache can't be used, compact with +devin\/claude-opus-5-5 \[provimux\] · default\n/);
+			menu.press(FALLBACK);
+			const listOf = (width: number) => {
+				const lines = menu.text(width).split("\n");
+				return lines.slice(lines.findIndex((line) => line.startsWith(">")) + 1, lines.findIndex((line) => line.startsWith("Type to search")));
+			};
+			assert.deepEqual(listOf(120), [
+				"→ ✓ default (devin/claude-opus-5-5 [provimux])",
+				"    off",
+				// A subscription first, as before; its "subscription" is left out: the name says it falls back to an API key.
+				"    claude-opus-5-5 (Claude Opus 5.5 · Anthropic sub, fallback api) [provimux] · 1M window · holds this session",
+				// Then by price, the references breaking ties. The OpenRouter model's price agrees with its name, but beside
+				// the fit there is no room for it at this width: the window and the fit stay.
+				"    claude-opus-4-5 (Claude Opus 4.5 (latest)) [anthropic] · $5.00 in, $25.00 out per M · holds this session",
+				"    anthropic/claude-opus-5.5 (Claude Opus 5.5 · OpenRouter api) [provimux] · 1M window · holds this session",
+				// Its price left out: the name says a Devin subscription.
+				"    devin/claude-opus-5-5 (Claude Opus 5.5 (Devin) · Devin sub) [provimux] · 1M window · holds this session",
+				"    claude-sonnet-4-6 [anthropic] · $3.00 in, $15.00 out per M · can't be used: it is the session's own model",
+			]);
+			assert.deepEqual(listOf(80), [
+				"→ ✓ default (devin/claude-opus-5-5 [provimux])",
+				"    off",
+				"    claude-opus-5-5 (Claude Opus 5.5 · Anthropic sub, fallback api) [provimux]",
+				"    claude-opus-4-5 (Claude Opus 4.5 (latest)) [anthropic] · holds this sessi…",
+				"    anthropic/claude-opus-5.5 (Claude Opus 5.5 · OpenRouter api) [provimux]",
+				"    devin/claude-opus-5-5 (Claude Opus 5.5 (Devin) · Devin sub) [provimux]",
+				"    claude-sonnet-4-6 [anthropic] · can't be used: it is the session's own mo…",
+			]);
+			// Pi's colours: the selected id and its marks in the accent colour, the name and the badge muted.
+			const theme = getSelectListTheme();
+			const raw = menu.raw(120);
+			assert.ok(raw.includes(`${theme.selectedPrefix("→ ")}${theme.selectedPrefix("✓ ")}${theme.selectedText("default (devin/claude-opus-5-5 [provimux])")}`), raw.join("\n"));
+			assert.ok(raw.includes(`    claude-opus-5-5 ${theme.description("(Claude Opus 5.5 · Anthropic sub, fallback api)")} ${theme.description("[provimux]")}${theme.description(" · 1M window · holds this session")}`), raw.join("\n"));
+			// Searched by provider and by name, as Pi's picker searches.
+			menu.keys("provimux");
+			assert.ok(listOf(120).every((line) => line.includes("[provimux]")), listOf(120).join("\n"));
+			assert.equal(listOf(120).filter((line) => / \[provimux\] · /.test(line)).length, 3);
+			menu.keys("\x7f".repeat(8));
+			menu.keys("devin");
+			assert.match(listOf(120)[0], /^→ {3}devin\/claude-opus-5-5 \(Claude Opus 5\.5 \(Devin\) · Devin sub\) \[provimux\]/, "the best match first, selected");
+			assert.ok(!listOf(120).some((line) => line.includes("[anthropic]")));
+			menu.keys("\x7f".repeat(5));
+			menu.keys("openrouter");
+			assert.deepEqual(listOf(120), ["→   anthropic/claude-opus-5.5 (Claude Opus 5.5 · OpenRouter api) [provimux] · 1M window · holds this session"]);
+			// Picked: saved as provider/id, shown as model-id [provider].
+			menu.keys("\r");
+			assert.match(menu.text(), /\n→ When the cache can't be used, compact with +anthropic\/claude-opus-5\.5 \[provimux\] · this session\n/);
+			await menu.close();
+			assert.deepEqual(ownOf(w.manager()), { settings: { fallbackCompactionModel: "provimux/anthropic/claude-opus-5.5" } });
+			// Both agree it is an API key: the price stays.
+			assert.equal(lineOf(await w.status(), "fallback compaction model:"), `fallback compaction model: anthropic/claude-opus-5.5 [provimux] (this session) · 1M window · $5.00 in, $25.00 out per M · ${DECIDED}`);
+		},
+		{ persisted: true },
+	);
 	assert.deepEqual(result.thrown, []);
 });

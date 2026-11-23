@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.10.4] - 2026-11-23
+
+### Changed
+- **The fallback compaction model's list shows each model as Pi's `/model` picker does** — In `/cache-keeper-settings`, the list opened from "When the cache can't be used, compact with" now reads `model-id (Name) [provider] · window · price · fit` where it read `provider/model-id · window · price · fit`: the model's name in brackets wherever Pi's picker shows it (where it says more than the id: Pi's own rule), and the Pi provider as a muted `[provider]` badge. For pi-provimux's models the name says which service inside Provimux serves the model and on what (`devin/claude-opus-5-5 (Claude Opus 5.5 (Devin) · Devin sub) [provimux]`). Pi's colours and marks: `→` and the id in the accent colour on the selected line, `✓` on the value in effect, which the list now opens on; the name and the badge muted, and the window, price and fit after them too. Typing searches as Pi's picker does, the provider, the id and the name, so `provimux` or `devin` filters the list.
+- **Narrow terminals** — The id, the name and the badge are never cut any more: one that doesn't fit goes whole onto the next line, indented (a name wider than the whole line breaks between its words, an id wider than it where the line ends). The window and the price give way first, then the fit is cut at its end. Every line shows its whole id and provider, so no two read the same; the shortening in the middle of 0.10.0 is gone.
+- **The price or `subscription` agrees with the model's name** — Where a model's name states how it is reached (pi-provimux's `Devin sub`, `OpenRouter api`, `Anthropic sub, fallback api`) and the extension's own `subscription` or price would contradict it, that part is left out of the line and of `/cache-keeper`'s line: `subscription` beside a name that says it falls back to an API key, a price beside a name that says `sub`. The name, from the proxy that routes the model, says more. A name that agrees, or says nothing of it, leaves the line as before. The order of the list doesn't change.
+- **The picked model is named the same way** — The settings row's value, the list's `default (…)` line, the session's settings line and `/cache-keeper`'s `fallback compaction model:` line show the model as `model-id [provider]` (`devin/claude-opus-5-5 [provimux]`). The saved value is still `"provider/modelId"`, and every value saved before reads as it did.
+
 ## [0.10.3] - 2026-11-23
 
 ### Changed

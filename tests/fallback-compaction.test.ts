@@ -13,13 +13,20 @@ import {
 	fallbackRequestTokens,
 	fallbackTextTokens,
 	fallbackUnusable,
-	fitFallbackLine,
+	fallbackAccess,
+	fallbackModelLabel,
+	fallbackModelParts,
+	fallbackRowLayout,
+	distinctModelName,
+	modelSearchText,
+	nameAccess,
+	partsText,
 	formatModelRef,
 	orderFallbackChoices,
 	OUTPUT_TOO_SMALL,
 	parseModelRef,
-	shortenModelRef,
 	type FallbackChoice,
+	type FallbackRow,
 } from "../fallback-compaction.ts";
 
 const user = (text: string) => ({ role: "user" as const, content: [{ type: "text" as const, text }], timestamp: 1 });
@@ -109,14 +116,14 @@ const small: FallbackChoice = { ref: "anthropic/claude-haiku-4-5", window: 200_0
 const virtual: FallbackChoice = { ref: "pi/auto", subscription: false, unusable: "it is a virtual model" };
 
 // 4
-test("a menu line for each kind: priced, subscription, no price, window unknown, too small", () => {
-	assert.equal(fallbackChoiceLabel(priced), "google/gemini-2.5-flash · 1.05M window · $0.30 in, $2.50 out per M · holds this session");
-	assert.equal(fallbackChoiceLabel(sub), "openai-codex/gpt-5.5 · 272k window · subscription · holds this session");
-	assert.equal(fallbackChoiceLabel(free), "ollama/qwen3 · 200k window · no price · holds this session");
-	assert.equal(fallbackChoiceLabel(unknown), "local/llama · window unknown · no price · can't be used: it declares no context window");
-	assert.equal(fallbackChoiceLabel(small), "anthropic/claude-haiku-4-5 · 200k window · $1.00 in, $5.00 out per M · too small now (needs about 190k)");
-	assert.equal(fallbackChoiceLabel({ ...priced, ref: "x/y", window: 1_000_000, price: { input: 0.075, output: 0.3 } }), "x/y · 1M window · $0.075 in, $0.30 out per M · holds this session");
-	assert.equal(fallbackChoiceLabel(virtual), "pi/auto · window unknown · no price · can't be used: it is a virtual model");
+test("a menu line for each kind: priced, subscription, no price, window unknown, too small; as Pi's picker names a model, id then [provider]", () => {
+	assert.equal(fallbackChoiceLabel(priced), "gemini-2.5-flash [google] · 1.05M window · $0.30 in, $2.50 out per M · holds this session");
+	assert.equal(fallbackChoiceLabel(sub), "gpt-5.5 [openai-codex] · 272k window · subscription · holds this session");
+	assert.equal(fallbackChoiceLabel(free), "qwen3 [ollama] · 200k window · no price · holds this session");
+	assert.equal(fallbackChoiceLabel(unknown), "llama [local] · window unknown · no price · can't be used: it declares no context window");
+	assert.equal(fallbackChoiceLabel(small), "claude-haiku-4-5 [anthropic] · 200k window · $1.00 in, $5.00 out per M · too small now (needs about 190k)");
+	assert.equal(fallbackChoiceLabel({ ...priced, ref: "x/y", window: 1_000_000, price: { input: 0.075, output: 0.3 } }), "y [x] · 1M window · $0.075 in, $0.30 out per M · holds this session");
+	assert.equal(fallbackChoiceLabel(virtual), "auto [pi] · window unknown · no price · can't be used: it is a virtual model");
 });
 
 // 5
@@ -150,19 +157,6 @@ test("review 3: the README's privacy note names the shell output sent in full an
 	const note = readme.split("\n").find((line) => line.startsWith("**Where your conversation goes.**")) ?? "";
 	assert.match(note, /full output of shell commands you ran with `!`/);
 	assert.match(note, /on Pi before 1\.2, the assistant's thinking/);
-});
-
-// Finding 10 (review, round 1), and 3 (round 2): a line too wide for the terminal shortens a model id that doesn't fit in
-// the middle, keeping the provider, the start of the id and its end.
-test("review 10: fitting a menu line shortens a long model id in the middle, and cuts the rest of a line whose id fits", () => {
-	const a = "amazon-bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0";
-	const b = "amazon-bedrock/anthropic.claude-sonnet-4-6";
-	const line = (ref: string) => `${ref} · 1M window · $3.30 in, $16.50 out per M · holds this session`;
-	assert.equal(fitFallbackLine(line(a), a, 36), "amazon-bedrock/anthrop…20250929-v1:0");
-	assert.equal(fitFallbackLine(line(b), b, 36), "amazon-bedrock/anthrop…de-sonnet-4-6");
-	assert.notEqual(fitFallbackLine(line(a), a, 36), fitFallbackLine(line(b), b, 36));
-	assert.equal(fitFallbackLine(line("google/gemini-2.5-flash"), "google/gemini-2.5-flash", 36), "google/gemini-2.5-flash · 1M window ");
-	assert.equal(fitFallbackLine("off", "", 36), "off");
 });
 
 // Review 4b, round 2: ordinary English is counted near its size, so a big cold session can still fit a picked model. The
@@ -207,38 +201,6 @@ test("round 2, blocker 1: one fit; an output limit that can never leave room for
 	assert.deepEqual(orderFallbackChoices([never, small, fits]).map((c) => c.ref), ["b/fits", "c/small", "a/never"]);
 });
 
-// Blocker 3: a long id is shortened in the middle, keeping the provider, the start of the id and its end; where no single
-// cut tells two references apart, the rows show the whole id.
-test("round 2, blocker 3: shortened in the middle, the cut placed so no other reference reads the same; rows still alike show the whole id", () => {
-	const eu = "amazon-bedrock/eu.anthropic.claude-haiku-4-5-20251001-v1:0";
-	const us = "amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0";
-	assert.equal(shortenModelRef(eu, 36, [eu, us]), "amazon-bedrock/eu.anth\u202620251001-v1:0");
-	assert.equal(shortenModelRef(us, 36, [eu, us]), "amazon-bedrock/us.anth\u202620251001-v1:0");
-	// The cut moves where the third doesn't tell two apart.
-	const a = "amazon-bedrock/meta.llama3-1-70b-instruct-v1:0";
-	const b = "amazon-bedrock/meta.llama3-1-8b-instruct-v1:0";
-	const [sa, sb] = [shortenModelRef(a, 36, [a, b]), shortenModelRef(b, 36, [a, b])];
-	assert.notEqual(sa, sb);
-	for (const s of [sa, sb]) {
-		assert.equal(s.length, 36);
-		assert.match(s, /^amazon-bedrock\/meta.*\u2026.*-instruct-v1:0$/);
-	}
-	// A reference that fits is left whole; a provider too long to keep leaves the end.
-	assert.equal(shortenModelRef("google/gemini-2.5-flash", 36), "google/gemini-2.5-flash");
-	assert.equal(shortenModelRef("a-very-long-provider-name-indeed-yes/model-x", 20), "\u2026-indeed-yes/model-x");
-	// Two references no single cut tells apart at 36 columns: those rows show the whole id, then the rest of the row.
-	const q6 = "qwen-token-plan-individual-cn/qwen3.6-flash";
-	const q8 = "qwen-token-plan-individual-cn/qwen3.8-flash";
-	const label = (ref: string) => `${ref} \u00b7 1M window \u00b7 no price \u00b7 holds this session`;
-	const rows = fallbackRowLines([{ label: "off", ref: "" }, { label: label(q6), ref: q6 }, { label: label(q8), ref: q8 }, { label: label(eu), ref: eu }, { label: label(us), ref: us }], 36);
-	assert.deepEqual(rows[0], ["off"]);
-	assert.deepEqual(rows[1], ["qwen-token-plan-individual-cn/qwen3.", "6-flash", "1M window \u00b7 no price \u00b7 holds this se"]);
-	assert.deepEqual(rows[2], ["qwen-token-plan-individual-cn/qwen3.", "8-flash", "1M window \u00b7 no price \u00b7 holds this se"]);
-	assert.deepEqual(rows[3], ["amazon-bedrock/eu.anth\u202620251001-v1:0"]);
-	assert.deepEqual(rows[4], ["amazon-bedrock/us.anth\u202620251001-v1:0"]);
-	for (const row of rows) for (const line of row) assert.ok(line.length <= 36, line);
-});
-
 // Blocker 2 and the price paragraph: what the README promises.
 test("round 2, the README: the output cap is passed to Pi and some older adapters don't send it; the price comparison is for cached compactions only", async () => {
 	const { readFileSync } = await import("node:fs");
@@ -251,4 +213,147 @@ test("round 2, the README: the output cap is passed to Pi and some older adapter
 	const card = readme.split("\n").find((line) => line.startsWith("**The card**")) ?? "";
 	assert.match(card, /^\*\*The card\*\* .*For a compaction read from the cache, its second line compares it with what Pi's would have cost/);
 	assert.match(card, /The comparison is for cached compactions only/);
+});
+
+// ------------------------------------------------------------- 0.10.4: each model as Pi's /model picker shows it
+
+// pi-provimux 105.0.5's models (the service and the access in the name) beside a plain anthropic one, as the list has them.
+const holds = fallbackFit({ contextWindow: 1_000_000, maxTokens: 128_000 }, 150_000);
+const opus = { window: 1_000_000, price: { input: 5, output: 25 }, fit: holds };
+const PROVIMUX: FallbackChoice[] = [
+	{ ref: "provimux/claude-opus-5-5", name: "Claude Opus 5.5 · Anthropic sub, fallback api", subscription: true, ...opus },
+	{ ref: "provimux/devin/claude-opus-5-5", name: "Claude Opus 5.5 (Devin) · Devin sub", subscription: false, ...opus },
+	{ ref: "provimux/anthropic/claude-opus-5.5", name: "Claude Opus 5.5 · OpenRouter api", subscription: false, ...opus },
+];
+const ANTHROPIC: FallbackChoice = { ref: "anthropic/claude-opus-4-5", name: "Claude Opus 4.5 (latest)", subscription: false, window: 200_000, price: { input: 5, output: 25 }, fit: holds };
+const rowOf = (choice: FallbackChoice): FallbackRow => ({ ref: choice.ref, name: choice.name, rest: fallbackChoiceParts(choice) });
+
+test("0.10.4: the name is shown as Pi's picker shows it, the same function as Pi's; a name that only restates the id is not", async () => {
+	const pi = await import("@earendil-works/pi-coding-agent/dist/modes/interactive/model-search.js" as string).catch(() => undefined);
+	const cases = [
+		{ id: "claude-opus-5-5", name: "Claude Opus 5.5 · Anthropic sub, fallback api" },
+		{ id: "devin/claude-opus-5-5", name: "Claude Opus 5.5 (Devin) · Devin sub" },
+		{ id: "anthropic/claude-opus-5.5", name: "Claude Opus 5.5 · OpenRouter api" },
+		{ id: "claude-opus-4-5", name: "Claude Opus 4.5 (latest)" },
+		{ id: "claude-opus-4-5", name: "Claude Opus 4.5" },
+		{ id: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", name: "Claude Sonnet 4.5 (EU)" },
+		{ id: "mistral-small-2603", name: "Mistral Small 4" },
+		{ id: "gpt-5.5", name: undefined },
+		{ id: "gpt-5.5", name: "  " },
+	];
+	assert.equal(distinctModelName(cases[0]), "Claude Opus 5.5 · Anthropic sub, fallback api");
+	assert.equal(distinctModelName(cases[4]), undefined, "a name that restates the id");
+	assert.equal(distinctModelName(cases[5]), undefined, "Pi's own example: a dropped namespace and version");
+	assert.equal(distinctModelName(cases[6]), "Mistral Small 4");
+	for (const item of cases) {
+		assert.equal(modelSearchText({ ...item, provider: "provimux" }), `provimux provimux/${item.id} provimux ${item.id}${item.name ? ` ${item.name}` : ""}`);
+		// Where the installed Pi has its module (1.6.0 does), the same answers as Pi's own.
+		if (pi?.getDistinctModelName) assert.equal(distinctModelName(item), pi.getDistinctModelName(item), item.id);
+		if (pi?.getModelSelectorSearchText) assert.equal(modelSearchText({ ...item, provider: "provimux" }), pi.getModelSelectorSearchText({ ...item, provider: "provimux" }), item.id);
+	}
+});
+
+test("0.10.4: a row is `model-id (Name) [provider] · window · price · fit`; the access part is left out where the name states one it would contradict", () => {
+	assert.deepEqual(PROVIMUX.map(fallbackChoiceLabel), [
+		// pi-cache-keeper has it as a subscription; the name says a failed request falls back to an API key.
+		"claude-opus-5-5 (Claude Opus 5.5 · Anthropic sub, fallback api) [provimux] · 1M window · holds this session",
+		// pi-cache-keeper would show its price; the name says it is a Devin subscription.
+		"devin/claude-opus-5-5 (Claude Opus 5.5 (Devin) · Devin sub) [provimux] · 1M window · holds this session",
+		// Both say an API key: the price stays.
+		"anthropic/claude-opus-5.5 (Claude Opus 5.5 · OpenRouter api) [provimux] · 1M window · $5.00 in, $25.00 out per M · holds this session",
+	]);
+	assert.equal(fallbackChoiceLabel(ANTHROPIC), "claude-opus-4-5 (Claude Opus 4.5 (latest)) [anthropic] · 200k window · $5.00 in, $25.00 out per M · holds this session");
+	assert.equal(fallbackChoiceLabel({ ...ANTHROPIC, name: "Claude Opus 4.5" }), "claude-opus-4-5 [anthropic] · 200k window · $5.00 in, $25.00 out per M · holds this session");
+	// The rule, both ways: a name that says nothing leaves this extension's own value.
+	assert.deepEqual(nameAccess("Claude Opus 5.5 · Anthropic sub, fallback api"), { sub: true, api: true });
+	assert.deepEqual(nameAccess("Claude Opus 5.5 (Devin) · Devin sub"), { sub: true, api: false });
+	assert.deepEqual(nameAccess("Claude Opus 5.5 · OpenRouter api"), { sub: false, api: true });
+	assert.deepEqual(nameAccess("Claude Opus 4.5"), { sub: false, api: false });
+	const price = { input: 5, output: 25 };
+	assert.equal(fallbackAccess({ name: "X · Devin sub", subscription: true, price }), "subscription", "both say a subscription");
+	assert.equal(fallbackAccess({ name: "X · OpenRouter api", subscription: true, price }), undefined, "a subscription beside a name that says api");
+	assert.equal(fallbackAccess({ name: "X · OpenRouter api", subscription: false }), "no price");
+	assert.equal(fallbackAccess({ name: "X · Devin sub", subscription: false }), undefined, "no price beside a name that says sub");
+	assert.equal(fallbackAccess({ name: "Gemini 2.5 Flash", subscription: false, price }), "$5.00 in, $25.00 out per M");
+	assert.equal(fallbackAccess({ subscription: true }), "subscription");
+	// /cache-keeper shows the picked model's parts by the same rule.
+	assert.deepEqual(fallbackModelParts(PROVIMUX[1]), ["1M window"]);
+	assert.deepEqual(fallbackModelParts(PROVIMUX[2]), ["1M window", "$5.00 in, $25.00 out per M"]);
+});
+
+// The list's rows at 80 and 120 columns: 6 columns go to the marks (2 + 2) and the free margin (2).
+test("0.10.4: at 80 and 120 columns the id, the name and the badge stay whole; the window, access and fit are cut first, the fit kept longest", () => {
+	const rows = [...PROVIMUX, ANTHROPIC].map(rowOf) as { ref: string; name?: string; rest: string[] }[];
+	const lines = (width: number) => rows.map((row) => fallbackRowLayout(row, width).map(partsText));
+	assert.deepEqual(lines(114), [
+		["claude-opus-5-5 (Claude Opus 5.5 · Anthropic sub, fallback api) [provimux] · 1M window · holds this session"],
+		["devin/claude-opus-5-5 (Claude Opus 5.5 (Devin) · Devin sub) [provimux] · 1M window · holds this session"],
+		// The price, too wide to keep beside the fit, goes first.
+		["anthropic/claude-opus-5.5 (Claude Opus 5.5 · OpenRouter api) [provimux] · 1M window · holds this session"],
+		// Here the window goes: the price and the fit fit, the three don't.
+		["claude-opus-4-5 (Claude Opus 4.5 (latest)) [anthropic] · $5.00 in, $25.00 out per M · holds this session"],
+	]);
+	assert.deepEqual(lines(74), [
+		["claude-opus-5-5 (Claude Opus 5.5 · Anthropic sub, fallback api) [provimux]"],
+		["devin/claude-opus-5-5 (Claude Opus 5.5 (Devin) · Devin sub) [provimux]"],
+		["anthropic/claude-opus-5.5 (Claude Opus 5.5 · OpenRouter api) [provimux]"],
+		// The fit alone, one column short: cut at its end.
+		["claude-opus-4-5 (Claude Opus 4.5 (latest)) [anthropic] · holds this sessi…"],
+	]);
+	// Narrower: the name and the badge go whole onto the next line, indented, rather than being cut.
+	assert.deepEqual(lines(54), [
+		["claude-opus-5-5", "  (Claude Opus 5.5 · Anthropic sub, fallback api)", "  [provimux] · 1M window · holds this session"],
+		["devin/claude-opus-5-5", "  (Claude Opus 5.5 (Devin) · Devin sub) [provimux]"],
+		["anthropic/claude-opus-5.5", "  (Claude Opus 5.5 · OpenRouter api) [provimux]"],
+		["claude-opus-4-5 (Claude Opus 4.5 (latest)) [anthropic]"],
+	]);
+	// A name wider than a whole line is broken between its words, never inside one.
+	assert.deepEqual(lines(34)[0], ["claude-opus-5-5 (Claude Opus 5.5 ·", "  Anthropic sub, fallback api)", "  [provimux] · holds this session"]);
+	for (const width of [114, 74, 54, 34, 20]) {
+		const drawn = lines(width);
+		for (const row of drawn) for (const line of row) assert.ok(line.length <= width, `${width}: ${line}`);
+		// Joined again, each row holds its id, its name and its badge whole, in that order.
+		drawn.forEach((row, i) => {
+			const text = row.map((line, at) => (at === 0 ? line : line.slice(2))).join(" ");
+			const parsed = parseModelRef(rows[i].ref) as { provider: string; id: string };
+			const head = [parsed.id, ...(distinctModelName({ id: parsed.id, name: rows[i].name }) ? [`(${rows[i].name})`] : []), `[${parsed.provider}]`].join(" ");
+			assert.ok(text.replace(/ +/g, " ").startsWith(head) || text.replace(/\s/g, "").startsWith(head.replace(/\s/g, "")), `${width}: ${text}`);
+		});
+		assert.equal(new Set(drawn.map((row) => row.join("\n"))).size, drawn.length, `${width}: every row reads differently`);
+	}
+});
+
+test("0.10.4: the Bedrock rows that read alike when shortened stay whole and distinct, wrapping at 40 and 60 columns", () => {
+	const fit = fallbackFit({ contextWindow: 200_000, maxTokens: 64_000 }, 1_000);
+	const rows = ["eu", "us"].map((region): FallbackRow => rowOf({ ref: `amazon-bedrock/${region}.anthropic.claude-haiku-4-5-20251001-v1:0`, name: `Claude Haiku 4.5 (${region.toUpperCase()})`, subscription: false, window: 200_000, price: { input: 1.1, output: 5.5 }, fit }));
+	assert.deepEqual(fallbackRowLayout(rows[0], 54).map(partsText), ["eu.anthropic.claude-haiku-4-5-20251001-v1:0", "  [amazon-bedrock] · 200k window · holds this session"]);
+	// An id wider than the line goes on where the line ends; the badge stays whole beside its end.
+	assert.deepEqual(fallbackRowLayout(rows[1], 34).map(partsText), ["us.anthropic.claude-haiku-4-5-2025", "  1001-v1:0 [amazon-bedrock]"]);
+	for (const width of [34, 54]) assert.notDeepEqual(fallbackRowLayout(rows[0], width).map(partsText), fallbackRowLayout(rows[1], width).map(partsText));
+});
+
+test("0.10.4: the list is searched as Pi's picker searches, by provider, id and name: provimux, devin and openrouter filter it", async () => {
+	const { fuzzyFilter } = await import("@earendil-works/pi-tui");
+	const all = [...PROVIMUX, ANTHROPIC, priced];
+	const search = (query: string) =>
+		fuzzyFilter(all, query, (choice) => {
+			const parsed = parseModelRef(choice.ref) as { provider: string; id: string };
+			return modelSearchText({ ...parsed, name: choice.name });
+		}).map((choice) => choice.ref);
+	assert.deepEqual(search("provimux").sort(), PROVIMUX.map((choice) => choice.ref).sort(), "by provider");
+	assert.equal(search("devin")[0], "provimux/devin/claude-opus-5-5", "by id and name, the Devin model first");
+	assert.ok(!search("devin").includes("anthropic/claude-opus-4-5"));
+	assert.deepEqual(search("openrouter"), ["provimux/anthropic/claude-opus-5.5"], "by name only: the id doesn't say OpenRouter");
+	assert.deepEqual(search("fallback api"), ["provimux/claude-opus-5-5"]);
+	assert.deepEqual(search("google"), ["google/gemini-2.5-flash"]);
+});
+
+test("0.10.4: the picked model is shown as `model-id [provider]`; the saved value stays provider/id, old values read the same", () => {
+	assert.equal(fallbackModelLabel("provimux/devin/claude-opus-5-5"), "devin/claude-opus-5-5 [provimux]");
+	assert.equal(fallbackModelLabel("google/gemini-2.5-flash"), "gemini-2.5-flash [google]");
+	assert.equal(fallbackModelLabel("amazon-bedrock/eu.anthropic.claude-haiku-4-5-20251001-v1:0"), "eu.anthropic.claude-haiku-4-5-20251001-v1:0 [amazon-bedrock]");
+	// Not a reference: as it is.
+	assert.equal(fallbackModelLabel("gemini"), "gemini");
+	assert.deepEqual(parseModelRef("provimux/devin/claude-opus-5-5"), { provider: "provimux", id: "devin/claude-opus-5-5" });
+	assert.equal(formatModelRef({ provider: "provimux", id: "devin/claude-opus-5-5" }), "provimux/devin/claude-opus-5-5");
 });
