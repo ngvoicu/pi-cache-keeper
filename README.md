@@ -527,7 +527,7 @@ Through a proxy (one pi provider that serves models of many labs), a model can c
 
 A model is then looked up like the same model used directly. When several upstreams may serve it and their values differ, the smaller one is used (marked `⚠`); a value only some have is not used (`?`). A proxy model nobody spoke for gets no data. A shorter lifetime than the real one costs an early refresh or compaction; a longer one would let the cache expire unnoticed.
 
-[pi-cliproxyapi-provider](https://github.com/ngvoicu/pi-cliproxyapi-provider) answers for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
+[pi-provimux](https://github.com/ngvoicu/pi-provimux) answers for [Provimux](https://github.com/ngvoicu/provimux) and [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
 
 ### Fetching, privacy, turning it off
 
@@ -682,7 +682,7 @@ Added here since the fork (see [CHANGELOG.md](CHANGELOG.md)):
 - each model's input window, cache lifetimes and prices from providers.dev, `/cache-keeper-refresh`, and the `modelData` setting
 - in the footer: the cache lifetimes and the one in use, what the last request asked for, the price, `sub` / `api` / `sub or api`, and what went wrong, fitted to the terminal's width
 - warnings when an answer came from another kind of credential or values are guesses
-- the `model-upstreams` events a proxy's extension answers, such as pi-cliproxyapi-provider
+- the `model-upstreams` events a proxy's extension answers, such as pi-provimux
 
 ## Documentation
 
