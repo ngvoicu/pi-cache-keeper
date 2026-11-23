@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-11-23
+
+### Changed
+- **On npm** — pi-cache-keeper is published to npm as `pi-cache-keeper`: `pi install npm:pi-cache-keeper`. The code is 0.10.1's; only the packaging changed. The package holds what Pi loads (the extension's `.ts` modules) and the README, this changelog and the licence; the design notes in `docs/` and the tests stay in the repository. `package.json` is no longer private, and names the repository, the issue tracker, the licence and Node 22.19 or newer, as Pi does. The Git install keeps working; README → [Moving from the Git install](README.md#moving-from-the-git-install) says how to switch, and your settings carry over.
+- **Published by GitHub Actions** — `.github/workflows/publish.yml` publishes the version `main` names when npm doesn't have it yet: it checks the package, packs it once, has Pi's own loader load that archive and runs `npm run check`, then publishes that very archive through npm's trusted publishing, with provenance and no token, tags it `v<version>` and makes the GitHub release. A failed publish opens an issue. How it works and the owner's one-time steps: [docs/publishing.md](docs/publishing.md).
+
 ## [0.10.1] - 2026-11-22
 
 ### Changed

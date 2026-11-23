@@ -22,10 +22,21 @@ pi-cache-keeper is based on pi-cached-compaction by Nico Bailon (MIT). Compactio
 ## Install
 
 ```bash
-pi install git:github.com/ngvoicu/pi-cache-keeper
+pi install npm:pi-cache-keeper
 ```
 
 Then run `/reload` (Pi loads extensions only at startup or on `/reload`). It needs Pi 0.87.0 or newer. Compacting from the cache, compacting when full, compacting before expiry and [model data from providers.dev](#model-data-from-providersdev) are on by default; keeping the cache warm is off until you set `keepWarmMinutes`.
+
+### Moving from the Git install
+
+If you installed it from GitHub (`pi install git:github.com/ngvoicu/pi-cache-keeper`), switch to npm, which gets you published, tagged versions:
+
+```bash
+pi remove git:github.com/ngvoicu/pi-cache-keeper
+pi install npm:pi-cache-keeper
+```
+
+Then `/reload`. Your settings carry over: they live under `cacheKeeper` in `~/.pi/agent/settings.json`, not in the package, and so do the log and the saved model data. `pi list` shows which one you have; don't keep both, or both would compact and both would show a countdown.
 
 ### Moving from pi-cached-compaction
 
@@ -668,3 +679,5 @@ Added here since the fork (see [CHANGELOG.md](CHANGELOG.md)):
 [docs/stop-warming.md](docs/stop-warming.md) is the design of `/cache-keeper-stop` and of what keep-warm says: the rule, what counts as your message, how every window learns of a stop, and the words of every notice.
 
 [docs/live-tests.md](docs/live-tests.md) has every test run behind the numbers here: the cache share on each model, how close the card's estimate of Pi's compaction came, where the summary stops when Pi's cut falls mid-turn, Claude and GPT through opencode-go, and cache tiers through Claude Code.
+
+[docs/publishing.md](docs/publishing.md) is how a version reaches npm: what the package holds, the workflow that tests and publishes it with provenance and no token, and its dry-run switch.
