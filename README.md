@@ -680,4 +680,4 @@ Added here since the fork (see [CHANGELOG.md](CHANGELOG.md)):
 
 [docs/live-tests.md](docs/live-tests.md) has every test run behind the numbers here: the cache share on each model, how close the card's estimate of Pi's compaction came, where the summary stops when Pi's cut falls mid-turn, Claude and GPT through opencode-go, and cache tiers through Claude Code.
 
-[docs/publishing.md](docs/publishing.md) is how a version reaches npm: what the package holds, the workflow that tests and publishes it with provenance and no token, and its dry-run switch.
+[docs/publishing.md](docs/publishing.md) is how a version reaches npm: what the package holds, the workflow that tests and publishes it with provenance and no token on every push to `main` that names a new version, and its dry-run switch (off since 0.10.3).

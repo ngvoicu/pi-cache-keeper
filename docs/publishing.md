@@ -1,9 +1,10 @@
 # Publishing pi-cache-keeper to npm
 
-**Status: dry run.** Since 0.10.2 the package is ready for npm and `.github/workflows/publish.yml` is on `main`, with
-the dry-run switch on: a push to `main` checks, packs, loads and tests the version it names and runs
-`npm publish --dry-run` on that archive, and publishes nothing. npm doesn't have the package yet; its first version
-is published by hand ([The owner's one-time steps](#the-owners-one-time-steps)).
+**Status: live.** A push to `main` whose version npm doesn't have publishes it: `.github/workflows/publish.yml`
+checks, packs, loads and tests that version, publishes that archive through npm's trusted publisher (no token), with
+provenance, then tags it and makes its GitHub release. The dry-run switch is off. 0.10.2, the first version, was
+published by hand; 0.10.3 is the first the workflow published, and the first with provenance
+([The owner's one-time steps](#the-owners-one-time-steps)).
 
 The workflow is pi-provimux's `publish.yml` (its `docs/FOLLOWING.md`, 4), cut down to publishing: there is no
 upstream to follow, so no `follow.yml`, no merge, no guard on someone else's changes.
@@ -41,19 +42,24 @@ or later, which trusted publishing needs; the `publish` job checks it). No `regi
 ### The dry-run switch
 
 `publish.yml` has the input `dry_run` and the line `DRY_RUN: ${{ inputs.dry_run || 'yes' }}`. A push has no input and
-takes the fallback. **Today both say `'yes'`**: a push only dry-runs. In a dry run every check runs, and `publish` runs
+takes the fallback. **Both say `'no'` since 0.10.3** (they said `'yes'` before): a push publishes, and a run by hand
+can still choose `dry_run=yes`. In a dry run every check runs, and `publish` runs
 `npm publish --dry-run` on the tested archive with `ACTIONS_ID_TOKEN_REQUEST_URL`, `ACTIONS_ID_TOKEN_REQUEST_TOKEN` and
 `NPM_ID_TOKEN` removed from its environment, so npm exchanges no token and uploads nothing; `tag` says which tag and
 release it would make.
 
 **The switch** is one commit: in `publish.yml`, `default: 'yes'` ("the switch (1 of 2)") and
-`inputs.dry_run || 'yes'` ("the switch (2 of 2)") become `'no'`. It is made after the first version published by
-this workflow (step 5 below). To put the dry run back, the same two lines back to `'yes'`.
+`inputs.dry_run || 'yes'` ("the switch (2 of 2)") become `'no'`. It was made after 0.10.3, the first version
+published by this workflow (step 5 below). To put the dry run back, the same two lines back to `'yes'`.
+
+A version this workflow publishes goes up as the tested archive, so npm records no `gitHead` for it (0.10.3 has
+none). A later run that finds the version already on npm (a push that leaves the version alone, a rerun, a run by hand)
+publishes nothing, and its `tag` job takes the existing tag `v<version>` instead, which the publishing run made.
 
 ## Making a release
 
 Raise `version` in `package.json` (`npm version patch --no-git-tag-version`), add the `## [X.Y.Z] - date` entry to
-`CHANGELOG.md`, commit, push `main` to GitHub and the NAS. Once the switch is off, the push publishes it. A push that
+`CHANGELOG.md`, commit, push `main` to GitHub and the NAS. The push to GitHub publishes it. A push that
 leaves the version alone publishes nothing (Git installs still get it).
 
 A bad version is fixed by a greater one: Pi installs a version only when it is greater than the installed one.
@@ -92,7 +98,7 @@ Read on 2026-11-23.
 ## The owner's one-time steps
 
 The GitHub environments `npm` and `main-only` (each admitting the branch `main` alone) were made with 0.10.2. Nothing
-is stored on GitHub: no secret, no token.
+is stored on GitHub: no secret, no token. Steps 1 to 5 were done on 2026-11-23; step 6 is the owner's.
 
 1. **npm account.** The account that publishes pi-provimux, with two-factor authentication on. On the Mac:
    `npm login` (`npm whoami` shows the account).
@@ -114,10 +120,10 @@ is stored on GitHub: no secret, no token.
    npm trust github pi-cache-keeper --file publish.yml --repo ngvoicu/pi-cache-keeper --env npm --allow-publish
    npm trust list pi-cache-keeper
    ```
-4. **The first publish by the workflow:** the next version (0.10.3 or later) is pushed to `main` (the push only
-   dry-runs), then `gh workflow run publish.yml -R ngvoicu/pi-cache-keeper --ref main -f dry_run=no` publishes it,
-   within the 2 days. Its page on npmjs.com shows "Provenance" with the commit.
+4. **The first publish by the workflow:** the next version (0.10.3) is pushed to `main` (the push only
+   dry-ran), then `gh workflow run publish.yml -R ngvoicu/pi-cache-keeper --ref main -f dry_run=no` publishes it,
+   within the 2 days. Its page on npmjs.com shows "Provenance" with the commit. Done: 0.10.3.
 5. **The switch** off, in a commit of its own ([The dry-run switch](#the-dry-run-switch)): from then on a push
-   publishes.
+   publishes. Done, after 0.10.3.
 6. **No more tokens:** npmjs.com → pi-cache-keeper → Settings → Publishing access → "Require two-factor
    authentication and disallow tokens" → Update Package Settings. Trusted publishing keeps working.
