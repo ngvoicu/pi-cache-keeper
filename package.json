@@ -1,6 +1,6 @@
 {
   "name": "pi-cache-keeper",
-  "version": "0.10.5",
+  "version": "0.10.6",
   "description": "Keeps pi's prompt cache paying off: compaction from the warm cache, a model you pick when the cache can't be used, compacting when the context is full, keeping the cache warm while idle, model windows and cache lifetimes from providers.dev. Based on pi-cached-compaction by Nico Bailon",
   "type": "module",
   "keywords": [
@@ -47,10 +47,10 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": ">=0.87.0",
-    "@earendil-works/pi-ai": ">=0.87.0",
-    "@earendil-works/pi-coding-agent": ">=0.87.0",
-    "@earendil-works/pi-tui": ">=0.87.0"
+    "@earendil-works/pi-agent-core": ">=1.6.0",
+    "@earendil-works/pi-ai": ">=1.6.0",
+    "@earendil-works/pi-coding-agent": ">=1.6.0",
+    "@earendil-works/pi-tui": ">=1.6.0"
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "1.6.0",

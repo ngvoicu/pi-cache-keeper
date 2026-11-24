@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { getSelectListTheme } from "@earendil-works/pi-coding-agent";
 import { fileURLToPath } from "node:url";
-import { FALLBACK, EXPIRY, flush, FULL, inWindow, KEEP_WARM, lineOf, NO_OWN, OWN, ownEntries, ownOf, settingsText, skip, writeDefaults, type Any } from "./session-runtime.ts";
+import { FALLBACK, EXPIRY, flush, FULL, inWindow, KEEP_WARM, lineOf, NO_OWN, OWN, ownEntries, ownOf, settingsText, writeDefaults, type Any } from "./session-runtime.ts";
 
 const {
 	GLOBAL_ONLY_KEYS,
@@ -86,7 +86,7 @@ test("the latest settings entry on the branch decides; an empty one is back to t
 });
 
 
-test("the menu opens on this session; values set there are saved in the session when it closes, never in settings.json; they hold after a resume, follow a branch switch and a fork, and /cache-keeper marks them", { skip }, async () => {
+test("the menu opens on this session; values set there are saved in the session when it closes, never in settings.json; they hold after a resume, follow a branch switch and a fork, and /cache-keeper marks them", async () => {
 	writeDefaults({ keepWarmMinutes: 0 });
 	const before = settingsText();
 	const result = await inWindow(
@@ -152,7 +152,7 @@ test("the menu opens on this session; values set there are saved in the session 
 	assert.deepEqual(result.thrown, []);
 });
 
-test("back to the defaults drops the session's own values, in the session; another session keeps its own", { skip }, async () => {
+test("back to the defaults drops the session's own values, in the session; another session keeps its own", async () => {
 	writeDefaults({ keepWarmMinutes: 0 });
 	const result = await inWindow(
 		async (w) => {
@@ -197,7 +197,7 @@ test("back to the defaults drops the session's own values, in the session; anoth
 	assert.deepEqual(result.thrown, []);
 });
 
-test("the defaults are one step away in the menu: changed there, they are saved in settings.json, and hold in this session only for keys it didn't set", { skip }, async () => {
+test("the defaults are one step away in the menu: changed there, they are saved in settings.json, and hold in this session only for keys it didn't set", async () => {
 	writeDefaults({ keepWarmMinutes: 0 });
 	const result = await inWindow(async (w) => {
 		await w.answer();
@@ -230,7 +230,7 @@ test("the defaults are one step away in the menu: changed there, they are saved 
 	assert.deepEqual(result.thrown, []);
 });
 
-test("an old session without the entry has the defaults; an entry holding global-only keys is read without them", { skip }, async () => {
+test("an old session without the entry has the defaults; an entry holding global-only keys is read without them", async () => {
 	writeDefaults({ keepWarmMinutes: 0 });
 	const result = await inWindow(
 		async (w) => {
@@ -258,7 +258,7 @@ test("an old session without the entry has the defaults; an entry holding global
 	assert.deepEqual(result.thrown, []);
 });
 
-test("outside the TUI, /cache-keeper-settings lists both layers", { skip }, async () => {
+test("outside the TUI, /cache-keeper-settings lists both layers", async () => {
 	writeDefaults({ keepWarmMinutes: 120 });
 	const result = await inWindow(async (w) => {
 		await w.answer();
@@ -284,7 +284,7 @@ test("outside the TUI, /cache-keeper-settings lists both layers", { skip }, asyn
 
 // ------------------------------------------------------------------------------------------------------ keep-warm
 
-test("keep-warm reads the session's own keepWarmMinutes: on over a default of off, off over a default of on, and it holds when the default changes in another window", { skip }, async () => {
+test("keep-warm reads the session's own keepWarmMinutes: on over a default of off, off over a default of on, and it holds when the default changes in another window", async () => {
 	writeDefaults({ keepWarmMinutes: 0 });
 	const on = await inWindow(async (w) => {
 		const menu = await w.menu();
@@ -337,7 +337,7 @@ test("keep-warm reads the session's own keepWarmMinutes: on over a default of of
 
 // The same switch during an idle period, made once in the defaults and once for this session: everything seen is the same.
 for (const turn of ["on", "off"] as const) {
-	test(`keep-warm switched ${turn} during an idle period for this session behaves as switching the default ${turn} does`, { skip }, async () => {
+	test(`keep-warm switched ${turn} during an idle period for this session behaves as switching the default ${turn} does`, async () => {
 		const seen: Record<string, unknown> = {};
 		for (const layer of ["defaults", "session"] as const) {
 			writeDefaults({ keepWarmMinutes: turn === "on" ? 0 : 120 });
@@ -387,7 +387,7 @@ for (const turn of ["on", "off"] as const) {
 // (its adapter has not built the payload yet) when the limit becomes 30 min: the session goes back to its 30-minute
 // default, or another window saves a 30-minute default. Nothing leaves past the limit, and warming ends with it.
 for (const change of ["back to the defaults", "the default, saved in another window"] as const) {
-	test(`a refresh being prepared when the time limit is shortened to 30 min (${change}) does not go out`, { skip }, async () => {
+	test(`a refresh being prepared when the time limit is shortened to 30 min (${change}) does not go out`, async () => {
 		writeDefaults({ keepWarmMinutes: change === "the default, saved in another window" ? 120 : 30, compactBeforeExpiry: false });
 		const seen: Any = {};
 		const result = await inWindow(
@@ -445,7 +445,7 @@ for (const change of ["back to the defaults", "the default, saved in another win
 
 // The defaults another window saved (here written to settings.json, as that window's menu does) hold at the next decision
 // of every session that has no value of its own for them: dropping the session's own value, or never having one.
-test("back to the defaults after another window turned compactBeforeExpiry off: no compaction before expiry", { skip }, async () => {
+test("back to the defaults after another window turned compactBeforeExpiry off: no compaction before expiry", async () => {
 	writeDefaults({ compactBeforeExpiry: true, minContextTokens: 100_000, keepWarmMinutes: 0 });
 	const seen: Any = {};
 	const result = await inWindow(
@@ -473,7 +473,7 @@ test("back to the defaults after another window turned compactBeforeExpiry off: 
 });
 
 for (const kind of ["expiry", "full"] as const) {
-	test(`a default saved in another window after this one started holds here: ${kind === "expiry" ? "compactBeforeExpiry turned off" : "the compactAtTokens cap turned off"}`, { skip }, async () => {
+	test(`a default saved in another window after this one started holds here: ${kind === "expiry" ? "compactBeforeExpiry turned off" : "the compactAtTokens cap turned off"}`, async () => {
 		writeDefaults({ keepWarmMinutes: 0, compactAtPercent: 0, compactAtTokens: kind === "full" ? 100_000 : 0, compactBeforeExpiry: kind === "expiry", minContextTokens: 100_000 });
 		const seen: Any = {};
 		const result = await inWindow(
@@ -496,7 +496,7 @@ for (const kind of ["expiry", "full"] as const) {
 	});
 }
 
-test("/cache-keeper marks each value by where it comes from", { skip }, async () => {
+test("/cache-keeper marks each value by where it comes from", async () => {
 	writeDefaults({ keepWarmMinutes: 0, compactAtPercent: 90, compactAtTokens: 0, compactBeforeExpiry: false, minContextTokens: 140_000 });
 	const result = await inWindow(
 		async (w) => {
@@ -533,7 +533,7 @@ test("/cache-keeper marks each value by where it comes from", { skip }, async ()
 // The reviewer's case: refresh 7's payload passes the last gate under a 2-hour default at 32 min 05 s idle; in the
 // microtask right after, before the adapter hands the request to its transport, another window saves a 30-minute
 // default. The check at the send stops it.
-test("a 30-minute default saved after the payload passed, before the transport: refresh 7 does not reach the transport", { skip }, async () => {
+test("a 30-minute default saved after the payload passed, before the transport: refresh 7 does not reach the transport", async () => {
 	writeDefaults({ keepWarmMinutes: 120, compactBeforeExpiry: false });
 	const seen: Any = {};
 	const result = await inWindow(
@@ -579,7 +579,7 @@ test("a 30-minute default saved after the payload passed, before the transport: 
 // a process of its own (tests/fixtures/startup-race.ts), where the extension loads with the hook in place. The save is
 // complete before the first turn; nothing compacts that it turned off.
 for (const kind of ["expiry", "full"] as const) {
-	test(`a default saved right after this window read the defaults at its start holds at the first decision (${kind === "expiry" ? "compactBeforeExpiry off" : "the cap off"})`, { skip }, () => {
+	test(`a default saved right after this window read the defaults at its start holds at the first decision (${kind === "expiry" ? "compactBeforeExpiry off" : "the cap off"})`, () => {
 		const child = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("fixtures/startup-race.ts", import.meta.url)), kind], { encoding: "utf8", timeout: 60_000 });
 		assert.equal(child.status, 0, child.stderr);
 		const seen = JSON.parse(child.stdout.trim().split("\n").at(-1) ?? "{}");
@@ -592,7 +592,7 @@ for (const kind of ["expiry", "full"] as const) {
 
 // The reviewer's case: the session's own 150k cap left the context at 160k after a compaction; another window changes the
 // default cap, which this session overrides. Nothing in effect changed, so nothing is tried again.
-test("a change of a default the session overrides does not try compacting when full again", { skip }, async () => {
+test("a change of a default the session overrides does not try compacting when full again", async () => {
 	writeDefaults({ compactAtTokens: 100_000, compactBeforeExpiry: false, keepWarmMinutes: 0 });
 	const seen: Any = {};
 	const result = await inWindow(
@@ -651,7 +651,7 @@ const GEMINI_LINE = `fallback compaction model: gemini-2.5-flash [google] · 1.0
 const NOT_CACHED = "the fallback compaction model writes the summary where it can, else Pi's compaction";
 
 // Design 0.10.0, test 7.
-test("the fallback compaction model: a session's own value wins over the default, its off wins over a default model, the default is read as saved now, and back to the defaults drops it", { skip }, async () => {
+test("the fallback compaction model: a session's own value wins over the default, its off wins over a default model, the default is read as saved now, and back to the defaults drops it", async () => {
 	writeDefaults({ fallbackCompactionModel: "google/gemini-2.5-flash" });
 	const result = await inWindow(
 		async (w) => {
@@ -700,7 +700,7 @@ test("the fallback compaction model: a session's own value wins over the default
 });
 
 // Design 0.10.0, test 8.
-test("the fallback compaction model's row, its list, its /cache-keeper lines and the next compaction; a pick Pi can't use now is kept and marked", { skip }, async () => {
+test("the fallback compaction model's row, its list, its /cache-keeper lines and the next compaction; a pick Pi can't use now is kept and marked", async () => {
 	writeDefaults({});
 	const result = await inWindow(async (w) => {
 		fallbackModels(w);
@@ -759,7 +759,7 @@ test("the fallback compaction model's row, its list, its /cache-keeper lines and
 // Findings 10 and 3 (review of 0.10.0, round 1), as 0.10.4 draws a row (Pi's /model picker): in a narrow terminal the
 // picker's rows keep the whole id and the whole [provider] badge, over a second line where they need it, and stay
 // distinct; and the row says what goes to the picked model's provider.
-test("review 10 and 3: at 40 and 60 columns the picker's rows keep the whole model id and provider, wrapping rather than cutting them, and stay distinct; the row's description names what is sent", { skip }, async () => {
+test("review 10 and 3: at 40 and 60 columns the picker's rows keep the whole model id and provider, wrapping rather than cutting them, and stay distinct; the row's description names what is sent", async () => {
 	writeDefaults({});
 	const result = await inWindow(async (w) => {
 		const registry = w.runtime.session.extensionRunner.createContext().modelRegistry;
@@ -795,7 +795,6 @@ test("review 10 and 3: at 40 and 60 columns the picker's rows keep the whole mod
 		menu.keys("\x1b");
 		const description = menu.text();
 		assert.match(description, /full output of shell commands you ran with !/);
-		assert.match(description, /on Pi before 1\.2, the assistant's thinking/);
 		await menu.close();
 	});
 	assert.deepEqual(result.thrown, []);
@@ -819,7 +818,7 @@ const PROVIMUX_ROUTES = {
 		"anthropic/claude-opus-5.5": { upstreams: [{ provider: "openrouter", subscription: false }] },
 	},
 };
-test("0.10.4: Provimux models in the list as Pi's /model picker shows them, at 80 and 120 columns; searched by provider and name; the pick as model-id [provider]", { skip }, async () => {
+test("0.10.4: Provimux models in the list as Pi's /model picker shows them, at 80 and 120 columns; searched by provider and name; the pick as model-id [provider]", async () => {
 	writeDefaults({ fallbackCompactionModel: "provimux/devin/claude-opus-5-5" });
 	const result = await inWindow(
 		async (w) => {

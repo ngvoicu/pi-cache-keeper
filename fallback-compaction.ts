@@ -26,7 +26,7 @@ export function formatModelRef(model: { provider: string; id: string }): string 
  */
 export const FALLBACK_SHORT_WORD = 20;
 /**
- * Pi's summarizer prompt around the conversation, in tokens: at most 1,642 characters of English in Pi 0.87.0 and 1.6.0,
+ * Pi's summarizer prompt around the conversation, in tokens: at most 1,642 characters of English in Pi 1.6.0,
  * about 600 by the count above; rounded up.
  */
 export const FALLBACK_PROMPT_TOKENS = 700;

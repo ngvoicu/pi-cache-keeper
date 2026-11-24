@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { mock } from "node:test";
@@ -299,12 +299,11 @@ const clock = (now = 1_000) => {
 	mock.timers.enable({ apis: ["setInterval", "setTimeout", "Date"], now });
 };
 
-// Pi's own warmer, as Pi 1.5.2 runs it (not exported from the package root; skipped where the installed Pi has none),
+// Pi's own warmer, as Pi 1.5.2 runs it (not exported from the package root),
 // beside the extension with a fake transport. Its decisions go through the extension's cache_warming_decision handler,
 // as Pi's extension runner sends them.
 const warmerFile = new URL("../node_modules/@earendil-works/pi-coding-agent/dist/core/cache-warmer.js", import.meta.url);
-const { CacheWarmer } = existsSync(warmerFile) ? await import(warmerFile.href) : { CacheWarmer: undefined };
-const noWarmer = CacheWarmer ? false : "the installed Pi has no CacheWarmer";
+const { CacheWarmer } = await import(warmerFile.href);
 
 function withPiWarmer(h: ReturnType<typeof harness>) {
 	const piRefreshes: number[] = [];
@@ -335,7 +334,7 @@ function withPiWarmer(h: ReturnType<typeof harness>) {
 
 // ---------------------------------------------------------------------------------------------------------------- R0
 
-test("R0: with keep-warm off, an idle period beside Pi's own warmer sends and logs what 0.4.1 does; the decision handler returns nothing", { skip: noWarmer }, async (t) => {
+test("R0: with keep-warm off, an idle period beside Pi's own warmer sends and logs what 0.4.1 does; the decision handler returns nothing", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	fresh({ keepWarmMinutes: 0 });
@@ -358,7 +357,7 @@ test("R0: with keep-warm off, an idle period beside Pi's own warmer sends and lo
 
 // ---------------------------------------------------------------------------------------------------------------- R1
 
-test("R1: in a period the extension owns, Pi's idle decisions are answered stop and Pi sends nothing; the extension keeps it warm", { skip: noWarmer }, async (t) => {
+test("R1: in a period the extension owns, Pi's idle decisions are answered stop and Pi sends nothing; the extension keeps it warm", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	fresh({ compactBeforeExpiry: false });
@@ -381,7 +380,7 @@ test("R1: in a period the extension owns, Pi's idle decisions are answered stop 
 	for (const action of ["warm", "stop"]) assert.deepEqual(h.decide(action), { action: "stop" });
 });
 
-test("R1: during a run, and between Pi marking the run active and agent_start, the handler returns nothing", { skip: noWarmer }, async (t) => {
+test("R1: during a run, and between Pi marking the run active and agent_start, the handler returns nothing", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	fresh();
@@ -434,7 +433,7 @@ for (const [label, options] of [
 	// An API the extension re-sends, whose request carried no limit (OpenAI Responses without supportsMaxOutputTokens).
 	["OpenAI Responses without an output limit", { lifetime: 300, model: { api: "openai-responses" }, sent: { model: "o", input: [{ role: "user", content: "hi" }] }, params: {} }],
 ] as Array<readonly [string, Options]>) {
-	test(`R1: a period the extension cannot own (${label}) is Pi's: the handler returns nothing, the extension sends nothing, Pi refreshes as with keep-warm off`, { skip: noWarmer }, async (t) => {
+	test(`R1: a period the extension cannot own (${label}) is Pi's: the handler returns nothing, the extension sends nothing, Pi refreshes as with keep-warm off`, async (t) => {
 		const runOnce = async (keepWarmMinutes: number) => {
 			clock();
 			fresh({ keepWarmMinutes, compactBeforeExpiry: false });
@@ -513,7 +512,7 @@ test("R1: a run whose last request failed before using the cache: the period is 
 	assert.deepEqual(h.warms[0].payload, { ...first, max_tokens: 1 }, "the request of the real answer, not the failed one");
 });
 
-test("R1: an answer that used the cache, then a successful one that used none: the new period is Pi's, as with keep-warm off", { skip: noWarmer }, async (t) => {
+test("R1: an answer that used the cache, then a successful one that used none: the new period is Pi's, as with keep-warm off", async (t) => {
 	const runOnce = async (keepWarmMinutes: number) => {
 		clock();
 		fresh({ keepWarmMinutes, compactBeforeExpiry: false });
@@ -1040,7 +1039,7 @@ test("R7/2: another model's reported tier does not set the lifetime of the perio
 	assert.equal(h.warms[0]?.at, 276_000, "25 s before the 5-minute expiry, not the 1-hour one");
 });
 
-test("R7/3: an answer that streamed past its cache's last safe refresh moment: the period is Pi's, so Pi's warmer goes on and the extension sends nothing", { skip: noWarmer }, async (t) => {
+test("R7/3: an answer that streamed past its cache's last safe refresh moment: the period is Pi's, so Pi's warmer goes on and the extension sends nothing", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	fresh({ compactBeforeExpiry: false });
@@ -1126,8 +1125,7 @@ test("R7/5: a message queued while the refresh was being prepared: withheld, the
 // payload hook (stopped there: nothing is sent). The outgoing limit must be the one the adapter built for a 1-token
 // answer, in the key the captured request carried it in.
 const catalogFile = new URL("../node_modules/@earendil-works/pi-ai/dist/models.generated.js", import.meta.url);
-const { MODELS } = existsSync(catalogFile) ? await import(catalogFile.href) : { MODELS: undefined };
-const noCatalog = MODELS ? false : "the installed pi-ai has no model catalog";
+const { MODELS } = await import(catalogFile.href);
 const adapterUser = { role: "user", content: [{ type: "text", text: "Explain the changes in detail." }], timestamp: 1000 };
 // As every Pi session sends a request: a system prompt and at least one tool, carried by the leading system message the
 // way Pi 1.5.2 builds it (normalizeContext). A leading system message in `messages` gives the system prompt.
@@ -1197,7 +1195,7 @@ for (const [provider, id, key, capped] of [
 	["cerebras", "gpt-oss-120b", "max_completion_tokens", 1],
 	["openai", "gpt-6.1-sol", "max_output_tokens", 16],
 ] as const) {
-	test(`R7/1 allow-list: pi 1.5.2's ${provider}/${id} adapter builds the refresh's limit in ${key}, and it goes out capped (${capped})`, { skip: noCatalog }, async (t) => {
+	test(`R7/1 allow-list: pi 1.5.2's ${provider}/${id} adapter builds the refresh's limit in ${key}, and it goes out capped (${capped})`, async (t) => {
 		clock();
 		t.after(() => mock.timers.reset());
 		const realFetch = globalThis.fetch;
@@ -1223,7 +1221,7 @@ for (const [provider, id, key, capped] of [
 	});
 }
 
-test("R7/1: a refresh is built with the thinking level its request was sent with, so a level raised since does not lift the limit", { skip: noCatalog }, async (t) => {
+test("R7/1: a refresh is built with the thinking level its request was sent with, so a level raised since does not lift the limit", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	const realFetch = globalThis.fetch;
@@ -1254,7 +1252,7 @@ const noNetwork = (t: { after: (fn: () => void) => void }) => {
 	}) as typeof fetch;
 	t.after(() => (globalThis.fetch = realFetch));
 };
-test("R7b/1: Shift+Tab while the request awaited credentials: the refresh is built with the thinking its payload shows, and leaves capped at 1", { skip: noCatalog }, async (t) => {
+test("R7b/1: Shift+Tab while the request awaited credentials: the refresh is built with the thinking its payload shows, and leaves capped at 1", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
@@ -1274,7 +1272,7 @@ test("R7b/1: Shift+Tab while the request awaited credentials: the refresh is bui
 	assert.deepEqual(out.thinking, { type: "disabled" });
 });
 
-test("R7b/1: a limit of 1,025 or 16,385 never leaves: withheld at the door, warming ends (unable), nothing reserved", { skip: noCatalog }, async (t) => {
+test("R7b/1: a limit of 1,025 or 16,385 never leaves: withheld at the door, warming ends (unable), nothing reserved", async (t) => {
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
 	const real = MODELS.anthropic["claude-sonnet-4-5"];
@@ -1308,7 +1306,7 @@ test("R7b/1: a limit of 1,025 or 16,385 never leaves: withheld at the door, warm
 	}
 });
 
-test("R7b/1: an OpenAI Responses request already at 16 output tokens is refreshed", { skip: noCatalog }, async (t) => {
+test("R7b/1: an OpenAI Responses request already at 16 output tokens is refreshed", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
@@ -1469,7 +1467,7 @@ const GPT_DATA = { short: 1800, long: 43_200 };
 const systemAndUser = [{ role: "system", content: "You are pi.", timestamp: 0 }, adapterUser];
 
 for (const windowMinutes of [120, 1440]) {
-	test(`R7c/1: GPT Responses with long retention and the shared 12-hour prefix (two lifetimes) is Pi's, with a ${windowMinutes / 60} h window`, { skip: noCatalog || noWarmer }, async (t) => {
+	test(`R7c/1: GPT Responses with long retention and the shared 12-hour prefix (two lifetimes) is Pi's, with a ${windowMinutes / 60} h window`, async (t) => {
 		t.after(() => mock.timers.reset());
 		noNetwork(t);
 		withRetention(t, "long");
@@ -1504,7 +1502,7 @@ for (const windowMinutes of [120, 1440]) {
 	});
 }
 
-test("R7c/1: with the default settings (long retention) and Pi's tools, Claude on the Anthropic API, Kimi K3 on Moonshot and GPT-6.1 Sol on OpenAI are kept warm; GPT with the shared prefix (gpt-5.6-cyber) is left to Pi", { skip: noCatalog }, async (t) => {
+test("R7c/1: with the default settings (long retention) and Pi's tools, Claude on the Anthropic API, Kimi K3 on Moonshot and GPT-6.1 Sol on OpenAI are kept warm; GPT with the shared prefix (gpt-5.6-cyber) is left to Pi", async (t) => {
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
 	withRetention(t, "long");
@@ -1529,7 +1527,7 @@ test("R7c/1: with the default settings (long retention) and Pi's tools, Claude o
 	}
 });
 
-test("R7c/1: GPT Responses with short retention states no lifetime: owned at 30 min, refreshed before the conversation's cache expires", { skip: noCatalog }, async (t) => {
+test("R7c/1: GPT Responses with short retention states no lifetime: owned at 30 min, refreshed before the conversation's cache expires", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
@@ -1575,7 +1573,7 @@ test("R7c/1: a payload that states its own lifetime: owned only where it matches
 	}
 });
 
-test("R7c/2: keep-warm saved off in another window before the request: the handler returns nothing, Pi refreshes as on main, the extension sends nothing", { skip: noWarmer }, async (t) => {
+test("R7c/2: keep-warm saved off in another window before the request: the handler returns nothing, Pi refreshes as on main, the extension sends nothing", async (t) => {
 	t.after(() => mock.timers.reset());
 	const runOnce = async (otherWindow: boolean) => {
 		clock();
@@ -1601,7 +1599,7 @@ test("R7c/2: keep-warm saved off in another window before the request: the handl
 	assert.deepEqual(traces(), []);
 });
 
-test("R7c/2: keep-warm saved off in another window during a period it owns: warming ends there, the handler returns nothing from then on", { skip: noWarmer }, async (t) => {
+test("R7c/2: keep-warm saved off in another window during a period it owns: warming ends there, the handler returns nothing from then on", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	fresh({ keepWarmMinutes: 1440, compactBeforeExpiry: false });
@@ -1709,7 +1707,7 @@ const openRouterClaude = (control: Record<string, unknown>) => ({
 	cost: WITH_WRITE,
 });
 
-test("R8: the reviewer's Claude request (1 h on the system prompt, the default marker on the conversation) is Pi's, whatever the answer reports", { skip: noCatalog || noWarmer }, async (t) => {
+test("R8: the reviewer's Claude request (1 h on the system prompt, the default marker on the conversation) is Pi's, whatever the answer reports", async (t) => {
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
 	withRetention(t, "long");
@@ -1719,7 +1717,7 @@ test("R8: the reviewer's Claude request (1 h on the system prompt, the default m
 	}
 });
 
-test("R8: variants of mixed Claude markers are Pi's: the default on the system prompt with 1 h on the conversation; a tools marker", { skip: noCatalog || noWarmer }, async (t) => {
+test("R8: variants of mixed Claude markers are Pi's: the default on the system prompt with 1 h on the conversation; a tools marker", async (t) => {
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
 	withRetention(t, "long");
@@ -1730,7 +1728,7 @@ test("R8: variants of mixed Claude markers are Pi's: the default on the system p
 	await leftToPi(() => harness({ model: { ...claude(), cost: WITH_WRITE }, sent: tools, stream: viaRealAdapter(claude()) }), /the request carries more than one cache lifetime/);
 });
 
-test("R8: the reviewer's OpenRouter Claude on Responses with a top-level default marker is the 5-minute cache, refreshed before it expires; with 1 h it is the 1-hour one", { skip: noCatalog }, async (t) => {
+test("R8: the reviewer's OpenRouter Claude on Responses with a top-level default marker is the 5-minute cache, refreshed before it expires; with 1 h it is the 1-hour one", async (t) => {
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
 	withRetention(t, "long");
@@ -1751,7 +1749,7 @@ test("R8: the reviewer's OpenRouter Claude on Responses with a top-level default
 	}
 });
 
-test("R8: the tier is the one the request asks for, not the setting", { skip: noCatalog }, async (t) => {
+test("R8: the tier is the one the request asks for, not the setting", async (t) => {
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
 	const cases: [string, string | undefined, string, number][] = [
@@ -1821,7 +1819,7 @@ test("R8: without declared data, the tier the answer reports gives the lifetime;
 	assert.equal(other.decide(), undefined, "a 5-minute request whose answer reports 1-hour writes");
 });
 
-test("R8: a lifetime assumed for a model family is owned only on the provider's own API", { skip: noCatalog }, async (t) => {
+test("R8: a lifetime assumed for a model family is owned only on the provider's own API", async (t) => {
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
 	withRetention(t, undefined);
@@ -1844,7 +1842,7 @@ test("R8: a lifetime assumed for a model family is owned only on the provider's 
 	}
 });
 
-test("a period left to Pi reads its cache as with keep-warm off: GPT-6.1 Sol asking for 12 hours is not compacted at 29m40s, with or without tools", { skip: noCatalog }, async (t) => {
+test("a period left to Pi reads its cache as with keep-warm off: GPT-6.1 Sol asking for 12 hours is not compacted at 29m40s, with or without tools", async (t) => {
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
 	withRetention(t, "long");
@@ -1882,7 +1880,7 @@ test("a period left to Pi reads its cache as with keep-warm off: GPT-6.1 Sol ask
 	}
 });
 
-test("owned or left alone: where one refresh costs as much as the miss it avoids, the period is Pi's from its start", { skip: noWarmer }, async (t) => {
+test("owned or left alone: where one refresh costs as much as the miss it avoids, the period is Pi's from its start", async (t) => {
 	t.after(() => mock.timers.reset());
 	// A cached read priced like an uncached one, no cache-write price: a miss costs nothing more than a refresh.
 	const flat = { input: 1, output: 1, cacheRead: 1, cacheWrite: 0 };
@@ -1893,7 +1891,7 @@ test("owned or left alone: where one refresh costs as much as the miss it avoids
 	assert.equal(await ownedRefresh(harness({ lifetime: 300, cost: WITH_WRITE })), 276_000);
 });
 
-test("the reason for thinking names what the request carries, for any provider: DeepSeek on Chat Completions with thinking on", { skip: noCatalog }, async (t) => {
+test("the reason for thinking names what the request carries, for any provider: DeepSeek on Chat Completions with thinking on", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
@@ -2244,7 +2242,7 @@ test("the owned period never counts a longer lifetime than the one read now: a r
 
 // The reviewer's second sequence: Pi's own refresh during a long run comes back after the period started, through the
 // API key's route (2.5 minutes). The period's 10-minute expiry counts with 2.5 minutes from then: long passed.
-test("the owned period never counts a longer lifetime than the one read now: a route change reported by Pi's in-run refresh", { skip: noWarmer }, async (t) => {
+test("the owned period never counts a longer lifetime than the one read now: a route change reported by Pi's in-run refresh", async (t) => {
 	t.after(() => mock.timers.reset());
 	online(t);
 	clock();
@@ -2834,7 +2832,7 @@ test("route lifetimes: a period owned by the data for the tier asked names that 
 	assert.equal(traces().find((r) => r.event === "warm" && r.action === "warm").lifetimeSource, "declared by the model");
 });
 
-test("route lifetimes: Claude on the Anthropic API with Pi's real adapter, short and long, is kept warm as before; a plain marker whose answer reports the 1-hour write is not", { skip: noCatalog }, async (t) => {
+test("route lifetimes: Claude on the Anthropic API with Pi's real adapter, short and long, is kept warm as before; a plain marker whose answer reports the 1-hour write is not", async (t) => {
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
 	for (const [retention, answer, at] of [
@@ -2860,7 +2858,7 @@ test("route lifetimes: Claude on the Anthropic API with Pi's real adapter, short
 	assert.match(await h.command("cache-keeper"), /an answer of this model reports a 60 min cache write; the request's cache lasts 5 min by the route's data/);
 });
 
-test("route lifetimes: a format whose answers report no bucket goes by the data, as before (GPT-6.1 Sol on OpenAI's API, 30 minutes)", { skip: noCatalog }, async (t) => {
+test("route lifetimes: a format whose answers report no bucket goes by the data, as before (GPT-6.1 Sol on OpenAI's API, 30 minutes)", async (t) => {
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
 	withRetention(t, undefined);
@@ -3337,7 +3335,7 @@ test("R9: an interrupted refresh that reported a miss counts; one that reported 
 	}
 });
 
-test("R9: with Pi's real Anthropic adapter, a refresh whose stream fails after reporting 120,000 written and none read is a miss", { skip: noCatalog }, async (t) => {
+test("R9: with Pi's real Anthropic adapter, a refresh whose stream fails after reporting 120,000 written and none read is a miss", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
@@ -3362,7 +3360,7 @@ test("R9: with Pi's real Anthropic adapter, a refresh whose stream fails after r
 	assert.equal(countOf("anthropic/claude-sonnet-4-6"), 1);
 });
 
-test("a successful refresh whose usage shows no prompt (omitted, or output only), through Pi's real Chat Completions and Responses adapters: what it cost is unknown, so warming ends for the period and it counts as a refresh without a hit; two in a row leave the model to Pi", { skip: noCatalog }, async (t) => {
+test("a successful refresh whose usage shows no prompt (omitted, or output only), through Pi's real Chat Completions and Responses adapters: what it cost is unknown, so warming ends for the period and it counts as a refresh without a hit; two in a row leave the model to Pi", async (t) => {
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
 	withRetention(t, undefined);
@@ -3510,7 +3508,7 @@ test("unpriced means no price at all: a model that charges only for output is co
 	assert.match(await free.command("cache-keeper"), /at most 10 refreshes/);
 });
 
-test("R8: the ordinary cases with Pi's real adapters and tools: Claude and Kimi K3, long and short; GPT-6.1 Sol owned at 30 min with either retention; GPT with the shared prefix left to Pi", { skip: noCatalog }, async (t) => {
+test("R8: the ordinary cases with Pi's real adapters and tools: Claude and Kimi K3, long and short; GPT-6.1 Sol owned at 30 min with either retention; GPT with the shared prefix left to Pi", async (t) => {
 	t.after(() => mock.timers.reset());
 	noNetwork(t);
 	const cases: [string, string, "long" | "short", number | undefined][] = [
@@ -3539,13 +3537,6 @@ test("R8: the ordinary cases with Pi's real adapters and tools: Claude and Kimi 
 			assert.match(await h.command("cache-keeper"), /the request carries more than one cache lifetime/, label);
 		} else assert.equal(await ownedRefresh(h), at, label);
 	}
-});
-
-test("no file imports evaluateCacheWarming (missing before pi-ai 1.5.1)", () => {
-	const root = new URL("..", import.meta.url);
-	const files = [...readdirSync(root).filter((name) => name.endsWith(".ts")).map((name) => new URL(name, root)), ...readdirSync(new URL("tests/", root)).filter((name) => name.endsWith(".ts")).map((name) => new URL(`tests/${name}`, root))];
-	assert.ok(files.length > 10);
-	for (const file of files) assert.doesNotMatch(readFileSync(file, "utf8"), /^\s*import\s[^;]*\bevaluateCacheWarming\b/m, file.pathname);
 });
 
 // At exit rather than in a root after-hook: that hook can run while a test still awaits a real adapter.
@@ -3948,7 +3939,7 @@ function reloadStopped(h: ReturnType<typeof harness>, t: { after: (fn: () => voi
 	t.after(() => h.emit("session_shutdown"));
 }
 
-test("stop: from another window, in a period the extension warms: nothing more leaves, one record says so, the spending stays; Pi's real warmer is told to stop", { skip: noWarmer }, async (t) => {
+test("stop: from another window, in a period the extension warms: nothing more leaves, one record says so, the spending stays; Pi's real warmer is told to stop", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	fresh({ compactBeforeExpiry: false });
@@ -3979,7 +3970,7 @@ test("stop: from another window, in a period the extension warms: nothing more l
 	assert.ok(existsSync(STOP_FILE), "the record stays");
 });
 
-test("stop: with keepWarmMinutes 0, Pi's real warmer is answered stop at its idle decision and sends nothing; the record has no budget", { skip: noWarmer }, async (t) => {
+test("stop: with keepWarmMinutes 0, Pi's real warmer is answered stop at its idle decision and sends nothing; the record has no budget", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	fresh({ keepWarmMinutes: 0, compactBeforeExpiry: false });
@@ -4121,7 +4112,7 @@ test("stop: the user's message whose run sends nothing leaves the window stopped
 	assert.equal(h.warms.length, 1, "an answer without a message of its own: warmed as usual");
 });
 
-test("stop: a run no message of the user's started brings a new answer: the period is stopped from its start, with its own record; Pi's real warmer, started by that run's request, is told to stop", { skip: noWarmer }, async (t) => {
+test("stop: a run no message of the user's started brings a new answer: the period is stopped from its start, with its own record; Pi's real warmer, started by that run's request, is told to stop", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	fresh({ compactBeforeExpiry: false });
@@ -4156,7 +4147,7 @@ test("stop: a record already on disk when the extension loads stops nothing", as
 	assert.deepEqual(stopRecords(), []);
 });
 
-test("stop: /reload keeps it, and Pi's warmer, which the reload does not touch, is told to stop; /new is stopped until its first message", { skip: noWarmer }, async (t) => {
+test("stop: /reload keeps it, and Pi's warmer, which the reload does not touch, is told to stop; /new is stopped until its first message", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	fresh({ compactBeforeExpiry: false });
@@ -4205,7 +4196,7 @@ test("stop: an unreadable record: no refresh leaves and the period's warming end
 	assert.equal(off.decide(), undefined, "Pi's decision stands");
 });
 
-test("stop: compacting before expiry still runs in a stopped period, and starts nothing again: no refresh, no hand-over; Pi's warmer of a replaced transcript asks nothing", { skip: noWarmer }, async (t) => {
+test("stop: compacting before expiry still runs in a stopped period, and starts nothing again: no refresh, no hand-over; Pi's warmer of a replaced transcript asks nothing", async (t) => {
 	clock();
 	t.after(() => mock.timers.reset());
 	fresh({ compactBeforeExpiry: true });

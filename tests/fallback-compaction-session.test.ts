@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { test } from "node:test";
-import { anthropic, dir, flush, inWindow, piMessages, settingsFile, skip, textAnswer, type Any } from "./session-runtime.ts";
+import { anthropic, dir, flush, inWindow, piMessages, settingsFile, textAnswer, type Any } from "./session-runtime.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -83,7 +83,7 @@ const run = async (answer: () => Response) => {
 };
 
 // 24
-test("/compact on a cold session, every other setting off: the entry is written through the fallback model, as the extension's, and the session's model and thinking level are unchanged", { skip }, async () => {
+test("/compact on a cold session, every other setting off: the entry is written through the fallback model, as the extension's, and the session's model and thinking level are unchanged", async () => {
 	const seen = await run(() => textAnswer("## Goal\nThe summary by the fallback model."));
 	assert.equal(seen.cold.length, 1, "one request to the fallback model");
 	assert.equal(seen.pi.length, 0, "Pi's own summarizer not asked");
@@ -99,7 +99,7 @@ test("/compact on a cold session, every other setting off: the entry is written 
 });
 
 // 25
-test("the same with the fallback model failing: Pi's own compaction writes the entry", { skip }, async () => {
+test("the same with the fallback model failing: Pi's own compaction writes the entry", async () => {
 	const seen = await run(() => new Response(JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "Overloaded" } }), { status: 529, headers: { "content-type": "application/json" } }));
 	assert.equal(seen.cold.length, 1, "one attempt");
 	assert.equal(seen.pi.length, 1, "then Pi's own summarizer");
@@ -115,7 +115,7 @@ test("the same with the fallback model failing: Pi's own compaction writes the e
 // Finding 1 (review of 0.10.0, round 1), as the reviewer reproduced it on both Pi versions: a gateway streams part of the
 // history's summary, then ends the reply aborted (or in an error) while the compaction's own signal is live. That is a
 // failure: the turn's prefix is not sent, and Pi's own compaction writes the entry.
-test("review 1: a split turn whose history reply streams text and then ends aborted or in an error: no prefix request, Pi's own compaction writes the entry", { skip: skip || !piMessages }, async () => {
+test("review 1: a split turn whose history reply streams text and then ends aborted or in an error: no prefix request, Pi's own compaction writes the entry", async () => {
 	for (const end of ["aborted", "error"] as const) {
 		settings("fixture/gateway");
 		const seen: Any = {};

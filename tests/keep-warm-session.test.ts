@@ -3,7 +3,7 @@
 // out of a callback ends Pi. The refresh must settle without a throw, and what it showed (a miss, a hit, nothing) must
 // still be counted. No network: the adapter's transport is in memory, and the global fetch rejects.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mock, test } from "node:test";
@@ -23,7 +23,7 @@ process.on("exit", () => {
 
 const base = new URL("../node_modules/@earendil-works/", import.meta.url);
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
-const load = async (path: string): Promise<Any> => import(new URL(path, base).href).catch(() => undefined);
+const load = async (path: string): Promise<Any> => import(new URL(path, base).href);
 const runtimeModule = await load("pi-coding-agent/dist/core/agent-session-runtime.js");
 const servicesModule = await load("pi-coding-agent/dist/core/agent-session-services.js");
 const sessionModule = await load("pi-coding-agent/dist/core/session-manager.js");
@@ -31,7 +31,6 @@ const catalog = await load("pi-ai/dist/models.generated.js");
 const anthropic = await load("pi-ai/dist/api/anthropic-messages.js");
 const transcript = await load("pi-ai/dist/utils/transcript.js");
 const warmerModule = await load("pi-coding-agent/dist/core/cache-warmer.js");
-const skip = runtimeModule && servicesModule && sessionModule && catalog && anthropic && transcript && warmerModule ? false : "the installed Pi has no session runtime to drive";
 
 const tools = [{ name: "read", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } }];
 const STORE = Symbol.for("pi-cache-keeper.warm-misses");
@@ -185,7 +184,7 @@ async function inRuntime(
 
 for (const replace of ["new", "reload"] as const) {
 	for (const shows of ["miss", "hit", "nothing"] as const) {
-		test(`/${replace} while a refresh that reported ${shows === "nothing" ? "nothing" : `a ${shows}`} is still streaming: nothing throws, and ${shows === "miss" ? "the miss is counted" : "nothing is counted"}`, { skip }, async () => {
+		test(`/${replace} while a refresh that reported ${shows === "nothing" ? "nothing" : `a ${shows}`} is still streaming: nothing throws, and ${shows === "miss" ? "the miss is counted" : "nothing is counted"}`, async () => {
 			// The refresh's stream reports what it read (or nothing), then stays open until the session goes.
 			const open = (_n: number, signal: AbortSignal) =>
 				sse(
@@ -222,7 +221,7 @@ for (const [when, releaseAt] of [
 	["while the next refresh is held", 280],
 	["after the next period's cache expired", 400],
 ] as const) {
-	test(`never a third paid miss: the cancelled second miss settles ${when}`, { skip }, async () => {
+	test(`never a third paid miss: the cancelled second miss settles ${when}`, async () => {
 		let release: (() => void) | undefined;
 		const respond = (n: number, signal: AbortSignal) => {
 			if (n !== 2) return closed([messageStart(0, 120_000), ...end]);
@@ -266,7 +265,7 @@ for (const [when, releaseAt] of [
 // the extension's refresh at 275 s reports a hit, then a run that sends nothing cancels it at 277 s. The hit moves the
 // period back to waiting with the expiry counted from that refresh, so the next one goes out 275 s later, before the
 // 5-minute entry expires; at 8a2d287 none went out and the cache expired at 575 s.
-test("a refresh that reported a hit, then cancelled by a run that sent nothing: the next refresh goes out on time, with Pi's real CacheWarmer told to stop", { skip }, async () => {
+test("a refresh that reported a hit, then cancelled by a run that sent nothing: the next refresh goes out on time, with Pi's real CacheWarmer told to stop", async () => {
 	const sentAt: number[] = [];
 	const piSent: number[] = [];
 	const decisions: unknown[] = [];
@@ -357,7 +356,7 @@ for (const tier of ["short", "long"] as const) {
 	const hit = () => closed([messageStart(N, 0, tier), ...end]);
 	const miss = () => closed([messageStart(0, N, tier), ...end]);
 
-	test(`direct Anthropic, ${tier} tier: the first refresh ${step} s after the answer, capped at one token`, { skip }, async () => {
+	test(`direct Anthropic, ${tier} tier: the first refresh ${step} s after the answer, capped at one token`, async () => {
 		const { sent } = await run(hit, async (s) => {
 			assert.equal(await s.decide(), "stop", "owned: Pi's warming is told to stop");
 			await s.ticks(step + 2);
@@ -365,7 +364,7 @@ for (const tier of ["short", "long"] as const) {
 		assert.deepEqual(sent, [{ at: step, cap: 1 }]);
 	});
 
-	test(`direct Anthropic, ${tier} tier: the budget is spent after eleven capped reads`, { skip }, async () => {
+	test(`direct Anthropic, ${tier} tier: the budget is spent after eleven capped reads`, async () => {
 		let decided: unknown;
 		const { sent } = await run(hit, async (s) => {
 			await s.ticks(13 * step + 2);
@@ -375,7 +374,7 @@ for (const tier of ["short", "long"] as const) {
 		assert.equal(decided, "stop", "ended on its budget: Pi's warming stays stopped");
 	});
 
-	test(`direct Anthropic, ${tier} tier: after two misses in a row the third period is Pi's`, { skip }, async () => {
+	test(`direct Anthropic, ${tier} tier: after two misses in a row the third period is Pi's`, async () => {
 		const decisions: unknown[] = [];
 		const { sent, result } = await run(miss, async (s) => {
 			await s.ticks(step + 2);
@@ -391,7 +390,7 @@ for (const tier of ["short", "long"] as const) {
 	});
 
 	const goal = tier === "short" ? 15 : 120;
-	test(`direct Anthropic, ${tier} tier: a ${goal}-minute goal sends ${tier === "short" ? "three refreshes" : "two refreshes"}, then the time limit`, { skip }, async () => {
+	test(`direct Anthropic, ${tier} tier: a ${goal}-minute goal sends ${tier === "short" ? "three refreshes" : "two refreshes"}, then the time limit`, async () => {
 		const { sent } = await run(hit, async (s) => {
 			await s.ticks(goal * 60 + lifetime + 60);
 		}, goal);
@@ -408,7 +407,7 @@ const STOP_SEEN = Symbol.for("pi-cache-keeper.stop-seen");
 // What the stop relies on in Pi: its `input` event is raised for the user's messages from every source, idle and into a
 // run, reaches the extension's handler and goes on unchanged; a decision of Pi's warming is asked of the extension; a
 // reload keeps what the process remembers. With keep-warm off, so the only warming is Pi's own.
-test("a stop through Pi's real runtime: Pi's warming is told to stop; an input from any source, idle or into a run, reaches the handler, goes on unchanged and lifts it; a real /reload keeps it", { skip }, async () => {
+test("a stop through Pi's real runtime: Pi's warming is told to stop; an input from any source, idle or into a run, reaches the handler, goes on unchanged and lifts it; a real /reload keeps it", async () => {
 	delete (globalThis as Record<symbol, unknown>)[STOP_SEEN];
 	rmSync(join(dir, "cache-keeper-stop.json"), { force: true });
 	const result = await inRuntime(
@@ -449,7 +448,6 @@ test("a stop through Pi's real runtime: Pi's warming is told to stop; an input f
 
 test("Pi starts its own warming in one place, for a request that carries the session's own id: the extension's refreshes and summaries never start it", (t) => {
 	const sdk = new URL("../node_modules/@earendil-works/pi-coding-agent/dist/core/sdk.js", import.meta.url);
-	if (!existsSync(sdk)) return t.skip("the installed Pi has no dist/core/sdk.js");
 	const text = readFileSync(sdk, "utf8");
 	assert.equal(text.split("cacheWarmer.start(").length - 1, 1, "one call");
 	const at = text.indexOf("cacheWarmer.start(");
@@ -461,7 +459,7 @@ test("Pi starts its own warming in one place, for a request that carries the ses
 // a real /reload. Its line is saved in the session file once either way: a refresh that settles after the reload made its
 // context stale is written through the instance that runs the session now.
 for (const reloadFirst of [false, true]) {
-	test(`a refresh that settles ${reloadFirst ? "after" : "before"} a real /reload keeps its one line in the session file`, { skip }, async () => {
+	test(`a refresh that settles ${reloadFirst ? "after" : "before"} a real /reload keeps its one line in the session file`, async () => {
 		delete (globalThis as Record<symbol, unknown>)[STOP_SEEN];
 		rmSync(join(dir, "cache-keeper-stop.json"), { force: true });
 		let release: (() => void) | undefined;

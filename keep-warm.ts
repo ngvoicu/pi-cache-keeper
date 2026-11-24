@@ -246,7 +246,7 @@ export const MAX_UNPRICED_REFRESHES = 10;
 
 /**
  * What a refresh and a cache miss cost for a prompt of `promptTokens` tokens, worked out as Pi's own warming does
- * (`evaluateCacheWarming` in pi-ai 1.5.1 and later; computed here so older Pi loads the extension too): a refresh is the
+ * (`evaluateCacheWarming` in pi-ai; computed here at the rates of the request's price tier): a refresh is the
  * prompt at the cache-read price plus one output token; a miss is the prompt at the cache-write price (the input price
  * when the model has none) minus the prompt at the cache-read price, not below 0. `priced` is false when the model has
  * no prices (a subscription login) or the prompt size is unknown.

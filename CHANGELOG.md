@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.10.6] - 2026-11-24
+
+### Changed
+- **Pi 1.6.0 or newer** — The package now asks for Pi 1.6.0 or newer (`peerDependencies` `>=1.6.0`, was `>=0.87.0`), and is tested on Pi 1.6.0 only. What existed only for older Pi is gone: the tests against Pi 0.87.0's model catalog and its output cap, the tests' skips for a Pi without a session runtime, a model catalog, Pi's own cache warmer or `evaluateCacheWarming`, and the README's and the settings menu's notes about older Pi (an output cap some older adapters left out, the thinking Pi before 1.2 sent with a summary).
+
 ## [0.10.5] - 2026-11-24
 
 ### Removed

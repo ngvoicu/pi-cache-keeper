@@ -33,10 +33,9 @@ globalThis.fetch = (async () => {
 
 const piAi = new URL("../node_modules/@earendil-works/pi-ai/", import.meta.url);
 const catalogFile = new URL("dist/models.generated.js", piAi);
-const noCatalog = existsSync(catalogFile) ? false : "the installed pi-ai has no model catalog";
-const PI_VERSION: string = noCatalog ? "none" : JSON.parse(readFileSync(new URL("package.json", piAi), "utf8")).version;
+const PI_VERSION: string = JSON.parse(readFileSync(new URL("package.json", piAi), "utf8")).version;
 type CatalogModel = Record<string, unknown> & { provider: string; id: string; api: string; baseUrl: string; reasoning?: boolean; promptCache?: { short?: number; long?: number } };
-const MODELS: Record<string, Record<string, CatalogModel>> = noCatalog ? {} : (await import(catalogFile.href)).MODELS;
+const MODELS: Record<string, Record<string, CatalogModel>> = (await import(catalogFile.href)).MODELS;
 const ALL = Object.values(MODELS).flatMap((models) => Object.values(models));
 
 type Adapter = { streamSimple: (model: unknown, context: unknown, options: unknown) => { result: () => Promise<unknown> } };
@@ -418,19 +417,19 @@ const KNOWN_FAILURES: { key: string; rule: Rule; what: RegExp; note: string }[] 
 const isKnown = (o: Outcome, v: Outcome["violations"][number]) => KNOWN_FAILURES.some((k) => k.key === o.key && k.rule === v.rule && k.what.test(v.what));
 
 for (const rule of ["never uncapped", "never late", "owned or left alone", "nothing throws"] as Rule[]) {
-	test(`keep-warm matrix, ${rule}: every combination (${models.length} models of pi ${PI_VERSION}, ${all.length} combinations)`, { skip: noCatalog }, () => {
+	test(`keep-warm matrix, ${rule}: every combination (${models.length} models of pi ${PI_VERSION}, ${all.length} combinations)`, () => {
 		assert.ok(all.length > 0);
 		const broken = outcomes.flatMap((o) => o.violations.filter((v) => v.rule === rule && !isKnown(o, v)).map((v) => `${o.key}: ${v.what}`));
 		assert.deepEqual(broken.slice(0, 40), [], `${broken.length} combinations break "${rule}"`);
 	});
 }
 for (const known of KNOWN_FAILURES) {
-	test(`KNOWN FAILURE (${known.rule}): ${known.key}`, { skip: noCatalog || !outcomes.some((o) => o.key === known.key), todo: known.note }, () => {
+	test(`KNOWN FAILURE (${known.rule}): ${known.key}`, { skip: !outcomes.some((o) => o.key === known.key), todo: known.note }, () => {
 		const o = outcomes.find((x) => x.key === known.key)!;
 		assert.ok(!o.violations.some((v) => v.rule === known.rule && known.what.test(v.what)), o.violations.map((v) => v.what).join("; "));
 	});
 }
-test("keep-warm matrix: known failures still fail (an entry that passes is taken out of KNOWN_FAILURES)", { skip: noCatalog }, () => {
+test("keep-warm matrix: known failures still fail (an entry that passes is taken out of KNOWN_FAILURES)", () => {
 	for (const known of KNOWN_FAILURES) {
 		const o = outcomes.find((x) => x.key === known.key);
 		assert.ok(o, `${known.key} is a combination of the sweep`);
@@ -586,7 +585,7 @@ function routesSection(push: (...l: string[]) => number) {
 	push("");
 }
 
-test(`the coverage document (docs/keep-warm-coverage.md) is the one this sweep writes (\`${REGENERATE}\` writes it again)`, { skip: noCatalog }, () => {
+test(`the coverage document (docs/keep-warm-coverage.md) is the one this sweep writes (\`${REGENERATE}\` writes it again)`, () => {
 	const written = coverageDocument();
 	if (process.env.CACHE_KEEPER_MATRIX === "update") writeFileSync(COVERAGE, written);
 	assert.ok(existsSync(COVERAGE), `docs/keep-warm-coverage.md is missing: ${REGENERATE}`);
@@ -594,7 +593,7 @@ test(`the coverage document (docs/keep-warm-coverage.md) is the one this sweep w
 });
 
 // The README's table "Which sessions it keeps warm", row by row, against the sweep.
-test("the README's table of who keeps a session warm holds for the models it names, and points to the coverage document", { skip: noCatalog }, () => {
+test("the README's table of who keeps a session warm holds for the models it names, and points to the coverage document", () => {
 	const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 	assert.match(readme, /\[docs\/keep-warm-coverage\.md\]\(docs\/keep-warm-coverage\.md\)/);
 	const where = (f: (o: Outcome) => boolean) => {

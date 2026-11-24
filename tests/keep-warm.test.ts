@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import * as piAi from "@earendil-works/pi-ai";
+import { evaluateCacheWarming } from "@earendil-works/pi-ai";
 import { KEEP_WARM_CHOICES } from "../config.ts";
 import {
 	budgetReached,
@@ -52,16 +52,12 @@ test("the budget is one cache miss, worked out as Pi's own warming does", () => 
 	assert.equal(cheaperWrite.missCost, 0, "never below 0");
 });
 
-// pi-ai exports evaluateCacheWarming from 1.5.1; the extension does not import it, so older Pi loads it too.
-const evaluateCacheWarming = (piAi as Record<string, unknown>).evaluateCacheWarming as
-	| ((model: never, promptTokens: number, phase: "idle") => { warmCost: number; missCost: number; economicsAvailable: boolean })
-	| undefined;
-test("the budget matches Pi's own evaluateCacheWarming where the installed Pi has it", { skip: evaluateCacheWarming ? false : "the installed pi-ai has no evaluateCacheWarming (before 1.5.1)" }, () => {
+test("the budget matches Pi's own evaluateCacheWarming", () => {
 	const tiered = model({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, tiers: [{ inputTokensAbove: 200_000, input: 6, output: 22.5, cacheRead: 0.6, cacheWrite: 7.5 }] } as never);
 	const cheaperWrite = model({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0.1 });
 	for (const m of [WITH_WRITE, WITHOUT_WRITE, NO_PRICES, tiered, cheaperWrite]) {
 		for (const tokens of [0, 1, 20_000, 600_002, 1_000_000]) {
-			const pi = evaluateCacheWarming!(m, tokens, "idle");
+			const pi = evaluateCacheWarming(m, tokens, "idle");
 			const own = warmBudget(m, tokens);
 			assert.deepEqual([own.refreshCost, own.missCost, own.priced], [pi.warmCost, pi.missCost, pi.economicsAvailable], `${tokens} tokens`);
 		}

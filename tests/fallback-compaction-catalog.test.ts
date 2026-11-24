@@ -1,14 +1,14 @@
 // The fallback compaction model's list against Pi's built-in model catalogs, in Pi's own session runtime (review of 0.10.0,
 // round 2): the list and the compaction use one fit, so they agree on every model; and every model's row reads
-// differently from every other at 40 and 60 columns, its id and provider whole (0.10.4). The catalogs are fixtures of Pi 1.6.0's and Pi 0.87.0's
-// (tests/fixtures/catalog-fixture.mjs wrote them), so both are checked whichever Pi is installed.
+// differently from every other at 40 and 60 columns, its id and provider whole (0.10.4). The catalog is a fixture of Pi 1.6.0's
+// (tests/fixtures/catalog-fixture.mjs wrote it).
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { FALLBACK, dir, inWindow, settingsFile, skip, type Any } from "./session-runtime.ts";
+import { FALLBACK, dir, inWindow, settingsFile, type Any } from "./session-runtime.ts";
 
-const CATALOGS = ["1.6.0", "0.87.0"] as const;
+const CATALOGS = ["1.6.0"] as const;
 const catalog = (version: (typeof CATALOGS)[number]): Any[] => {
 	const { pi, models } = JSON.parse(readFileSync(new URL(`./fixtures/pi-${version}-catalog.json`, import.meta.url), "utf8"));
 	assert.equal(pi, version);
@@ -90,7 +90,7 @@ const readRows = (menu: Any, count: number, width: number) => {
 const LARGE = Array.from({ length: 90_000 }, (_, i) => ["alpha", "bravo", "delta", "gamma", "omega"][i % 5]).join(" ");
 
 for (const version of CATALOGS) {
-	test(`round 2, blocker 1: the list and the compaction agree on every model of Pi ${version}'s catalog, for a small and a large session`, { skip }, async () => {
+	test(`round 2, blocker 1: the list and the compaction agree on every model of Pi ${version}'s catalog, for a small and a large session`, async () => {
 		const models = catalog(version);
 		for (const size of ["small", "large"] as const) {
 			settings("");
@@ -166,7 +166,7 @@ for (const version of CATALOGS) {
 		}
 	});
 
-	test(`round 2, blocker 3: at 40 and 60 columns every model of Pi ${version}'s catalog has a row that reads differently from every other, its id and provider whole`, { skip }, async () => {
+	test(`round 2, blocker 3: at 40 and 60 columns every model of Pi ${version}'s catalog has a row that reads differently from every other, its id and provider whole`, async () => {
 		const models = catalog(version);
 		settings("");
 		const seen: Any = {};

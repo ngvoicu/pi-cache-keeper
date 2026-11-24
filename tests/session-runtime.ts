@@ -25,7 +25,7 @@ const { SESSION_SETTINGS_TYPE } = await import("../config.ts");
 
 const base = new URL("../node_modules/@earendil-works/", import.meta.url);
 export type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
-const load = async (path: string): Promise<Any> => import(new URL(path, base).href).catch(() => undefined);
+const load = async (path: string): Promise<Any> => import(new URL(path, base).href);
 const runtimeModule = await load("pi-coding-agent/dist/core/agent-session-runtime.js");
 const servicesModule = await load("pi-coding-agent/dist/core/agent-session-services.js");
 const sessionModule = await load("pi-coding-agent/dist/core/session-manager.js");
@@ -36,9 +36,8 @@ const transcript = await load("pi-ai/dist/utils/transcript.js");
 export const piMessages = await load("pi-ai/dist/api/pi-messages.js");
 // Pi's settings menu draws with Pi's theme.
 const themeModule = await load("pi-coding-agent/dist/modes/interactive/theme/theme.js");
-themeModule?.initTheme("dark", false);
+themeModule.initTheme("dark", false);
 const plain = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd();
-export const skip = themeModule && runtimeModule && servicesModule && sessionModule && catalog && anthropic && transcript ? false : "the installed Pi has no session runtime to drive";
 
 const tools = [{ name: "read", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } }];
 const STORE = Symbol.for("pi-cache-keeper.warm-misses");

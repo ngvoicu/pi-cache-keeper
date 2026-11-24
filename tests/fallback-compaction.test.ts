@@ -151,12 +151,11 @@ test("review 4b: dense text is counted high enough to be refused where it doesn'
 });
 
 // Finding 3 (review, round 1): the README says plainly what reaches the picked model's provider.
-test("review 3: the README's privacy note names the shell output sent in full and, on older Pi, the thinking", async () => {
+test("review 3: the README's privacy note names the shell output sent in full", async () => {
 	const { readFileSync } = await import("node:fs");
 	const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 	const note = readme.split("\n").find((line) => line.startsWith("**Where your conversation goes.**")) ?? "";
 	assert.match(note, /full output of shell commands you ran with `!`/);
-	assert.match(note, /on Pi before 1\.2, the assistant's thinking/);
 });
 
 // Review 4b, round 2: ordinary English is counted near its size, so a big cold session can still fit a picked model. The
@@ -202,11 +201,11 @@ test("round 2, blocker 1: one fit; an output limit that can never leave room for
 });
 
 // Blocker 2 and the price paragraph: what the README promises.
-test("round 2, the README: the output cap is passed to Pi and some older adapters don't send it; the price comparison is for cached compactions only", async () => {
+test("round 2, the README: the output cap is passed to Pi; the price comparison is for cached compactions only", async () => {
 	const { readFileSync } = await import("node:fs");
 	const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 	const fit = readme.split("\n").find((line) => line.startsWith("- The conversation and the summary don't fit it.")) ?? "";
-	assert.match(fit, /That room is the output limit passed to Pi with the request; Pi's adapter sends it to the provider, except some adapters of older Pi versions, which leave it out/);
+	assert.match(fit, /That room is the output limit passed to Pi with the request; Pi's adapter sends it to the provider\./);
 	assert.match(fit, /A request the provider then rejects falls back as any failed reply does\./);
 	assert.doesNotMatch(readme, /so the request can't ask for more than the fit allowed/);
 	assert.match(fit, /`can't be used: output limit too small`/);

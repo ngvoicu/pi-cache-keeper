@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { dir, inWindow, lineOf, skip, until, writeDefaults, type Any } from "./session-runtime.ts";
+import { dir, inWindow, lineOf, until, writeDefaults, type Any } from "./session-runtime.ts";
 
 process.env.ANTHROPIC_API_KEY = "sk-fixture";
 
@@ -48,7 +48,7 @@ const modelsFile = () => (existsSync(join(dir, "models.json")) ? JSON.parse(read
 // anew: then the session's model has the window. That takes real I/O, so no fixed number of turns of the event loop.
 const windowIs = (w: { runtime: Any }, tokens: number) => () => w.runtime.session.model?.contextWindow === tokens;
 
-test("a session's own compactAtPercent is taken of the window providers.dev's safe value gives; a window that is pi's own is not written, and the session's setting holds on Pi's window", { skip }, async () => {
+test("a session's own compactAtPercent is taken of the window providers.dev's safe value gives; a window that is pi's own is not written, and the session's setting holds on Pi's window", async () => {
 	writeDefaults({ modelData: true, keepWarmMinutes: 0, compactAtPercent: 90, compactAtTokens: 0, compactBeforeExpiry: false });
 	globalThis.fetch = providersDev;
 	const result = await inWindow(

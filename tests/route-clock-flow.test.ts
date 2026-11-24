@@ -3,7 +3,7 @@
 // provider's cache as the provider would (what is read, what is written, how long it lasts). Pi's own warmer, where a
 // case needs it, is Pi's real CacheWarmer. Nothing leaves the process: the global fetch throws.
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { mock } from "node:test";
@@ -22,13 +22,11 @@ process.on("exit", () => (globalThis.fetch = realFetch));
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 const catalogFile = new URL("../node_modules/@earendil-works/pi-ai/dist/models.generated.js", import.meta.url);
 const warmerFile = new URL("../node_modules/@earendil-works/pi-coding-agent/dist/core/cache-warmer.js", import.meta.url);
-const { MODELS } = existsSync(catalogFile) ? await import(catalogFile.href) : { MODELS: undefined };
-const { CacheWarmer } = existsSync(warmerFile) ? await import(warmerFile.href) : { CacheWarmer: undefined };
+const { MODELS } = await import(catalogFile.href);
+const { CacheWarmer } = await import(warmerFile.href);
 // Pi's settings menu draws with Pi's theme.
 const themeFile = new URL("../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js", import.meta.url);
-if (existsSync(themeFile)) (await import(themeFile.href)).initTheme("dark", false);
-const skip = MODELS ? false : "the installed pi-ai has no model catalog";
-const noWarmer = skip || (CacheWarmer ? false : "the installed Pi has no CacheWarmer");
+(await import(themeFile.href)).initTheme("dark", false);
 const { normalizeContext } = (await import("@earendil-works/pi-ai/utils/transcript")) as { normalizeContext: (context: unknown) => { messages: unknown[] } };
 const adapter = async (api: string) => (await import(`@earendil-works/pi-ai/api/${api}`)) as { streamSimple: (model: unknown, context: unknown, options: unknown) => { result: () => Promise<Any> } };
 
@@ -326,7 +324,7 @@ const DEEPSEEK_ID = "deepseek/deepseek-v4-pro";
 // ----------------------------------------------------------------------------- the first review's finding 1, and 2's first
 
 for (const on of [11, 1]) {
-	test(`an end for good, then a summary: the Anthropic gateway's refresh ${on} reads 570,000 and writes 30,000 into the five-minute cache`, { skip }, async (t) => {
+	test(`an end for good, then a summary: the Anthropic gateway's refresh ${on} reads 570,000 and writes 30,000 into the five-minute cache`, async (t) => {
 		const N = 600_000;
 		let expires = 3600;
 		let life = 3600;
@@ -380,7 +378,7 @@ const chatStore = (fallbackShort: number) => ({
 });
 const FALLBACK = [{ provider: "openrouter", model: DEEPSEEK_ID, subscription: false }];
 
-test("a refresh that misses while the gateway announces its 150-second route: no summary at 3,580 s, as on 0.5.3", { skip }, async (t) => {
+test("a refresh that misses while the gateway announces its 150-second route: no summary at 3,580 s, as on 0.5.3", async (t) => {
 	const N = 180_000;
 	let expires = 3600;
 	let life = 3600;
@@ -412,7 +410,7 @@ test("a refresh that misses while the gateway announces its 150-second route: no
 });
 
 for (const route of ["the 150-second route is announced just before the summary's payload hook", "the route stays"] as const) {
-	test(`a covered period, compacting before expiry at 3,580 s: ${route}`, { skip }, async (t) => {
+	test(`a covered period, compacting before expiry at 3,580 s: ${route}`, async (t) => {
 		const N = 180_000;
 		let expires = 3600;
 		let life = 3600;
@@ -465,7 +463,7 @@ const accounts = (bShort: number) => ({
 	providers: { "account-a": { [CLAUDE_ID]: { short: 3600, long: 3600 } }, "account-b": { [CLAUDE_ID]: { short: bShort, long: 3600 } } },
 });
 for (const variant of ["reads everything", "reads 570,000 and writes 30,000 into the five-minute cache"] as const) {
-	test(`a route that returns: the refresh at 3,420 s on route B ${variant}, route A is reported again at 3,450 s: no summary, no refresh, cold`, { skip }, async (t) => {
+	test(`a route that returns: the refresh at 3,420 s on route B ${variant}, route A is reported again at 3,450 s: no summary, no refresh, cold`, async (t) => {
 		const N = 600_000;
 		const expires = { a: 3600, b: 3500 };
 		let active: "a" | "b" = "a";
@@ -500,7 +498,7 @@ for (const variant of ["reads everything", "reads 570,000 and writes 30,000 into
 }
 
 // Another route with the same hour, then the first one again: the evidence's judge still agrees, the route changed.
-test("another route with the same hour announced at 100 s, the first again at 130 s: no summary at 3,580 s, the route changed", { skip }, async (t) => {
+test("another route with the same hour announced at 100 s, the first again at 130 s: no summary at 3,580 s, the route changed", async (t) => {
 	const N = 600_000;
 	const s = await session({
 		model: claudeGateway(),
@@ -532,7 +530,7 @@ test("another route with the same hour announced at 100 s, the first again at 13
 // 600-second cache; a 1,000,000-token prompt. Pi's own warmer keeps the 270-second cadence of the first route. The
 // period is Pi's from the announcement; Pi is stopped only once nothing seen says the cache is alive.
 for (const [label, ttl] of [["150-second", 150], ["600-second", 600]] as const) {
-	test(`Pi's real warmer after a hand-over: the ${label} route announced at 100 s`, { skip: noWarmer }, async (t) => {
+	test(`Pi's real warmer after a hand-over: the ${label} route announced at 100 s`, async (t) => {
 		const N = 1_000_000;
 		let expires = 300;
 		const s = await session({
@@ -574,7 +572,7 @@ for (const [label, ttl] of [["150-second", 150], ["600-second", 600]] as const) 
 // Pi's refresh from the run is recorded at 273 s with a five-minute write, and the gateway names its API key's route. Pi
 // asks at 543 s: its own refresh kept the cache alive until 573 s, so it is not stopped. Its refresh, recorded at 544 s,
 // keeps it alive until 844 s; only after that is Pi stopped.
-test("a covered period handed over: Pi's question at 543 s is not stopped, its own receipts count; stopped once nothing says the cache is alive", { skip }, async (t) => {
+test("a covered period handed over: Pi's question at 543 s is not stopped, its own receipts count; stopped once nothing says the cache is alive", async (t) => {
 	const N = 600_000;
 	const s = await session({
 		model: claudeGateway(),
@@ -630,7 +628,7 @@ const accountCaches = (N: number) => {
 	};
 };
 
-test("a report about another model never touches the period: a helper's request on another model at 600 s, and the refresh at 3,420 s reads the hour cache", { skip }, async (t) => {
+test("a report about another model never touches the period: a helper's request on another model at 600 s, and the refresh at 3,420 s reads the hour cache", async (t) => {
 	const N = 600_000;
 	const provider = accountCaches(N);
 	const s = await session({
@@ -653,7 +651,7 @@ test("a report about another model never touches the period: a helper's request 
 	assert.deepEqual(s.wires.map((w) => [w.kind, w.at, w.read]), [["refresh", 3420, N]], "the refresh reads the whole prompt (on the third review it was not sent; the next turn paid $3.60)");
 });
 
-test("a reported switch from a subscription to an API key of one upstream is a change of route: no refresh into the key's empty cache", { skip }, async (t) => {
+test("a reported switch from a subscription to an API key of one upstream is a change of route: no refresh into the key's empty cache", async (t) => {
 	const N = 600_000;
 	const provider = accountCaches(N);
 	const login = { provider: "compat-upstream", model: CLAUDE_ID, subscription: true };
@@ -684,7 +682,7 @@ for (const [label, later] of [
 	["the API key is reported at 10 s, before Pi goes idle", [[10, KEY]]],
 	["the API key at 1 s, then the login again at 2 s, before Pi goes idle", [[1, KEY], [2, LOGIN]]],
 ] as const) {
-	test(`the answer's own report is the login's, then ${label}: the period is Pi's, the route changed`, { skip }, async (t) => {
+	test(`the answer's own report is the login's, then ${label}: the period is Pi's, the route changed`, async (t) => {
 		const N = 600_000;
 		const provider = accountCaches(N);
 		const s = await session({
@@ -711,7 +709,7 @@ for (const [label, later] of [
 	});
 }
 
-test("a model switch away and back keeps the route's report: 58 min on return, Pi's 26 min at 3,601 s", { skip: noWarmer }, async (t) => {
+test("a model switch away and back keeps the route's report: 58 min on return, Pi's 26 min at 3,601 s", async (t) => {
 	const N = 600_000;
 	const s = await session({
 		model: claudeGateway(keyValues),
@@ -743,7 +741,7 @@ test("a model switch away and back keeps the route's report: 58 min on return, P
 // The second look's old-account receipt: the period was let go (a model switch away and back); Pi's refresh at 270 s
 // hit the login's hour cache; at 400 s the proxy reports the API key. Nothing is known of the key's cache: the footer and
 // /cache-keeper say none is warm (they claimed 57 minutes, and the next message wrote 600,000).
-test("after a reported change of route, neither the footer nor /cache-keeper claims a warm cache, whatever Pi refreshed before it", { skip }, async (t) => {
+test("after a reported change of route, neither the footer nor /cache-keeper claims a warm cache, whatever Pi refreshed before it", async (t) => {
 	const N = 600_000;
 	const s = await session({
 		model: claudeGateway(keyValues),
@@ -799,7 +797,7 @@ const offPeriod = async (t: { after: (fn: () => void) => void }) => {
 	return { s, N, to };
 };
 
-test("keep-warm off: the 150-second route reported at 143 s sends nothing, as on 0.5.3 (no cold summary at 144 s)", { skip }, async (t) => {
+test("keep-warm off: the 150-second route reported at 143 s sends nothing, as on 0.5.3 (no cold summary at 144 s)", async (t) => {
 	const { s, to } = await offPeriod(t);
 	await s.until(143);
 	to("B");
@@ -808,7 +806,7 @@ test("keep-warm off: the 150-second route reported at 143 s sends nothing, as on
 	assert.deepEqual(s.compactions, []);
 });
 
-test("keep-warm off: route B reported at 600 s and A again at 602 s: the summary at 3,580 s reads the cache, as on 0.5.3", { skip }, async (t) => {
+test("keep-warm off: route B reported at 600 s and A again at 602 s: the summary at 3,580 s reads the cache, as on 0.5.3", async (t) => {
 	const { s, N, to } = await offPeriod(t);
 	await s.until(600);
 	to("B");
@@ -825,7 +823,7 @@ test("keep-warm off: route B reported at 600 s and A again at 602 s: the summary
 // switched off. From then on the cache is read as with keep-warm off: Pi's six refreshes keep it to 1,920 s, and the
 // summary leaves at 1,900 s reading all of it, as on 0.5.3.
 for (const how of ["in this window's settings menu", "saved from another window"] as const) {
-	test(`keep-warm switched off ${how} after the route changed: the countdown runs again, the summary at 1,900 s reads the cache`, { skip: noWarmer }, async (t) => {
+	test(`keep-warm switched off ${how} after the route changed: the countdown runs again, the summary at 1,900 s reads the cache`, async (t) => {
 		const N = 1_000_000;
 		const expiry: Record<string, number> = { A: 300, B: 0 };
 		let current = "A";
@@ -869,7 +867,7 @@ for (const how of ["in this window's settings menu", "saved from another window"
 // during the summary's 3-second preparation Pi's refresh is recorded, reporting a write into the five-minute cache. The
 // last check reads the branch as it is then: the cache counted five minutes from the answer is long gone, so nothing
 // leaves (on the third review the summary wrote 600,000 for $2.25).
-test("a receipt of Pi's recorded during the summary's preparation is read at its last check: nothing leaves", { skip }, async (t) => {
+test("a receipt of Pi's recorded during the summary's preparation is read at its last check: nothing leaves", async (t) => {
 	const N = 600_000;
 	let s: Awaited<ReturnType<typeof session>>;
 	s = await session({
@@ -917,7 +915,7 @@ const helperSession = (o: Partial<Setup>) => {
 	});
 };
 
-test("the answer's own route unreported, a helper's request on the API key reported after the answer and before Pi goes idle: the period is Pi's, no refresh at 3,420 s", { skip }, async (t) => {
+test("the answer's own route unreported, a helper's request on the API key reported after the answer and before Pi goes idle: the period is Pi's, no refresh at 3,420 s", async (t) => {
 	const s = await helperSession({ afterAnswer: async ({ announce, until }) => (await until(2), announce([KEY])) });
 	t.after(() => s.done());
 	await s.until(270);
@@ -927,7 +925,7 @@ test("the answer's own route unreported, a helper's request on the API key repor
 	assert.deepEqual(s.wires, [], "no refresh (on the second look one wrote 600,000 on the key for $3.60)");
 });
 
-test("the helper's report after Pi went idle: the configured login stands in, and the key's report is a change of route: no refresh, as before", { skip }, async (t) => {
+test("the helper's report after Pi went idle: the configured login stands in, and the key's report is a change of route: no refresh, as before", async (t) => {
 	const s = await helperSession({});
 	t.after(() => s.done());
 	await s.until(14);
@@ -938,7 +936,7 @@ test("the helper's report after Pi went idle: the configured login stands in, an
 	assert.deepEqual(s.wires, []);
 });
 
-test("the stable short-hour route with its own report while the request was out: refreshed at 3,420 s and 6,840 s, each reading all 600,000", { skip }, async (t) => {
+test("the stable short-hour route with its own report while the request was out: refreshed at 3,420 s and 6,840 s, each reading all 600,000", async (t) => {
 	const s = await helperSession({ whileOut: (announce) => announce([LOGIN]) });
 	t.after(() => s.done());
 	await s.until(7000);
@@ -992,7 +990,7 @@ const strictSession = (unions: number, o: Partial<Setup> = {}) => {
 	});
 };
 
-test("Pi re-sent the answer's request without strict tools (17 unions, a 400): the period is Pi's, no refresh at 3,420 s, Pi's renewals go out, and the message at 4,000 s reads the cache", { skip: noWarmer }, async (t) => {
+test("Pi re-sent the answer's request without strict tools (17 unions, a 400): the period is Pi's, no refresh at 3,420 s, Pi's renewals go out, and the message at 4,000 s reads the cache", async (t) => {
 	const s = await strictSession(17, { piWarmer: true });
 	t.after(() => s.done());
 	assert.deepEqual(s.wires.filter((w) => w.kind === "answer").map((w) => [w.rejected ?? false, w.write]), [[true, 0], [false, 600_000]], "the strict form rejected, the plain one wrote the hour cache");
@@ -1009,7 +1007,7 @@ test("Pi re-sent the answer's request without strict tools (17 unions, a 400): t
 	assert.equal(next.usage.cacheRead, 600_000, "the message at 4,000 s reads the cache ($0.18, not a rewrite for $3.60)");
 });
 
-test("strict tools within the provider's limits (16 unions): the request is sent as captured, refreshed at 3,420 s reading all 600,000", { skip }, async (t) => {
+test("strict tools within the provider's limits (16 unions): the request is sent as captured, refreshed at 3,420 s reading all 600,000", async (t) => {
 	const s = await strictSession(16);
 	t.after(() => s.done());
 	assert.deepEqual(s.wires.map((w) => [w.kind, w.rejected ?? false]), [["answer", false]]);
@@ -1019,7 +1017,7 @@ test("strict tools within the provider's limits (16 unions): the request is sent
 	assert.deepEqual(s.wires.filter((w) => w.kind === "refresh").map((w) => [w.at, w.read, w.cap, w.rejected ?? false]), [[3420, 600_000, 1, false]]);
 });
 
-test("after Pi re-sent the first leg without strict tools, the run's later tool leg is built that way from the start: its period is taken, refreshed at 3,420 s reading all 600,000", { skip }, async (t) => {
+test("after Pi re-sent the first leg without strict tools, the run's later tool leg is built that way from the start: its period is taken, refreshed at 3,420 s reading all 600,000", async (t) => {
 	const s = await strictSession(17, { send: { legs: 2 }, serve: strictProvider(600_000, true) });
 	t.after(() => s.done());
 	assert.deepEqual(s.wires.filter((w) => w.kind === "answer").map((w) => w.rejected ?? false), [true, false, false], "only the first leg's strict form was rejected");
@@ -1034,7 +1032,7 @@ test("after Pi re-sent the first leg without strict tools, the run's later tool 
 // A proxy reports `upstreams: []` for an answer its proxy would not name. Before 0.7.0 the empty list was dropped, the
 // silence let the configured upstreams stand in, and a period was warmed on a guessed route: the reviewer's probe sent a
 // refresh at 3,420 s that wrote all 600,000 tokens again ($2.25 where a hit costs $0.18). Now it is a route of its own.
-test("an unnamed answer during a period is a change of route: the helper's answer at 600 s, no refresh at 3,420 s into a cache nobody can name", { skip }, async (t) => {
+test("an unnamed answer during a period is a change of route: the helper's answer at 600 s, no refresh at 3,420 s into a cache nobody can name", async (t) => {
 	const N = 600_000;
 	const provider = accountCaches(N);
 	const s = await session({
@@ -1063,7 +1061,7 @@ test("an unnamed answer during a period is a change of route: the helper's answe
 	assert.deepEqual(s.traces().filter((r: { stop?: string }) => r.stop).map((r: { stop: string; handedOver?: string }) => [r.stop, r.handedOver]), [["unable", "evidence"]]);
 });
 
-test("an answer whose own report names no route: the period is Pi's from its start, and two unnamed reports are never one route", { skip }, async (t) => {
+test("an answer whose own report names no route: the period is Pi's from its start, and two unnamed reports are never one route", async (t) => {
 	const N = 600_000;
 	const s = await session({
 		model: claudeGateway(keyValues),
@@ -1086,7 +1084,7 @@ test("an answer whose own report names no route: the period is Pi's from its sta
 // The review's probe: DeepSeek on Chat Completions through a gateway, otherwise kept warm by the extension. An answer
 // whose report names no route is Pi's for that reason, said as such, not as a missing lifetime.
 for (const unnamed of [false, true]) {
-	test(`an otherwise replayable openai-completions gateway period: ${unnamed ? "an unnamed answer is Pi's, the route is unknown" : "unreported, it is kept warm"}`, { skip }, async (t) => {
+	test(`an otherwise replayable openai-completions gateway period: ${unnamed ? "an unnamed answer is Pi's, the route is unknown" : "unreported, it is kept warm"}`, async (t) => {
 		const N = 600_000;
 		const routed = deepseek("gateway-fixture", { short: 300, long: 3600 }, DEEPSEEK_PRICES);
 		const s = await session({

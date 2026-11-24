@@ -615,12 +615,11 @@ test("review 4a: the request carries the output cap the fit rule computed, less 
 		const fit = fallbackFit(model as Any, need);
 		assert.equal(fit.fits, true);
 		const budget = 200_000 - need - 4_000;
-		// Never above the cap the fit assumed; Pi 1.x passes none of its own, so it is that cap; Pi 0.87.0 passes a lower one
-		// (0.8 of reserveTokens), which stays.
+		// The cap the fit assumed: Pi passes none of its own.
 		const sent = h.fallbackCalls()[0].options.maxTokens;
 		assert.equal(typeof sent, "number", label);
 		assert.ok(sent <= budget - reserve, `${label}: ${sent}`);
-		assert.ok(sent === budget - reserve || sent === Math.floor(0.8 * 16_384), `${label}: ${sent}`);
+		assert.equal(sent, budget - reserve, label);
 	}
 });
 
@@ -628,8 +627,7 @@ test("review 4a: the request carries the output cap the fit rule computed, less 
 
 // The request count: only requests really dispatched count. Pi's registry resolves credentials at request time, and a
 // failure there ends the request in an error before anything is sent (no body built, no tokens); a request whose body
-// was built (the adapter's onPayload) and then failed was sent. The failure is as Pi's registry returns it in Pi 0.87.0 and
-// 1.6.0 for a provider without credentials: an error reply with no tokens, onPayload never called.
+// was built (the adapter's onPayload) and then failed was sent. The failure is as Pi's registry returns it for a provider without credentials: an error reply with no tokens, onPayload never called.
 test("round 2, the request count: a request-time credential failure counts no request; a request sent and then failed counts one", async (t) => {
 	const noKey = () => answer(undefined, { stopReason: "error", errorMessage: "Provider is not configured: google", usage: usageOf(0, 0) });
 	const sentThenFailed = async (call: Call) => {
