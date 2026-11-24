@@ -71,9 +71,9 @@ test("the cache tier in use is the one the latest write reported, else the one P
 			const entry = reply("a", 1, { cacheWrite: 500, cacheWrite1h }) as SessionEntry & { message: Record<string, unknown> };
 			return { ...entry, message: { ...entry.message, provider, model } } as SessionEntry;
 		};
-		const opus = { provider: "cliproxyapi", id: "claude-opus-5-5" };
-		assert.equal(cacheTier([from("cliproxyapi", "claude-opus-5-5", 500)], opus), "long");
-		assert.equal(cacheTier([from("cliproxyapi", "claude-opus-5-5", 500)], { provider: "cliproxyapi", id: "gpt-6.1-sol" }), "short");
+		const opus = { provider: "provimux", id: "claude-opus-5-5" };
+		assert.equal(cacheTier([from("provimux", "claude-opus-5-5", 500)], opus), "long");
+		assert.equal(cacheTier([from("provimux", "claude-opus-5-5", 500)], { provider: "provimux", id: "gpt-6.1-sol" }), "short");
 		assert.equal(cacheTier([from("anthropic", "claude-opus-5-5", 500)], opus), "short");
 	} finally {
 		if (before === undefined) delete process.env.PI_CACHE_RETENTION;

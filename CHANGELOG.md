@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.10.7] - 2026-11-24
+
+### Removed
+- **Cards of pi-cached-compaction** — The compaction cards pi-cached-compaction wrote into sessions (`cached-compaction` entries) are no longer drawn: in an old session Pi now shows nothing where such a card was, and the rest of the session shows as before. Cards pi-cache-keeper writes (`cache-keeper` entries) are unchanged.
+
+### Changed
+- **pi-provimux's last `cliproxyapi` names** — pi-provimux 105.0.6 renames its settings file, models cache, environment variables and API id with no fallback; pi-cache-keeper never read any of them, so nothing here depends on that release. The tests' proxy provider id is now `provimux`, as pi-provimux's is, where it was the old `cliproxyapi`. The upstream CLIProxyAPI project keeps its name in the README.
+
 ## [0.10.6] - 2026-11-24
 
 ### Changed

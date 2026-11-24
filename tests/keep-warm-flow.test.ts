@@ -106,7 +106,7 @@ function harness(options: Options = {}) {
 	const lifetime = options.lifetime ?? 3600;
 	const cached = options.cached ?? 600_000;
 	const model = {
-		provider: "cliproxyapi",
+		provider: "provimux",
 		id: "sub/claude",
 		api: options.bridge ? "claude-bridge" : "anthropic-messages",
 		promptCache: { short: lifetime, long: lifetime },
@@ -373,7 +373,7 @@ test("R1: in a period the extension owns, Pi's idle decisions are answered stop 
 	assert.deepEqual(h.warms.map((w) => w.at).slice(0, 3), [276_000, 551_000, 826_000], "the extension refreshes 25 s before each expiry");
 	assert.equal(h.warms.length, 11, "until the budget ends it");
 	const stopped = traces().find((r) => r.action === "pi-stopped");
-	assert.equal(stopped.model, "cliproxyapi/sub/claude");
+	assert.equal(stopped.model, "provimux/sub/claude");
 	assert.match(stopped.reason, /^this extension keeps this idle period's cache warm/);
 
 	// Every decision that arrives while idle is answered stop, also once warming ended: it is the period's, not Pi's.
@@ -580,7 +580,7 @@ test("R2: a 1-hour cache is refreshed twice inside a 2-hour idle window; the tim
 	assert.equal(records[1].reason, "the cache lasts to the end of the 2 h limit after Pi went idle");
 	assert.deepEqual(records[1].budget, { unit: "refreshes", spent: 2, limit: 10 }, "a subscription model counts refreshes");
 	for (const record of records) {
-		assert.equal(record.model, "cliproxyapi/sub/claude");
+		assert.equal(record.model, "provimux/sub/claude");
 		assert.equal(record.lifetimeSeconds, 3600);
 		assert.equal(record.lifetimeSource, "declared by the model");
 	}
@@ -1909,7 +1909,7 @@ test("the reason for thinking names what the request carries, for any provider: 
 
 // --------------------------------------------- R9: two misses in a row, then Pi, with a warning and a way back
 
-const MODEL_KEY = "cliproxyapi/sub/claude";
+const MODEL_KEY = "provimux/sub/claude";
 // Half the prompt read from the cache: a miss that stays within the budget, so it ends the period as "missed".
 const HALF_MISS = { usage: { input: 0, cacheRead: 300_000, cacheWrite: 300_000 } };
 const misses = () => (globalThis as Record<symbol, { counts: Map<string, number>; fallback: Map<string, number>; inFlight: Map<string, Map<number, number>> } | undefined>)[Symbol.for("pi-cache-keeper.warm-misses")];
@@ -2006,7 +2006,7 @@ test("R9: two misses in a row: left to Pi from the next period's start, warned o
 	const attempts = h.state.attempts;
 	assert.equal(
 		await h.command("cache-keeper-warm"),
-		`pi-cache-keeper keeps ${MODEL_KEY} warm again, at the latest from your next message: an idle period already running whose own warming had not ended is kept warm again at once. The count of refreshes without a hit of cliproxyapi/sub/other is cleared too.`,
+		`pi-cache-keeper keeps ${MODEL_KEY} warm again, at the latest from your next message: an idle period already running whose own warming had not ended is kept warm again at once. The count of refreshes without a hit of provimux/sub/other is cleared too.`,
 	);
 	assert.equal(h.state.attempts, attempts, "the command sends nothing");
 	assert.deepEqual([misses()?.fallback.size, misses()?.counts.size], [0, 0]);
@@ -2065,7 +2065,7 @@ test("R9: the count is of refreshes in a row without a hit: unreported ones coun
 	let r = await run("unreported twice", () => UNREPORTED, 2);
 	assert.equal(r.decided, undefined, "left to Pi");
 	assert.equal(r.said.filter((n) => n === warningFor("neither reported what it cost")).length, 1, "warned once");
-	assert.match(r.line ?? "", /two refreshes in a row without a hit for cliproxyapi\/sub\/claude \(the last at \d\d:\d\d\): neither reported what it cost, so it is left to Pi's own warming; \/cache-keeper-warm starts keeping it warm again$/);
+	assert.match(r.line ?? "", /two refreshes in a row without a hit for provimux\/sub\/claude \(the last at \d\d:\d\d\): neither reported what it cost, so it is left to Pi's own warming; \/cache-keeper-warm starts keeping it warm again$/);
 	assert.deepEqual(traces().filter((x) => x.leftToPi).map((x) => [x.action, x.stop]), [["warm", "unknown"]], "logged once");
 	// Unreported, hit, unreported: still owned.
 	r = await run("unreported, hit, unreported", (n) => (n === 2 ? {} : UNREPORTED), 3);
@@ -2122,16 +2122,16 @@ test("the period's rule: a refresh that fails before it leaves ends warming (\"f
 	clock();
 	fresh({ compactBeforeExpiry: false });
 	// The adapter fails before it builds the payload (credentials, say): onPayload never runs.
-	const h = harness({ ui: true, lifetime: 300, cost: WITH_WRITE, stream: () => ({ result: () => Promise.resolve({ stopReason: "error", errorMessage: "no API key for cliproxyapi", usage: h.usage({ input: 0, output: 0, cacheRead: 0 }) }) }) });
+	const h = harness({ ui: true, lifetime: 300, cost: WITH_WRITE, stream: () => ({ result: () => Promise.resolve({ stopReason: "error", errorMessage: "no API key for provimux", usage: h.usage({ input: 0, output: 0, cacheRead: 0 }) }) }) });
 	h.emit("agent_settled");
 	await h.idle(HOUR);
 	assert.equal(h.state.attempts, 1, "tried once, not again");
 	assert.equal(h.warms.length, 0, "nothing sent");
 	const records = traces().filter((r) => r.event === "warm" && r.stop);
-	assert.deepEqual(records.map((r) => [r.action, r.stop, r.reason]), [["failed", "failed", "no API key for cliproxyapi"]]);
+	assert.deepEqual(records.map((r) => [r.action, r.stop, r.reason]), [["failed", "failed", "no API key for provimux"]]);
 	assert.equal(records[0].budget.spent, 0, "nothing spent");
 	assert.equal(countOf(), 0, "nothing counted toward two in a row");
-	assert.deepEqual(h.said.filter((n) => n.text.includes("could not keep the cache warm")), [{ level: "warning", text: "pi-cache-keeper could not keep the cache warm: no API key for cliproxyapi (nothing was sent); $0 spent, a miss costs $2.07. Stopped until your next message." }]);
+	assert.deepEqual(h.said.filter((n) => n.text.includes("could not keep the cache warm")), [{ level: "warning", text: "pi-cache-keeper could not keep the cache warm: no API key for provimux (nothing was sent); $0 spent, a miss costs $2.07. Stopped until your next message." }]);
 	assert.deepEqual(h.entries, [], "nothing was sent: a notice, not a refresh's line");
 });
 
@@ -2199,7 +2199,7 @@ test("the owned period's expiry: Pi's refresh entries, or when they were recorde
 	assert.deepEqual(h.warms.map((w) => w.at / 1000).slice(0, 2), [1711, 3421], "90 s before 3,511 s (counted from Pi's entry: 3,560 s, after the cache expired)");
 });
 
-// A gateway (the harness's cliproxyapi/sub/claude) whose model comes from a Claude login, with the API key's facts
+// A gateway (the harness's provimux/sub/claude) whose model comes from a Claude login, with the API key's facts
 // beside it: the key route's short cache lasts `keyShort` seconds.
 const gateway = (t: { after: (fn: () => void) => void }, keyShort: number) => {
 	const path = join(dir, "cache-keeper-models.json");
@@ -2208,13 +2208,13 @@ const gateway = (t: { after: (fn: () => void) => void }, keyShort: number) => {
 		JSON.stringify({
 			version: 1,
 			providers: { "claude-subscription": { "claude-sonnet-5-5": { short: 3600, long: 3600 } }, anthropic: { "claude-sonnet-5-5": { short: keyShort, long: 3600 } } },
-			upstreams: { cliproxyapi: { "sub/claude": { upstreams: [{ provider: "claude-subscription", model: "claude-sonnet-5-5", subscription: true }] } } },
+			upstreams: { provimux: { "sub/claude": { upstreams: [{ provider: "claude-subscription", model: "claude-sonnet-5-5", subscription: true }] } } },
 			written: {},
 		}),
 	);
 	t.after(() => rmSync(path, { force: true }));
 	// What the proxy says once a request was served by the API key.
-	return (h: ReturnType<typeof harness>) => h.signal("model-upstreams:answered", { provider: "cliproxyapi", model: "sub/claude", upstreams: [{ provider: "anthropic", model: "claude-sonnet-5-5", subscription: false }] });
+	return (h: ReturnType<typeof harness>) => h.signal("model-upstreams:answered", { provider: "provimux", model: "sub/claude", upstreams: [{ provider: "anthropic", model: "claude-sonnet-5-5", subscription: false }] });
 };
 
 // The reviewer's first sequence: the period started on the login's hour; at 400 s an answer shows the API key's
@@ -2312,7 +2312,7 @@ test("the owned period never counts a longer lifetime than the one read now: whe
 // builds the payload.
 // ------------------------------------------------------------------- a marker that states no lifetime: the route's
 
-// A proxy that serves a Claude subscription login (the harness's cliproxyapi/sub/claude), whose data gives both tiers an
+// A proxy that serves a Claude subscription login (the harness's provimux/sub/claude), whose data gives both tiers an
 // hour: with `cacheRetention: "short"` Pi sends Anthropic's plain marker, which states no lifetime.
 const plainMarker = { model: "claude", max_tokens: 64_000, system: [{ type: "text", text: "s", cache_control: { type: "ephemeral" } }], messages: [{ role: "user", content: "hi" }], thinking: { type: "adaptive" } };
 const HOUR_WRITE = { cacheWrite: 120_000, cacheWrite1h: 120_000 };
@@ -2339,7 +2339,7 @@ test("route lifetimes: the same request whose answer reports the 5-minute write 
 	clock();
 	fresh({ compactBeforeExpiry: false });
 	gateway(t, 300);
-	const served = harness({ lifetime: 3600, sent: plainMarker, answer: FIVE_MINUTE_WRITE, report: { provider: "cliproxyapi", model: "sub/claude", upstreams: [{ provider: "anthropic", model: "claude-sonnet-5-5", subscription: false }] } });
+	const served = harness({ lifetime: 3600, sent: plainMarker, answer: FIVE_MINUTE_WRITE, report: { provider: "provimux", model: "sub/claude", upstreams: [{ provider: "anthropic", model: "claude-sonnet-5-5", subscription: false }] } });
 	assert.equal(await ownedRefresh(served, HOUR), 276_000, "25 s before the 5-minute expiry");
 	assert.equal(traces().find((r) => r.event === "warm" && r.action === "warm").lifetimeSeconds, 300);
 	// Nobody said so: the data gives the short tier an hour, the answer says five minutes. They disagree: Pi's.
@@ -2371,7 +2371,7 @@ test("route lifetimes: only the period's own answer confirms a route's lifetime:
 	// changed silently since (a gateway's failover to a route whose short tier lasts five minutes): no proof.
 	clock();
 	fresh({ compactBeforeExpiry: false });
-	const earlier = { role: "assistant", content: [], timestamp: 500, stopReason: "stop", provider: "cliproxyapi", model: "sub/claude", usage: { input: 2, output: 5, cacheRead: 0, cacheWrite: 600_000, cacheWrite1h: 600_000 } };
+	const earlier = { role: "assistant", content: [], timestamp: 500, stopReason: "stop", provider: "provimux", model: "sub/claude", usage: { input: 2, output: 5, cacheRead: 0, cacheWrite: 600_000, cacheWrite1h: 600_000 } };
 	const readOnly = harness({ lifetime: 3600, sent: plainMarker, before: [{ type: "message", id: "e", parentId: null, timestamp: new Date(500).toISOString(), message: earlier }] });
 	readOnly.emit("agent_settled");
 	assert.equal(readOnly.decide(), undefined);
@@ -2483,7 +2483,7 @@ test("mixed writes: a write partly in each cache confirms no lifetime: the perio
 	// An earlier answer of the model wrote partly in each cache; the period's answer only read. A request that states
 	// the hour, on a route whose long tier lasts an hour: Pi's, nothing sent.
 	const before = (usage: Record<string, number>) => [
-		{ type: "message", id: "e", parentId: null, timestamp: new Date(500).toISOString(), message: { role: "assistant", content: [], timestamp: 500, stopReason: "stop", provider: "cliproxyapi", model: "sub/claude", usage: { input: 2, output: 5, cacheRead: 0, ...usage } } },
+		{ type: "message", id: "e", parentId: null, timestamp: new Date(500).toISOString(), message: { role: "assistant", content: [], timestamp: 500, stopReason: "stop", provider: "provimux", model: "sub/claude", usage: { input: 2, output: 5, cacheRead: 0, ...usage } } },
 	];
 	withRetention(t, "long");
 	clock();
@@ -2584,7 +2584,7 @@ test("a request without any cache marker on Anthropic Messages: five minutes by 
 	withRetention(t, undefined);
 	const unmarked = { model: "claude", max_tokens: 64_000, system: "s", messages: [{ role: "user", content: "hi" }], thinking: { type: "adaptive" } };
 	const earlierHour = [
-		{ type: "message", id: "e", parentId: null, timestamp: new Date(500).toISOString(), message: { role: "assistant", content: [], timestamp: 500, stopReason: "stop", provider: "cliproxyapi", model: "sub/claude", usage: { input: 2, output: 5, cacheRead: 0, cacheWrite: 600_000, cacheWrite1h: 600_000 } } },
+		{ type: "message", id: "e", parentId: null, timestamp: new Date(500).toISOString(), message: { role: "assistant", content: [], timestamp: 500, stopReason: "stop", provider: "provimux", model: "sub/claude", usage: { input: 2, output: 5, cacheRead: 0, cacheWrite: 600_000, cacheWrite1h: 600_000 } } },
 	];
 	clock();
 	fresh({ compactBeforeExpiry: false });
@@ -3012,7 +3012,7 @@ function everyState(t: { after: (fn: () => void) => void }, o: { respond?: (n: n
 		(entry as { parentId: string | null }).parentId = parentId;
 		return entry;
 	};
-	const loginRoute = () => h.signal("model-upstreams:answered", { provider: "cliproxyapi", model: "sub/claude", upstreams: [{ provider: "claude-subscription", model: "claude-sonnet-5-5", subscription: true }] });
+	const loginRoute = () => h.signal("model-upstreams:answered", { provider: "provimux", model: "sub/claude", upstreams: [{ provider: "claude-subscription", model: "claude-sonnet-5-5", subscription: true }] });
 	return { h, sent, keyRoute: () => keyRoute(h), loginRoute, release: () => release?.(), compaction: () => compaction };
 }
 type Run = ReturnType<typeof everyState>;
@@ -3962,7 +3962,7 @@ test("stop: from another window, in a period the extension warms: nothing more l
 	assert.equal(pi.piRefreshes.length, 0, "nor anything of Pi's");
 	assert.deepEqual(pi.decisions.map((d) => d.answer), [{ action: "stop" }], "Pi's one idle decision is answered stop");
 	const stops = stopRecords();
-	assert.deepEqual(stops.map((r) => [r.action, r.reason, r.model]), [["skip", `given at ${hhmm(given.at)}`, "cliproxyapi/sub/claude"]], "one record, at the next tick");
+	assert.deepEqual(stops.map((r) => [r.action, r.reason, r.model]), [["skip", `given at ${hhmm(given.at)}`, "provimux/sub/claude"]], "one record, at the next tick");
 	assert.equal(stops[0].at, new Date(given.at + 1000).toISOString());
 	assert.deepEqual(stops[0].budget, { unit: "usd", spent: 0, limit: stops[0].budget.limit, next: stops[0].budget.next }, "the new period had spent nothing");
 	const told = traces().filter((r) => r.action === "pi-stopped");
@@ -4380,7 +4380,7 @@ test("stop, /cache-keeper-warm in a stopped window: the counts are cleared, its 
 	writeStop(Date.now());
 	const [learnt, text] = (await h.command("cache-keeper-warm")).split("\n");
 	assert.match(learnt, /^Warming is stopped in this window until your next message/, "the window learns of the stop here, and says it first");
-	assert.match(text, /^pi-cache-keeper keeps cliproxyapi\/sub\/claude warm again/);
+	assert.match(text, /^pi-cache-keeper keeps provimux\/sub\/claude warm again/);
 	assert.ok(text.endsWith(" A /cache-keeper-stop holds in this window until your next message; this command does not lift it."), text);
 	assert.equal(misses()?.fallback.size, 0, "cleared");
 	const before = h.warms.length;
@@ -4780,7 +4780,7 @@ const UNKNOWN_EXPIRY_ON_090 = {
 	record: {
 		event: "compact",
 		trigger: "manual",
-		model: "cliproxyapi/sub/claude",
+		model: "provimux/sub/claude",
 		outcome: "fallback",
 		reason: "the prompt cache's expiry is unknown: no lifetime can be read",
 		tokensBefore: 600_007,

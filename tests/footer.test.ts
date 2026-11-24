@@ -120,10 +120,10 @@ test("the cache lifetimes: the countdown's for the tier in use, the model's own 
 	assert.equal(formatFooter({ lifetimes: lifetimesView({ short: 3600, long: 3600 }, {}) }), "short 1h · long 1h");
 
 	// providers.dev: a login's values, sure.
-	const login = findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, { upstreams: [{ provider: "anthropic", model: "claude-opus-5-5", subscription: true }] }), providers);
+	const login = findFacts(lookupsFor({ provider: "provimux", id: "claude-opus-5-5" }, { upstreams: [{ provider: "anthropic", model: "claude-opus-5-5", subscription: true }] }), providers);
 	assert.equal(formatFooter({ lifetimes: lifetimesView({ short: 3600, long: 3600 }, { tier: "long" }, login) }), "long 1h (in use) · short 1h");
 	// Login or key, not known: the key's 5 minutes is the smaller short lifetime, a guess.
-	const either = findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, { upstreams: [{ provider: "anthropic" }] }), providers);
+	const either = findFacts(lookupsFor({ provider: "provimux", id: "claude-opus-5-5" }, { upstreams: [{ provider: "anthropic" }] }), providers);
 	assert.equal(formatFooter({ lifetimes: lifetimesView({ short: 300, long: 3600 }, { tier: "short" }, either) }), "short 5m ⚠ (in use) · long 1h");
 	// A value of Pi's own in place of the guess is Pi's, not a guess.
 	assert.equal(formatFooter({ lifetimes: lifetimesView({ short: 600, long: 3600 }, { tier: "long" }, either) }), "long 1h (in use) · short 10m");

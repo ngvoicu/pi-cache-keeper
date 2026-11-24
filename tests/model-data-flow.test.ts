@@ -32,16 +32,16 @@ const free = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 const catalog: FakeModel[] = [
 	{ provider: "openai-codex", id: "gpt-6.1-sol", baseUrl: "https://chatgpt.com/backend-api", contextWindow: 500_000, maxTokens: 128_000, cost: priced },
 	{ provider: "anthropic", id: "claude-opus-5-5", baseUrl: "https://api.anthropic.com", contextWindow: 1_000_000, maxTokens: 128_000, promptCache: { short: 300, long: 3600 }, cost: priced },
-	{ provider: "cliproxyapi", id: "gpt-6.1-sol", baseUrl: "http://127.0.0.1:8317/backend-api/", contextWindow: 500_000, maxTokens: 128_000, cost: priced },
-	{ provider: "cliproxyapi", id: "claude-opus-5-5", baseUrl: "http://127.0.0.1:8317/backend-api/", contextWindow: 1_000_000, maxTokens: 128_000, cost: priced },
-	{ provider: "cliproxyapi", id: "devin/claude-opus-5-5", baseUrl: "http://127.0.0.1:8317/backend-api/", contextWindow: 1_000_000, maxTokens: 128_000, cost: free },
-	{ provider: "cliproxyapi", id: "devin/swe-2", baseUrl: "http://127.0.0.1:8317/backend-api/", contextWindow: 262_000, maxTokens: 128_000, cost: free },
+	{ provider: "provimux", id: "gpt-6.1-sol", baseUrl: "http://127.0.0.1:8317/backend-api/", contextWindow: 500_000, maxTokens: 128_000, cost: priced },
+	{ provider: "provimux", id: "claude-opus-5-5", baseUrl: "http://127.0.0.1:8317/backend-api/", contextWindow: 1_000_000, maxTokens: 128_000, cost: priced },
+	{ provider: "provimux", id: "devin/claude-opus-5-5", baseUrl: "http://127.0.0.1:8317/backend-api/", contextWindow: 1_000_000, maxTokens: 128_000, cost: free },
+	{ provider: "provimux", id: "devin/swe-2", baseUrl: "http://127.0.0.1:8317/backend-api/", contextWindow: 262_000, maxTokens: 128_000, cost: free },
 ];
 
 // What a proxy extension says about its models when it can't tell a login from an API key: GPT-6.1 Sol through the
 // Codex login or an OpenAI key, Opus through a Claude login or key, Devin's models through Devin.
 const UNSURE_ROUTES = {
-	provider: "cliproxyapi",
+	provider: "provimux",
 	models: {
 		"gpt-6.1-sol": { upstreams: [{ provider: "openai-codex", subscription: true }, { provider: "openai", subscription: false }] },
 		"claude-opus-5-5": { upstreams: [{ provider: "anthropic" }] },
@@ -53,7 +53,7 @@ const UNSURE_ROUTES = {
 const login = (provider: string, model?: string) => ({ provider, subscription: true, ...(model ? { model } : {}) });
 const key = (provider: string) => ({ provider, subscription: false });
 const SURE_ROUTES = {
-	provider: "cliproxyapi",
+	provider: "provimux",
 	models: {
 		"gpt-6.1-sol": { upstreams: [login("openai-codex")], fallbacks: [key("openai")] },
 		"claude-opus-5-5": { upstreams: [login("anthropic")], fallbacks: [key("anthropic")] },
@@ -87,7 +87,7 @@ function harness(options: { online?: boolean; extension?: typeof cacheKeeper } =
 	};
 	let registered = effective();
 	const branch: unknown[] = [];
-	let current: FakeModel | undefined = registered.find((model) => model.provider === "cliproxyapi" && model.id === "gpt-6.1-sol");
+	let current: FakeModel | undefined = registered.find((model) => model.provider === "provimux" && model.id === "gpt-6.1-sol");
 
 	globalThis.fetch = (async (input: string, init: { headers: Record<string, string> }) => {
 		const url = String(input);
@@ -149,7 +149,7 @@ function harness(options: { online?: boolean; extension?: typeof cacheKeeper } =
 		modelRegistry: {
 			getAvailable: () => registered,
 			find: (provider: string, id: string) => registered.find((model) => model.provider === provider && model.id === id),
-			getProviderDisplayName: (provider: string) => (provider === "cliproxyapi" ? "CLIProxyAPI" : provider),
+			getProviderDisplayName: (provider: string) => (provider === "provimux" ? "Provimux" : provider),
 			// Every provider here is signed in to; pi marks the Claude and ChatGPT logins as subscriptions.
 			isUsingOAuth: () => true,
 			getProvider: (provider: string) => ({ auth: { oauth: { isSubscription: provider === "anthropic" || provider === "openai-codex" } } }),
@@ -201,7 +201,7 @@ test("a session start fetches the data, fills models.json, reloads the models an
 	assert.deepEqual(h.overrides(), {
 		// The login's window and safe lifetime.
 		"openai-codex": { modelOverrides: { "gpt-6.1-sol": { contextWindow: 922_000, promptCache: { short: 300 } } } },
-		cliproxyapi: {
+		provimux: {
 			modelOverrides: {
 				// Login or key, this proxy does not say: the window both accept, and the shorter lifetime (5 min on the
 				// login, 30 min on the key); only the key has a long one, so none.
@@ -216,9 +216,9 @@ test("a session start fetches the data, fills models.json, reloads the models an
 		},
 		// anthropic/claude-opus-5-5: pi's own catalog already has the window and both lifetimes, so nothing is written.
 	});
-	assert.deepEqual(h.refreshed, [["cliproxyapi", "openai-codex"]]);
+	assert.deepEqual(h.refreshed, [["openai-codex", "provimux"]]);
 	// The session's model is selected again, so it carries the new window.
-	assert.deepEqual(h.selected, ["cliproxyapi/gpt-6.1-sol"]);
+	assert.deepEqual(h.selected, ["provimux/gpt-6.1-sol"]);
 	assert.equal(h.model()?.contextWindow, 922_000);
 	// Login or key, not known: the shorter of the two short lifetimes (a guess), the long one only the key has (not used).
 	// The model has made no request in this session, so no tier is in use: short, then long.
@@ -226,8 +226,8 @@ test("a session start fetches the data, fills models.json, reloads the models an
 	assert.match(h.notices.join("\n"), /Model data from https:\/\/providers\.dev: 5 models updated/);
 	const saved = JSON.parse(readFileSync(storePath, "utf8"));
 	assert.equal(saved.datasetVersion, "d1");
-	assert.deepEqual(saved.upstreams.cliproxyapi["claude-opus-5-5"], { upstreams: [{ provider: "anthropic" }] });
-	assert.deepEqual(Object.keys(saved.written).sort(), ["cliproxyapi", "openai-codex"]);
+	assert.deepEqual(saved.upstreams.provimux["claude-opus-5-5"], { upstreams: [{ provider: "anthropic" }] });
+	assert.deepEqual(Object.keys(saved.written).sort(), ["openai-codex", "provimux"]);
 });
 
 test("the next session start asks nothing while the data is fresh; changing the model updates the footer", async () => {
@@ -271,13 +271,13 @@ test("/cache-keeper-refresh fetches again, keeps a value the user set, and a fai
 	// The user sets a window by hand, and removes a lifetime this extension wrote.
 	const file = JSON.parse(readFileSync(modelsPath, "utf8"));
 	file.providers["openai-codex"].modelOverrides["gpt-6.1-sol"].contextWindow = 400_000;
-	delete file.providers.cliproxyapi.modelOverrides["claude-opus-5-5"];
+	delete file.providers.provimux.modelOverrides["claude-opus-5-5"];
 	writeFileSync(modelsPath, JSON.stringify(file));
 	h.reload();
 	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
 	assert.ok(h.requests.some((request) => request.url.includes("/entries?provider=openai-codex")), "a forced refresh downloads again");
 	assert.equal(h.overrides()["openai-codex"].modelOverrides["gpt-6.1-sol"].contextWindow, 400_000, "the user's window stays");
-	assert.deepEqual(h.overrides().cliproxyapi.modelOverrides["claude-opus-5-5"], { promptCache: { short: 300, long: 3600 } }, "a removed value is filled again");
+	assert.deepEqual(h.overrides().provimux.modelOverrides["claude-opus-5-5"], { promptCache: { short: 300, long: 3600 } }, "a removed value is filled again");
 	assert.match(h.notices.at(-1)!, /1 model updated in .*models\.json\nThis model: openai-codex\/gpt-6\.1-sol or openai\/gpt-6\.1-sol: window 922,000, short cache 5 min, price \$2\/\$10 per million; cache short: the smaller of the login's and the API key's/);
 
 	const before = readFileSync(modelsPath, "utf8");
@@ -318,14 +318,14 @@ test("a proxy extension that knows what serves its models: their values, fetched
 	h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
 	await h.settle();
 	// Nobody said where the proxy's models come from: nothing for them.
-	assert.equal(h.overrides().cliproxyapi, undefined);
+	assert.equal(h.overrides().provimux, undefined);
 	assert.equal(h.statuses.get("cache-keeper"), "cache lifetime unknown · api $2/$10 per M · providers.dev: no data for this model");
 
 	// Said during the session: what is new to look up is fetched, models.json follows.
 	h.requests.length = 0;
 	h.emit("model-upstreams", SURE_ROUTES);
 	await h.settle();
-	const proxy = h.overrides().cliproxyapi.modelOverrides;
+	const proxy = h.overrides().provimux.modelOverrides;
 	// The Claude login keeps the cache for an hour, both tiers; the Codex login has a 5-minute short lifetime.
 	assert.deepEqual(proxy["claude-opus-5-5"], { promptCache: { short: 3600, long: 3600 } });
 	assert.deepEqual(proxy["gpt-6.1-sol"], { contextWindow: 922_000, promptCache: { short: 300 } });
@@ -338,12 +338,12 @@ test("a proxy extension that knows what serves its models: their values, fetched
 	assert.deepEqual(h.requests, []);
 
 	// Opus on the proxy: the login's hour.
-	h.select("cliproxyapi", "claude-opus-5-5");
+	h.select("provimux", "claude-opus-5-5");
 	const LOGIN = "short 1h · long 1h · sub, counted at $2/$10 per M";
 	assert.equal(h.statuses.get("cache-keeper"), LOGIN);
 	// An answer from the login changes nothing; one from an API key (the login failed or is cooling down) is warned
 	// about, and the countdown follows the key's 5 minutes.
-	const answered = (upstreams: unknown[], model = "claude-opus-5-5", provider = "cliproxyapi") => h.emit("model-upstreams:answered", { provider, model, upstreams });
+	const answered = (upstreams: unknown[], model = "claude-opus-5-5", provider = "provimux") => h.emit("model-upstreams:answered", { provider, model, upstreams });
 	answered([login("anthropic")]);
 	assert.equal(h.statuses.get("cache-keeper"), LOGIN);
 	answered([key("anthropic")]);
@@ -371,7 +371,7 @@ test("a proxy extension that knows what serves its models: their values, fetched
 		timestamp: "",
 		message: {
 			role: "assistant",
-			provider: "cliproxyapi",
+			provider: "provimux",
 			model: "claude-opus-5-5",
 			content: [],
 			timestamp: 1,
@@ -389,7 +389,7 @@ test("a proxy extension that knows what serves its models: their values, fetched
 	answered([key("anthropic")], "claude-opus-5-5", "anthropic");
 	assert.equal(h.statuses.get("cache-keeper"), LOGIN);
 	answered([key("anthropic")]);
-	h.select("cliproxyapi", "claude-opus-5-5");
+	h.select("provimux", "claude-opus-5-5");
 	assert.equal(h.statuses.get("cache-keeper"), LOGIN);
 });
 
@@ -404,13 +404,13 @@ test("routes said while a refresh runs: what they add is fetched when it ends, o
 	await h.settle();
 	const asked = h.requests.map((request) => new URL(request.url).searchParams.get("provider")).filter(Boolean);
 	assert.ok(asked.includes("devin") && asked.includes("openai"), `fetched: ${asked.join(", ")}`);
-	assert.deepEqual(h.overrides().cliproxyapi.modelOverrides["devin/swe-2"], { contextWindow: 300_499 });
+	assert.deepEqual(h.overrides().provimux.modelOverrides["devin/swe-2"], { contextWindow: 300_499 });
 	assert.equal(h.notices.filter((notice) => notice.startsWith("Model data from")).length, 2, "one notice per refresh");
 	// Offline, a refresh that fails is not tried again and again.
 	h.requests.length = 0;
 	h.state.online = false;
 	h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
-	h.emit("model-upstreams", { provider: "cliproxyapi", models: { x: { upstreams: [{ provider: "nowhere", subscription: false }] } } });
+	h.emit("model-upstreams", { provider: "provimux", models: { x: { upstreams: [{ provider: "nowhere", subscription: false }] } } });
 	await h.settle();
 	await h.settle();
 	assert.ok(h.requests.length <= 3, `asked ${h.requests.length} times`);

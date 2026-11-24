@@ -30,7 +30,7 @@ function harness(promptCache = { short: 3600, long: 3600 }) {
 	};
 	cacheKeeper(pi as never);
 
-	const model = { provider: "cliproxyapi", id: "sub/claude", api: "anthropic-messages", promptCache, contextWindow: 1_000_000, maxTokens: 64_000 };
+	const model = { provider: "provimux", id: "sub/claude", api: "anthropic-messages", promptCache, contextWindow: 1_000_000, maxTokens: 64_000 };
 	const user = { role: "user", content: [{ type: "text", text: "hi" }], timestamp: 0 };
 	const reply = { role: "assistant", content: [{ type: "text", text: "hello" }], timestamp: 1_000, stopReason: "stop", usage: { input: 2, output: 5, cacheRead: 600_000, cacheWrite: 0 } };
 	const branch: unknown[] = [

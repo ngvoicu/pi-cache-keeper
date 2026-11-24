@@ -227,7 +227,7 @@ test("a pi model is looked up under the provider and access method it is reached
 
 test("when two entries can describe a model, only what both say is kept, and the window is the smaller one", () => {
 	const unknown = (provider: string) => ({ upstreams: [{ provider }] });
-	const claude = findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, unknown("anthropic")), providers);
+	const claude = findFacts(lookupsFor({ provider: "provimux", id: "claude-opus-5-5" }, unknown("anthropic")), providers);
 	assert.deepEqual(claude.refs, ["claude-subscription/claude-opus-5-5", "anthropic/claude-opus-5-5"]);
 	// The login keeps a cache for 1 h, the API key for 5 min by default. Without knowing which serves the model, the
 	// shorter is taken: a wrong guess then costs an early refresh, not a cache that expires unnoticed.
@@ -238,7 +238,7 @@ test("when two entries can describe a model, only what both say is kept, and the
 	assert.deepEqual(claude.unsure, []);
 	assert.deepEqual(fieldStates(claude), { window: "found", short: "assumed", long: "found", price: "found" });
 
-	const gpt = findFacts(lookupsFor({ provider: "cliproxyapi", id: "gpt-6-astra" }, { upstreams: [{ provider: "openai-codex", subscription: true }, { provider: "openai", subscription: false }] }), providers);
+	const gpt = findFacts(lookupsFor({ provider: "provimux", id: "gpt-6-astra" }, { upstreams: [{ provider: "openai-codex", subscription: true }, { provider: "openai", subscription: false }] }), providers);
 	assert.equal(gpt.facts.window, 915_011);
 	assert.equal(gpt.facts.windowAtLeast, true);
 	// Codex login 2 h, API key 30 min: the shorter. Only the API key has a long lifetime: not used.
@@ -276,7 +276,7 @@ test("what providers.dev has for each field: a lifetime evaluations found unsafe
 	assert.deepEqual(fieldStates(exact("openai-codex", "gpt-6.1-terra")), { window: "found", short: "missing", long: "missing", price: "found" });
 	const gemini = fieldStates(exact("antigravity", "gemini-3.8-flash-high"));
 	assert.deepEqual([gemini.window, gemini.short], ["missing", "found"]);
-	const unsure = findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, { upstreams: [{ provider: "anthropic" }] }), providers);
+	const unsure = findFacts(lookupsFor({ provider: "provimux", id: "claude-opus-5-5" }, { upstreams: [{ provider: "anthropic" }] }), providers);
 	assert.deepEqual(fieldStates(unsure), { window: "found", short: "assumed", long: "found", price: "found" });
 	assert.deepEqual(fieldStates(exact("openai", "nope")), { window: "missing", short: "missing", long: "missing", price: "missing" });
 	assert.equal(describeFound(exact("openai-codex", "gpt-6.1-sol")), "openai-codex/gpt-6.1-sol: window 922,000, short cache 5 min, price $2/$10 per million");
@@ -462,7 +462,7 @@ test("a proxy extension's events: every model's route, and what answered a reque
 	const key = { provider: "anthropic", model: "claude-opus-5-5", subscription: false };
 	assert.deepEqual(
 		parseUpstreamsEvent({
-			provider: "cliproxyapi",
+			provider: "provimux",
 			models: {
 				"claude-opus-5-5": { upstreams: [login], fallbacks: [key] },
 				"gpt-6.1-sol": { upstreams: [{ provider: "openai-codex", subscription: true, extra: 1 }], fallbacks: [] },
@@ -472,7 +472,7 @@ test("a proxy extension's events: every model's route, and what answered a reque
 			},
 		}),
 		{
-			provider: "cliproxyapi",
+			provider: "provimux",
 			models: {
 				"claude-opus-5-5": { upstreams: [login], fallbacks: [key] },
 				"gpt-6.1-sol": { upstreams: [{ provider: "openai-codex", subscription: true }] },
@@ -480,21 +480,21 @@ test("a proxy extension's events: every model's route, and what answered a reque
 			},
 		},
 	);
-	assert.equal(parseUpstreamsEvent({ provider: "cliproxyapi" }), undefined);
+	assert.equal(parseUpstreamsEvent({ provider: "provimux" }), undefined);
 	assert.equal(parseUpstreamsEvent("x"), undefined);
-	assert.deepEqual(parseAnsweredEvent({ provider: "cliproxyapi", model: "claude-opus-5-5", upstreams: [key] }), { provider: "cliproxyapi", model: "claude-opus-5-5", upstreams: [key] });
+	assert.deepEqual(parseAnsweredEvent({ provider: "provimux", model: "claude-opus-5-5", upstreams: [key] }), { provider: "provimux", model: "claude-opus-5-5", upstreams: [key] });
 	// An empty list says this answer's route is unknown: kept, not dropped.
-	assert.deepEqual(parseAnsweredEvent({ provider: "cliproxyapi", model: "claude-opus-5-5", upstreams: [] }), { provider: "cliproxyapi", model: "claude-opus-5-5", upstreams: [] });
-	assert.equal(parseAnsweredEvent({ provider: "cliproxyapi", model: "claude-opus-5-5" }), undefined, "no list: not a report");
+	assert.deepEqual(parseAnsweredEvent({ provider: "provimux", model: "claude-opus-5-5", upstreams: [] }), { provider: "provimux", model: "claude-opus-5-5", upstreams: [] });
+	assert.equal(parseAnsweredEvent({ provider: "provimux", model: "claude-opus-5-5" }), undefined, "no list: not a report");
 });
 
 test("which values are sure: one entry, the smaller of values that differ, or a value only some entries have", () => {
 	const login = { provider: "anthropic", model: "claude-opus-5-5", subscription: true };
-	const exact = findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, { upstreams: [login] }), providers);
+	const exact = findFacts(lookupsFor({ provider: "provimux", id: "claude-opus-5-5" }, { upstreams: [login] }), providers);
 	assert.deepEqual({ short: exact.facts.short, long: exact.facts.long, assumed: exact.assumed, unsure: exact.unsure }, { short: 3600, long: 3600, assumed: [], unsure: [] });
 	assert.deepEqual(fieldStates(exact), { window: "found", short: "found", long: "found", price: "found" });
 	// A login or an API key, not known: the key's 5 minutes, the smaller short lifetime, is a guess.
-	const either = findFacts(lookupsFor({ provider: "cliproxyapi", id: "claude-opus-5-5" }, { upstreams: [{ provider: "anthropic" }] }), providers);
+	const either = findFacts(lookupsFor({ provider: "provimux", id: "claude-opus-5-5" }, { upstreams: [{ provider: "anthropic" }] }), providers);
 	assert.deepEqual([either.facts.short, fieldStates(either).short], [300, "assumed"]);
 	// Pi knows it is the ChatGPT login, but providers.dev has no entry for that login on the OpenAI API: the short
 	// lifetime is the smaller of the two, the long one only the API key has.

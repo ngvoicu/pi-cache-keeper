@@ -359,8 +359,6 @@ const httpFetch: Fetch = (url, init) => fetch(url, init);
 const CARD_TYPE = "cache-keeper";
 /** The saved entry of one refresh the extension sent: its line in the transcript, kept in the session (`{ level, text }`). */
 const REFRESH_LINE_TYPE = "cache-keeper-refresh";
-/** The card type pi-cached-compaction wrote; still rendered so cards in older sessions show. */
-const LEGACY_CARD_TYPE = "cached-compaction";
 const PREFIX_MISMATCH = "pi-cache-keeper: request prefix differs from the cached request";
 const BRIDGE_API = "claude-bridge";
 const COMPACTION_ABORTED = "the compaction was aborted";
@@ -907,7 +905,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		return new Text(lines.join("\n"), 1, 0);
 	};
 	pi.registerEntryRenderer(CARD_TYPE, renderCard);
-	pi.registerEntryRenderer(LEGACY_CARD_TYPE, renderCard);
 	const showCard = (records: TraceRecord[]) => pi.appendEntry<{ records: TraceRecord[] }>(CARD_TYPE, { records });
 
 	// The footer (see footer.ts): the countdown as the timer last set it, the model's values as showData last read them,
