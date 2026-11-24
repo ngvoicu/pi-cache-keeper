@@ -56,36 +56,15 @@ function readSettings(path: string): Record<string, unknown> {
 
 /** The key in pi's settings.json this extension reads and writes. */
 export const SETTINGS_KEY = "cacheKeeper";
-/** pi-cached-compaction's key: read when `cacheKeeper` is absent, so settings made for it keep working. Never written. */
-export const LEGACY_SETTINGS_KEY = "cachedCompaction";
-
-/** Which key the settings come from: `cacheKeeper`, else `cachedCompaction` when only that one is present. */
-export function settingsKeyInUse(settings: Record<string, unknown> = readSettings(settingsPath())): string {
-	return settings[SETTINGS_KEY] === undefined && settings[LEGACY_SETTINGS_KEY] !== undefined ? LEGACY_SETTINGS_KEY : SETTINGS_KEY;
-}
-
-/**
- * 0.10.0's name of `fallbackCompactionModel`. Still read, in settings.json and in a session's own settings; where both
- * names are present the new one wins. Never written: a rewrite of the settings holding it writes the new name instead.
- */
-export const OLD_FALLBACK_KEY = "coldCompactionModel";
-
-/** The settings object with `coldCompactionModel` taken as `fallbackCompactionModel` (unless that is present) and gone. */
-function withNewFallbackKey(raw: Record<string, unknown>): Record<string, unknown> {
-	if (!(OLD_FALLBACK_KEY in raw)) return raw;
-	const { [OLD_FALLBACK_KEY]: old, ...rest } = raw;
-	return "fallbackCompactionModel" in rest ? rest : { ...rest, fallbackCompactionModel: old };
-}
 
 export function loadConfig(): CacheKeeperConfig {
 	const path = settingsPath();
 	const settings = readSettings(path);
-	const key = settingsKeyInUse(settings);
-	const saved: unknown = settings[key];
+	const saved: unknown = settings[SETTINGS_KEY];
 	if (saved === undefined) return DEFAULTS;
-	if (!isPlainObject(saved)) throw new Error(`${key} in ${path} must be an object`);
-	const unknown = Object.keys(saved).filter((name) => !(name in DEFAULTS) && name !== OLD_FALLBACK_KEY);
-	if (unknown.length > 0) throw new Error(`${key} in ${path} has unknown keys: ${unknown.join(", ")}`);
+	if (!isPlainObject(saved)) throw new Error(`${SETTINGS_KEY} in ${path} must be an object`);
+	const unknown = Object.keys(saved).filter((name) => !(name in DEFAULTS));
+	if (unknown.length > 0) throw new Error(`${SETTINGS_KEY} in ${path} has unknown keys: ${unknown.join(", ")}`);
 	const {
 		cacheRetention = DEFAULTS.cacheRetention,
 		compactBeforeExpiry = DEFAULTS.compactBeforeExpiry,
@@ -95,13 +74,11 @@ export function loadConfig(): CacheKeeperConfig {
 		keepWarmMinutes = DEFAULTS.keepWarmMinutes,
 		modelData = DEFAULTS.modelData,
 		fallbackCompactionModel = DEFAULTS.fallbackCompactionModel,
-	} = withNewFallbackKey(saved);
-	// A bad value is named by the key it was saved under.
-	const savedName = (name: string) => (name === "fallbackCompactionModel" && !(name in saved) && OLD_FALLBACK_KEY in saved ? OLD_FALLBACK_KEY : name);
+	} = saved;
 	const values = { cacheRetention, compactBeforeExpiry, minContextTokens, compactAtPercent, compactAtTokens, keepWarmMinutes, modelData, fallbackCompactionModel };
 	for (const name of Object.keys(DEFAULTS) as (keyof CacheKeeperConfig)[]) {
 		const problem = valueProblem(name, values[name]);
-		if (problem) throw new Error(`${key}.${savedName(name)} in ${path} ${problem}`);
+		if (problem) throw new Error(`${SETTINGS_KEY}.${name} in ${path} ${problem}`);
 	}
 	return values as CacheKeeperConfig;
 }
@@ -165,12 +142,7 @@ export function readSessionSettings(data: unknown): { settings: SessionSettings;
 	const settings: Record<string, unknown> = {};
 	const ignored: string[] = [];
 	for (const [name, value] of Object.entries(raw)) {
-		// 0.10.0's name: read as the new one, which wins where both are present.
-		if (name === OLD_FALLBACK_KEY) {
-			if ("fallbackCompactionModel" in raw) continue;
-			if (valueProblem("fallbackCompactionModel", value) === undefined) settings.fallbackCompactionModel = value;
-			else ignored.push(name);
-		} else if (isSessionKey(name) && valueProblem(name, value) === undefined) settings[name] = value;
+		if (isSessionKey(name) && valueProblem(name, value) === undefined) settings[name] = value;
 		else ignored.push(name);
 	}
 	return { settings: settings as SessionSettings, ignored };
@@ -223,15 +195,14 @@ export function sameSessionSettings(a: SessionSettings, b: SessionSettings): boo
 
 /**
  * Writes the given keys into `cacheKeeper` in the global settings file, keeping every other setting, and returns the
- * new config. The first save copies the settings it was reading from `cachedCompaction`, which is left as it is. A
- * `coldCompactionModel` there (0.10.0's name) is written as `fallbackCompactionModel`, unless that is present or given.
+ * new config.
  */
 export function saveConfig(patch: Partial<CacheKeeperConfig>): CacheKeeperConfig {
 	const path = settingsPath();
 	const settings = readSettings(path);
-	const source = settings[settingsKeyInUse(settings)];
+	const source = settings[SETTINGS_KEY];
 	const current = isPlainObject(source) ? source : {};
-	settings[SETTINGS_KEY] = withNewFallbackKey({ ...withNewFallbackKey(current), ...patch });
+	settings[SETTINGS_KEY] = { ...current, ...patch };
 	mkdirSync(dirname(path), { recursive: true });
 	writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`);
 	return loadConfig();

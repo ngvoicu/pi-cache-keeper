@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { autoCompactionEnabled, fullThreshold, loadConfig, saveConfig, settingsKeyInUse, summaryBudget } from "../config.ts";
+import { autoCompactionEnabled, fullThreshold, loadConfig, saveConfig, summaryBudget } from "../config.ts";
 
 test("settings: compacting before expiry is on by default, a byte-order mark is allowed, unknown keys fail, and Pi's compaction switch is read project over global", () => {
 	const dir = mkdtempSync(join(tmpdir(), "pcc-config-"));
@@ -119,25 +119,16 @@ test("settings: keeping the cache warm is off by default and takes whole minutes
 	}
 });
 
-test("settings: without cacheKeeper, pi-cached-compaction's cachedCompaction is read; the menu saves to cacheKeeper and leaves the old key alone", () => {
+test("settings: only cacheKeeper is read; pi-cached-compaction's cachedCompaction is not, and a save leaves it alone", () => {
 	const dir = mkdtempSync(join(tmpdir(), "pck-config-"));
 	const settings = join(dir, "settings.json");
 	process.env.PI_CODING_AGENT_DIR = dir;
 	try {
-		const old = { cacheRetention: "short", minContextTokens: 140_000, compactAtPercent: 70, compactAtTokens: 400_000 };
+		const old = { cacheRetention: "short", compactAtPercent: 70 };
 		writeFileSync(settings, JSON.stringify({ theme: "dark", cachedCompaction: old }));
-		assert.equal(settingsKeyInUse(), "cachedCompaction");
-		assert.deepEqual(loadConfig(), { ...old, compactBeforeExpiry: true, keepWarmMinutes: 0, modelData: true, fallbackCompactionModel: "" });
-		writeFileSync(settings, JSON.stringify({ cachedCompaction: { compactAtPercent: 101 } }));
-		assert.throws(loadConfig, /^Error: cachedCompaction\.compactAtPercent/, "errors name the key the value came from");
-		writeFileSync(settings, JSON.stringify({ theme: "dark", cachedCompaction: old }));
-		const saved = saveConfig({ keepWarmMinutes: 60 });
-		assert.deepEqual(saved, { ...old, compactBeforeExpiry: true, keepWarmMinutes: 60, modelData: true, fallbackCompactionModel: "" });
-		assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")), { theme: "dark", cachedCompaction: old, cacheKeeper: { ...old, keepWarmMinutes: 60 } });
-		assert.equal(settingsKeyInUse(), "cacheKeeper");
-		// Once cacheKeeper is present, the old key is ignored.
-		writeFileSync(settings, JSON.stringify({ cachedCompaction: old, cacheKeeper: { compactAtPercent: 80 } }));
-		assert.deepEqual(loadConfig(), { cacheRetention: "long", compactBeforeExpiry: true, minContextTokens: 140_000, compactAtPercent: 80, compactAtTokens: 0, keepWarmMinutes: 0, modelData: true, fallbackCompactionModel: "" });
+		assert.deepEqual(loadConfig(), { cacheRetention: "long", compactBeforeExpiry: true, minContextTokens: 140_000, compactAtPercent: 90, compactAtTokens: 0, keepWarmMinutes: 0, modelData: true, fallbackCompactionModel: "" });
+		saveConfig({ keepWarmMinutes: 60 });
+		assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")), { theme: "dark", cachedCompaction: old, cacheKeeper: { keepWarmMinutes: 60 } });
 	} finally {
 		delete process.env.PI_CODING_AGENT_DIR;
 		rmSync(dir, { recursive: true });
@@ -187,44 +178,13 @@ test("settings: fallbackCompactionModel is off (\"\") by default, takes \"provid
 	}
 });
 
-// 0.10.1: the setting is fallbackCompactionModel; 0.10.0's coldCompactionModel keeps working in settings.json, the new
-// name wins where both are present, and a rewrite of the settings writes only the new name.
-test("settings: 0.10.0's coldCompactionModel is read as fallbackCompactionModel, the new name wins over it, and a save writes only the new name", () => {
+test("settings: coldCompactionModel, the setting's name in 0.10.0, is an unknown key", () => {
 	const dir = mkdtempSync(join(tmpdir(), "pcc-config-"));
 	const settings = join(dir, "settings.json");
-	const saved = () => JSON.parse(readFileSync(settings, "utf8")).cacheKeeper;
 	process.env.PI_CODING_AGENT_DIR = dir;
 	try {
-		// The old name alone, as 0.10.0 saved it: it works, and it is no unknown key.
-		writeFileSync(settings, JSON.stringify({ cacheKeeper: { keepWarmMinutes: 60, coldCompactionModel: "google/gemini-2.5-flash" } }));
-		assert.equal(loadConfig().fallbackCompactionModel, "google/gemini-2.5-flash");
-		assert.ok(!("coldCompactionModel" in loadConfig()), "the config has the new name only");
-		// Off under the old name is off.
-		writeFileSync(settings, JSON.stringify({ cacheKeeper: { coldCompactionModel: "" } }));
-		assert.equal(loadConfig().fallbackCompactionModel, "");
-		// Both: the new name wins, whichever comes first in the file.
-		writeFileSync(settings, JSON.stringify({ cacheKeeper: { coldCompactionModel: "google/gemini-2.5-flash", fallbackCompactionModel: "acme/tiny" } }));
-		assert.equal(loadConfig().fallbackCompactionModel, "acme/tiny");
-		writeFileSync(settings, JSON.stringify({ cacheKeeper: { fallbackCompactionModel: "", coldCompactionModel: "google/gemini-2.5-flash" } }));
-		assert.equal(loadConfig().fallbackCompactionModel, "", "the new name's off wins over a model under the old one");
-		// A bad value under the old name is named by the old name; under the new one, a bad old value is not read.
-		writeFileSync(settings, JSON.stringify({ cacheKeeper: { coldCompactionModel: "gemini" } }));
-		assert.throws(loadConfig, /cacheKeeper\.coldCompactionModel in .* must be "provider\/modelId", or "" for off/);
-		writeFileSync(settings, JSON.stringify({ cacheKeeper: { coldCompactionModel: "gemini", fallbackCompactionModel: "acme/tiny" } }));
-		assert.equal(loadConfig().fallbackCompactionModel, "acme/tiny");
-		// Saving the setting writes the new name and takes the old one out.
-		writeFileSync(settings, JSON.stringify({ theme: "dark", cacheKeeper: { keepWarmMinutes: 60, coldCompactionModel: "google/gemini-2.5-flash" } }));
-		assert.equal(saveConfig({ fallbackCompactionModel: "acme/tiny" }).fallbackCompactionModel, "acme/tiny");
-		assert.deepEqual(saved(), { keepWarmMinutes: 60, fallbackCompactionModel: "acme/tiny" });
-		assert.equal(JSON.parse(readFileSync(settings, "utf8")).theme, "dark");
-		// Saving another setting carries the old name's value over to the new name.
-		writeFileSync(settings, JSON.stringify({ cacheKeeper: { keepWarmMinutes: 60, coldCompactionModel: "google/gemini-2.5-flash" } }));
-		assert.equal(saveConfig({ keepWarmMinutes: 120 }).fallbackCompactionModel, "google/gemini-2.5-flash");
-		assert.deepEqual(saved(), { keepWarmMinutes: 120, fallbackCompactionModel: "google/gemini-2.5-flash" });
-		// Both saved: the new name's value stays, the old name goes.
-		writeFileSync(settings, JSON.stringify({ cacheKeeper: { coldCompactionModel: "google/gemini-2.5-flash", fallbackCompactionModel: "acme/tiny" } }));
-		saveConfig({ keepWarmMinutes: 30 });
-		assert.deepEqual(saved(), { fallbackCompactionModel: "acme/tiny", keepWarmMinutes: 30 });
+		writeFileSync(settings, JSON.stringify({ cacheKeeper: { coldCompactionModel: "google/gemini-2.5-flash" } }));
+		assert.throws(loadConfig, /cacheKeeper in .* has unknown keys: coldCompactionModel/);
 	} finally {
 		delete process.env.PI_CODING_AGENT_DIR;
 		rmSync(dir, { recursive: true });

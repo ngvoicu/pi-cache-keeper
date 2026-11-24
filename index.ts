@@ -69,7 +69,6 @@ import {
 	sessionSettingsOn,
 	SETTINGS_KEY,
 	settingsInEffect,
-	settingsKeyInUse,
 	summaryBudget,
 	withSessionValue,
 	type CacheKeeperConfig,
@@ -2412,15 +2411,14 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			sessionFile: ctx.sessionManager.getSessionFile(),
 		};
 		// Where the cached path can't write the summary: before expiry, the compaction is cancelled; else the fallback compaction
-		// model writes it where one is set and can, and Pi's own compaction runs where it can't (the one rule of 0.10.0).
+		// model writes it where one is set and can, and Pi's own compaction runs where it can't.
 		const fallBack = async (reason: string, mismatch?: PrefixMismatch) => {
 			const diff = mismatch?.captured === undefined ? undefined : { captured: mismatch.captured, rebuilt: mismatch.rebuilt };
 			if (fromExpiry) {
 				decision = trace(ctx, { ...record, outcome: "cancelled", reason, mismatch: diff });
 				return { cancel: true };
 			}
-			// An unknown lifetime or expiry is never a reason to use the fallback compaction model: Pi's own compaction runs, as in
-			// 0.9.0.
+			// An unknown lifetime or expiry is never a reason to use the fallback compaction model: Pi's own compaction runs.
 			if (reason.startsWith(EXPIRY_UNKNOWN)) {
 				decision = trace(ctx, { ...record, outcome: "fallback", reason, mismatch: diff });
 				return undefined;
@@ -2677,7 +2675,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			return mine === undefined ? `${shown(defaultOf(name))} [default]` : `${shown(mine)} [this session; default ${shown(defaultOf(name))}]`;
 		};
 		return [
-			`pi-cache-keeper settings: the defaults for all sessions (${settingsKeyInUse()} in ~/.pi/agent/settings.json), and over them this session's own values (saved in the session); /cache-keeper-settings in the TUI changes either`,
+			`pi-cache-keeper settings: the defaults for all sessions (${SETTINGS_KEY} in ~/.pi/agent/settings.json), and over them this session's own values (saved in the session); /cache-keeper-settings in the TUI changes either`,
 			`compactAtPercent: ${layer("compactAtPercent")} · compactAtTokens: ${layer("compactAtTokens")} (${fullNote(ctx.model)})`,
 			`compactBeforeExpiry: ${layer("compactBeforeExpiry")} · minContextTokens: ${layer("minContextTokens")}`,
 			`keepWarmMinutes: ${layer("keepWarmMinutes")} (${keepWarmNote(ctx.model)})`,

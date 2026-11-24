@@ -63,7 +63,7 @@ publishes nothing, and its `tag` job takes the existing tag `v<version>` instead
 
 Raise `version` in `package.json` (`npm version patch --no-git-tag-version`), add the `## [X.Y.Z] - date` entry to
 `CHANGELOG.md`, commit, push `main` to GitHub and the NAS. The push to GitHub publishes it. A push that
-leaves the version alone publishes nothing (Git installs still get it).
+leaves the version alone publishes nothing.
 
 A bad version is fixed by a greater one: Pi installs a version only when it is greater than the installed one.
 `npm deprecate pi-cache-keeper@<bad> "…"` marks the bad one.

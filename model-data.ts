@@ -14,7 +14,7 @@ const REQUEST_TIMEOUT_MS = 20_000;
 /** A shorter lifetime cannot carry a countdown or a refresh, so it is treated as "no safe lifetime". */
 const MIN_LIFETIME_SECONDS = 60;
 /**
- * How the saved facts were read from providers.dev's answers. Saved facts of another reading (or of none: before 0.9.0)
+ * How the saved facts were read from providers.dev's answers. Saved facts of another reading (or of none)
  * are fetched again once, even when the dataset has not changed. 2: the safe values of API 1.4.0, without pi's own.
  */
 export const DATA_READING = 2;
@@ -72,7 +72,7 @@ export interface DataStore {
 	/** When providers.dev was last asked, and the dataset it answered with. */
 	checkedAt?: number;
 	datasetVersion?: string;
-	/** How `providers` was read from the answers (DATA_READING). Absent: before 0.9.0. */
+	/** How `providers` was read from the answers (DATA_READING). */
 	reading?: number;
 	/** providers.dev provider id → model id → facts. */
 	providers: Record<string, Record<string, Facts>>;

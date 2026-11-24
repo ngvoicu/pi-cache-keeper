@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.10.5] - 2026-11-24
+
+### Removed
+- **No support for older versions' formats** — pi-cache-keeper reads only its current formats; old ones are no longer migrated or read:
+  - **`cachedCompaction`**, pi-cached-compaction's key in `~/.pi/agent/settings.json`, is no longer read when `cacheKeeper` is absent: only `cacheKeeper` counts, and the defaults apply without it.
+  - **`coldCompactionModel`**, the name of `fallbackCompactionModel` in 0.10.0, is no longer read. Under `cacheKeeper` in `settings.json` it is now an unknown key, which stops the settings from loading, as any unknown key does: rename it to `fallbackCompactionModel`. In a session's own values it is left out, so that session follows the default.
+  - The README's "Moving from the Git install" and "Moving from pi-cached-compaction" sections and its notes about earlier versions are gone. Install with `pi install npm:pi-cache-keeper`.
+- Compaction cards that pi-cached-compaction wrote into sessions (`cached-compaction` entries) still show.
+
 ## [0.10.4] - 2026-11-23
 
 ### Changed
