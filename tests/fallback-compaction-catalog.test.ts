@@ -162,7 +162,7 @@ for (const version of CATALOGS) {
 			if (size === "large") assert.ok(counts["too small now"] > 0, `${size}: ${JSON.stringify(counts)}`);
 			assert.equal(seen.labels.get("cloudflare-workers-ai/@cf/openai/gpt-oss-120b"), "can't be used: output limit too small", size);
 			assert.equal(seen.labels.get(seen.own), "can't be used: it is the session's own model", size);
-			assert.match(seen.status, /fallback compaction model \(writes the summary when the cache can't be used\): @cf\/openai\/gpt-oss-120b \[cloudflare-workers-ai\] · 128k window · \$0\.35 in, \$0\.75 out per M · can't be used: output limit too small/, size);
+			assert.match(seen.status, /fallback compaction model \(asked to write the summary when the cache can't be used\): @cf\/openai\/gpt-oss-120b \[cloudflare-workers-ai\] · 128k window · \$0\.35 in, \$0\.75 out per M · can't be used: output limit too small/, size);
 		}
 	});
 

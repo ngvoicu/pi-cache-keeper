@@ -93,8 +93,8 @@ test("the gate: what was spent plus the next refresh's reserve stays within one 
 });
 
 test("the rule as the settings say it", () => {
-	assert.equal(keepWarmRule(120, true), "re-sends your last request just before the cache expires, up to 2 h after Pi goes idle; stops once the refreshes have cost as much as one cache miss (writing the context again)");
-	assert.equal(keepWarmRule(120, false), "re-sends your last request just before the cache expires, up to 2 h after Pi goes idle; at most 10 refreshes (this model has no prices, so the cost of a miss is unknown)");
+	assert.equal(keepWarmRule(120, true), "re-sends your last request with a one-token answer shortly before the cache expires, for up to 2 h after Pi goes idle; stops before the refreshes would cost more than one cache miss (writing the context again, less the cached read)");
+	assert.equal(keepWarmRule(120, false), "re-sends your last request with a one-token answer shortly before the cache expires, for up to 2 h after Pi goes idle; at most 10 refreshes (this model has no prices, so the cost of a miss is unknown)");
 	assert.equal(keepWarmRule(0, true), "off");
 	assert.deepEqual([0, 0.0031, 0.14, 2.0700069].map(formatUsd), ["$0", "$0.0031", "$0.14", "$2.07"]);
 });

@@ -283,7 +283,7 @@ test("/cache-keeper-refresh fetches again, keeps a value the user set, and a fai
 	const before = readFileSync(modelsPath, "utf8");
 	h.state.online = false;
 	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
-	assert.match(h.notices.at(-1)!, /could not fetch the model data from providers\.dev: offline\. Any data fetched before stays in use; \/cache-keeper-refresh tries again\./);
+	assert.match(h.notices.at(-1)!, /could not fetch the model data from providers\.dev: offline\. The data fetched before stays in use; \/cache-keeper-refresh tries again\./);
 	assert.equal(readFileSync(modelsPath, "utf8"), before);
 	// The saved data stays in use, and the footer says so right away, with its age.
 	assert.equal(h.statuses.get("cache-keeper"), "⚠ providers.dev refresh failed: data 1m old · short 5m ⚠ · long ? · sub or api $2/$10 per M · ⚠ login or API key unknown: shorter values");
@@ -296,11 +296,11 @@ test("/cache-keeper-refresh fetches again, keeps a value the user set, and a fai
 	h.notices.length = 0;
 	await h.commands.get("cache-keeper-refresh")!("now", h.ctx);
 	assert.equal(h.notices[0], '/cache-keeper-refresh takes no arguments, so "now" was ignored.');
-	assert.match(h.notices.at(-1)!, /^Model data from https:\/\/providers\.dev: nothing changed, .*models\.json already holds it\nThis model: /);
+	assert.match(h.notices.at(-1)!, /^Model data from https:\/\/providers\.dev: no model's values changed in .*models\.json\nThis model: /);
 	// A model providers.dev has no entry for is said in plain words.
 	h.select("provimux", "no-such-model");
 	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
-	assert.match(h.notices.at(-1)!, /\nThis model: providers\.dev has no entry for it, so Pi's own values stay in use$/);
+	assert.match(h.notices.at(-1)!, /\nThis model: no providers\.dev entry found for it, so Pi's own values stay in use$/);
 	// /cache-keeper: the line's label names providers.dev, once.
 	await h.commands.get("cache-keeper")!("", h.ctx);
 	assert.match(h.notices.at(-1)!, /\nmodel data from providers\.dev: none for this model, so Pi's own values are used \(checked \d+ s ago; \/cache-keeper-refresh fetches it again\)\n/);
@@ -456,6 +456,35 @@ test("what answered, named: in the footer where it is not what the values are fo
 	answered([{ provider: "evil\u001b[2J\nid", subscription: true }]);
 	assert.match(h.statuses.get("cache-keeper")!, /^⚠ answered by evil \[2J id \(login\) · /);
 	assert.doesNotMatch(await note(), /\u001b|\n/);
+	// The whole of /cache-keeper, for ids that match an entry once cleaned and ids that match none: as many lines as
+	// without a report, none with an unsafe character, and the model data line bounded.
+	answered([]);
+	const whole = async () => {
+		h.notices.length = 0;
+		await h.commands.get("cache-keeper")!("", h.ctx);
+		return h.notices.at(-1)!;
+	};
+	const lines = (await whole()).split("\n").length;
+	const combining = "\u0301".repeat(10_000);
+	for (const [provider, entry] of [
+		["\u202eanthropic\n", /the last answer came from anthropic \(API key\): anthropic\/claude-opus-5-5: /],
+		["\u001banthropic", /the last answer came from anthropic \(API key\): anthropic\/claude-opus-5-5: /],
+		[`anthropic${combining}`, /looked up as anthropic.{1,40}\/claude-opus-5-5: none for this model \(/],
+		["anth\u202eropic\u001b[2J", /the last answer came from anth ropic \[2J \(API key\), looked up as anth ropic \[2J\/claude-opus-5-5: none for this model \(/],
+	] as const) {
+		answered([{ provider, subscription: false }]);
+		const text = await whole();
+		const shown = text.split("\n");
+		assert.equal(shown.length, lines, JSON.stringify(provider).slice(0, 40));
+		for (const line of shown) assert.doesNotMatch(line, /[\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Zl}\p{Zp}]/u, JSON.stringify(provider).slice(0, 40));
+		const data = shown.find((line) => line.startsWith("model data from providers.dev: "))!;
+		assert.match(data, entry);
+		assert.ok(data.length < 1_000, `${data.length} code units`);
+		assert.doesNotMatch(h.statuses.get("cache-keeper")!, /[\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Zl}\p{Zp}]/u);
+	}
+	// An id that is not a string: the upstream is unreadable, so the answer's route is unknown and nothing is named.
+	answered([{ provider: { name: "anthropic" }, subscription: false }]);
+	assert.doesNotMatch(await whole(), /answered by|last answer/);
 });
 
 test("routes said while a refresh runs: what they add is fetched when it ends, once", async () => {
@@ -499,7 +528,7 @@ test("nothing is fetched on its own in PI_OFFLINE mode or without a UI, and mode
 	writeFileSync(modelsPath, commented);
 	const h = harness();
 	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
-	assert.match(h.notices.at(-1)!, /models\.json is not plain JSON .* so it is left as it is/);
+	assert.match(h.notices.at(-1)!, /^pi-cache-keeper fetched and saved the model data from providers\.dev but could not put it into .*models\.json: .*models\.json is not plain JSON .* so it is left as it is\. .*models\.json keeps the values it had; the footer and \/cache-keeper use the new data\. \/cache-keeper-refresh tries again\.$/);
 	assert.equal(readFileSync(modelsPath, "utf8"), commented);
 });
 

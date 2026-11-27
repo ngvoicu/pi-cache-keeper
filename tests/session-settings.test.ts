@@ -112,8 +112,8 @@ test("the menu opens on this session; values set there are saved in the session 
 			assert.equal(ownEntries(first).length, 1);
 			const status = await w.status();
 			assert.match(status, /\ncompact when full: at 80% \(this session\) of the window: 800k of 1000k tokens on anthropic\/claude-sonnet-4-6/);
-			assert.match(status, /\nkeep warm while you are away \(this session\): re-sends your last request just before the cache expires, up to 4 h after Pi goes idle/);
-			assert.match(status, /\ncompact before expiry: on, from 140k tokens of context: 20 s before the cache expires, while Pi is idle, it compacts from the still-warm cache, so your next message rewrites a summary, not the whole session\ncache retention: short: /, "a key it didn't set: unmarked");
+			assert.match(status, /\nkeep warm while you are away \(this session\): re-sends your last request with a one-token answer shortly before the cache expires, for up to 4 h after Pi goes idle/);
+			assert.match(status, /\ncompact before expiry: on, from 140k tokens of context: in the last 20 s before the cache expires, while Pi is idle and the cache can be read, it compacts from the still-warm cache, so your next message writes a summary and the recent messages again, not the whole session\ncache retention: short: /, "a key it didn't set: unmarked");
 			assert.equal(lineOf(status, "settings:"), OWN);
 			// The entry is never sent to the model.
 			assert.ok(!JSON.stringify(first.buildSessionProjection().messages).includes("keepWarmMinutes"));
@@ -218,8 +218,8 @@ test("the defaults are one step away in the menu: changed there, they are saved 
 		assert.equal(saved.compactBeforeExpiry, false);
 		assert.deepEqual(ownOf(w.manager()), { settings: { keepWarmMinutes: 240 } }, "the session's own value, saved when the menu closed");
 		const status = await w.status();
-		assert.match(status, /\nkeep warm while you are away \(this session\): re-sends your last request just before the cache expires, up to 4 h after Pi goes idle/, "its own value wins");
-		assert.match(status, /\ncompact before expiry: off: an idle session's cache just expires, and your next message writes the whole context again\ncache retention: short: /, "the changed default holds where it set nothing");
+		assert.match(status, /\nkeep warm while you are away \(this session\): re-sends your last request with a one-token answer shortly before the cache expires, for up to 4 h after Pi goes idle/, "its own value wins");
+		assert.match(status, /\ncompact before expiry: off: this extension does not compact an idle session before its cache expires\ncache retention: short: /, "the changed default holds where it set nothing");
 		assert.equal(lineOf(status, "settings:"), "settings: this session's own: keepWarmMinutes 4 h (default 1 h); every other follows the defaults · change them with /cache-keeper-settings");
 		// The menu opens on this session again, the default shown beside its own value.
 		menu = await w.menu();
@@ -271,10 +271,10 @@ test("outside the TUI, /cache-keeper-settings lists both layers", async () => {
 		await runner.getCommand("cache-keeper-settings").handler("", ctx);
 		const lines = notes.join("\n").split("\n");
 		assert.equal(lines[0], "pi-cache-keeper settings: the defaults for all sessions (cacheKeeper in ~/.pi/agent/settings.json), and over them this session's own values (saved in the session); /cache-keeper-settings in the TUI changes either");
-		assert.match(lines[1], /^compactAtPercent: 0 \[default\] · compactAtTokens: 400000 \[this session; default 0\] \(at the 400k-token cap you set on/);
+		assert.match(lines[1], /^compactAtPercent: 0 \[default\] · compactAtTokens: 400000 \[this session; default 0\] \(at the 400k-token cap from your settings on/);
 		assert.equal(lines[2], "compactBeforeExpiry: true [default] · minContextTokens: 140000 [default]");
-		assert.match(lines[3], /^keepWarmMinutes: 240 \[this session; default 120\] \(re-sends your last request just before the cache expires, up to 4 h after Pi goes idle/);
-		assert.equal(lines[4], `fallbackCompactionModel: "" [default] (off: when the cache can't be read, Pi's own compaction writes the summary on this session's model, at full price)`);
+		assert.match(lines[3], /^keepWarmMinutes: 240 \[this session; default 120\] \(re-sends your last request with a one-token answer shortly before the cache expires, for up to 4 h after Pi goes idle/);
+		assert.equal(lines[4], `fallbackCompactionModel: "" [default] (off: when the cache can't be read, Pi's own compaction writes the summary on this session's model)`);
 		assert.equal(lines[5], "cacheRetention: short (all sessions)");
 		assert.match(lines[6], /^modelData: false \(all sessions\) \(off\)$/);
 		assert.equal(lines[7], "This session's own: compactAtTokens 400k tokens (default off), keepWarmMinutes 4 h (default 2 h); every other setting follows the defaults.");
@@ -468,7 +468,7 @@ test("back to the defaults after another window turned compactBeforeExpiry off: 
 		{ persisted: true },
 	);
 	assert.deepEqual(result.thrown, []);
-	assert.equal(seen.status, "compact before expiry: off: an idle session's cache just expires, and your next message writes the whole context again");
+	assert.equal(seen.status, "compact before expiry: off: this extension does not compact an idle session before its cache expires");
 	assert.deepEqual(seen.compactions, [], "nothing compacted at 280 s");
 });
 
@@ -491,7 +491,7 @@ for (const kind of ["expiry", "full"] as const) {
 			{ persisted: true },
 		);
 		assert.deepEqual(result.thrown, []);
-		assert.equal(seen.status, kind === "expiry" ? "compact before expiry: off: an idle session's cache just expires, and your next message writes the whole context again" : "compact when full: off: Pi compacts only when the window is nearly full, often with too little room left to summarize from the cache");
+		assert.equal(seen.status, kind === "expiry" ? "compact before expiry: off: this extension does not compact an idle session before its cache expires" : "compact when full: off: this extension doesn't compact as the context fills; Pi's own compaction starts at its threshold (by default when the window is nearly full), often with too little room left to summarize from the cache");
 		assert.equal(seen.compactions, 0);
 	});
 }
@@ -508,20 +508,20 @@ test("/cache-keeper marks each value by where it comes from", async () => {
 			let status = await w.status();
 			// The session's own cap (off) and minimum (200k) decide nothing shown: the 90% and "off" are the defaults'.
 			assert.equal(lineOf(status, "compact when full"), "compact when full: at 90% of the window: 900k of 1000k tokens on anthropic/claude-sonnet-4-6, leaving 96k for the summary");
-			assert.equal(lineOf(status, "compact before expiry"), "compact before expiry: off: an idle session's cache just expires, and your next message writes the whole context again");
+			assert.equal(lineOf(status, "compact before expiry"), "compact before expiry: off: this extension does not compact an idle session before its cache expires");
 			assert.equal(lineOf(status, "settings:"), "settings: this session's own: compactAtTokens off (default off), minContextTokens 200k (default 140k); every other follows the defaults · change them with /cache-keeper-settings");
 			menu = await w.menu();
 			menu.set(EXPIRY, "on · this session");
 			menu.set("Or once it holds", "400k tokens · this session");
 			await menu.close();
 			status = await w.status();
-			assert.equal(lineOf(status, "compact when full"), "compact when full: at the 400k-token cap you set (this session) on anthropic/claude-sonnet-4-6, leaving 128k for the summary");
-			assert.equal(lineOf(status, "compact before expiry"), "compact before expiry: on (this session), from 200k tokens of context (this session): 20 s before the cache expires, while Pi is idle, it compacts from the still-warm cache, so your next message rewrites a summary, not the whole session");
+			assert.equal(lineOf(status, "compact when full"), "compact when full: at the 400k-token cap from your settings (this session) on anthropic/claude-sonnet-4-6, leaving 128k for the summary");
+			assert.equal(lineOf(status, "compact before expiry"), "compact before expiry: on (this session), from 200k tokens of context (this session): in the last 20 s before the cache expires, while Pi is idle and the cache can be read, it compacts from the still-warm cache, so your next message writes a summary and the recent messages again, not the whole session");
 			menu = await w.menu();
 			menu.set("Compact when the context is", "off · this session");
 			menu.set("Or once it holds", "off · this session");
 			await menu.close();
-			assert.equal(lineOf(await w.status(), "compact when full"), "compact when full: off (this session): Pi compacts only when the window is nearly full, often with too little room left to summarize from the cache");
+			assert.equal(lineOf(await w.status(), "compact when full"), "compact when full: off (this session): this extension doesn't compact as the context fills; Pi's own compaction starts at its threshold (by default when the window is nearly full), often with too little room left to summarize from the cache");
 		},
 		{ persisted: true },
 	);
@@ -585,7 +585,7 @@ for (const kind of ["expiry", "full"] as const) {
 		const seen = JSON.parse(child.stdout.trim().split("\n").at(-1) ?? "{}");
 		assert.equal(seen.savedDuringStartup, true, "saved during the startup read");
 		assert.equal(seen.thrown, 0);
-		assert.equal(seen.status, kind === "expiry" ? "compact before expiry: off: an idle session's cache just expires, and your next message writes the whole context again" : "compact when full: off: Pi compacts only when the window is nearly full, often with too little room left to summarize from the cache");
+		assert.equal(seen.status, kind === "expiry" ? "compact before expiry: off: this extension does not compact an idle session before its cache expires" : "compact when full: off: this extension doesn't compact as the context fills; Pi's own compaction starts at its threshold (by default when the window is nearly full), often with too little room left to summarize from the cache");
 		assert.equal(seen.calls, 0, "no compaction");
 	});
 }
@@ -625,7 +625,7 @@ test("a change of a default the session overrides does not try compacting when f
 	);
 	assert.deepEqual(result.thrown, []);
 	assert.deepEqual([seen.first, seen.unchanged, seen.changedDefault], [1, 1, 1]);
-	assert.match(seen.status, /^compact when full: at the 150k-token cap you set \(this session\) on /);
+	assert.match(seen.status, /^compact when full: at the 150k-token cap from your settings \(this session\) on /);
 	assert.equal(seen.changedOwn, 2, "the cap in effect changed: tried again");
 });
 
@@ -647,8 +647,8 @@ const fallbackModels = (w: Any) => {
 };
 // What /cache-keeper says of the picked model: the setting, the model, its window and price; no prediction (review 7).
 const DECIDED = "whether it writes a summary is decided at each compaction, from the part Pi cuts off";
-const GEMINI_LINE = `fallback compaction model (writes the summary when the cache can't be used): gemini-2.5-flash [google] · 1.05M window · $0.30 in, $2.50 out per M · ${DECIDED}`;
-const NOT_CACHED = "the fallback compaction model (below) writes the summary where it can, else Pi's own compaction at full price";
+const GEMINI_LINE = `fallback compaction model (asked to write the summary when the cache can't be used): gemini-2.5-flash [google] · 1.05M window · $0.30 in, $2.50 out per M · ${DECIDED}`;
+const NOT_CACHED = "the fallback compaction model (below) is asked to write the summary, else Pi's own compaction runs";
 
 // Design 0.10.0, test 7.
 test("the fallback compaction model: a session's own value wins over the default, its off wins over a default model, the default is read as saved now, and back to the defaults drops it", async () => {
@@ -666,16 +666,16 @@ test("the fallback compaction model: a session's own value wins over the default
 			assert.match(menu.text(), /\n→ When the cache can't be used, compact with +off · this session\n/);
 			await menu.close();
 			assert.deepEqual(ownOf(w.manager()), { settings: { fallbackCompactionModel: "" } });
-			assert.equal(lineOf(await w.status(), "fallback compaction model ("), "fallback compaction model (writes the summary when the cache can't be used): off (this session): when the cache can't be read, Pi's own compaction writes the summary on this session's model, at full price");
+			assert.equal(lineOf(await w.status(), "fallback compaction model ("), "fallback compaction model (asked to write the summary when the cache can't be used): off (this session): when the cache can't be read, Pi's own compaction writes the summary on this session's model");
 			// A default changed in another window: this session's off still wins.
 			saveConfig({ fallbackCompactionModel: "acme/tiny" });
-			assert.match(lineOf(await w.status(), "fallback compaction model (") ?? "", /^fallback compaction model \(writes the summary when the cache can't be used\): off \(this session\)/);
+			assert.match(lineOf(await w.status(), "fallback compaction model (") ?? "", /^fallback compaction model \(asked to write the summary when the cache can't be used\): off \(this session\)/);
 			assert.match(lineOf(await w.status(), "settings:") ?? "", /fallbackCompactionModel off \(default tiny \[acme\]\)/);
 			// Back to the defaults: the default as saved now.
 			menu = await w.menu();
 			menu.press("Back to the defaults");
 			await menu.close();
-			assert.equal(lineOf(await w.status(), "fallback compaction model ("), `fallback compaction model (writes the summary when the cache can't be used): tiny [acme] · 8k window · $0.05 in, $0.10 out per M · ${DECIDED}`);
+			assert.equal(lineOf(await w.status(), "fallback compaction model ("), `fallback compaction model (asked to write the summary when the cache can't be used): tiny [acme] · 8k window · $0.05 in, $0.10 out per M · ${DECIDED}`);
 			// A session's own model over the default, picked by typing.
 			menu = await w.menu();
 			menu.press(FALLBACK);
@@ -683,7 +683,7 @@ test("the fallback compaction model: a session's own value wins over the default
 			assert.match(menu.text(), /\n→ When the cache can't be used, compact with +gemini-2\.5-flash \[google\] · this session\n/);
 			await menu.close();
 			assert.deepEqual(ownOf(w.manager()), { settings: { fallbackCompactionModel: "google/gemini-2.5-flash" } });
-			assert.match(lineOf(await w.status(), "fallback compaction model (") ?? "", /^fallback compaction model \(writes the summary when the cache can't be used\): gemini-2\.5-flash \[google\] \(this session\) · 1\.05M window/);
+			assert.match(lineOf(await w.status(), "fallback compaction model (") ?? "", /^fallback compaction model \(asked to write the summary when the cache can't be used\): gemini-2\.5-flash \[google\] \(this session\) · 1\.05M window/);
 			// The list opens on the session's own pick, marked as Pi marks the current model; its first line drops it again.
 			menu = await w.menu();
 			menu.press(FALLBACK);
@@ -734,7 +734,7 @@ test("the fallback compaction model's row, its list, its /cache-keeper lines and
 		// is still warm: the cached path; a model switch makes it cold).
 		let status = await w.status();
 		assert.equal(lineOf(status, "fallback compaction model ("), GEMINI_LINE);
-		assert.match(lineOf(status, "next compaction:") ?? "", /^next compaction: from the cache, so it costs little;/);
+		assert.match(lineOf(status, "next compaction:") ?? "", /^next compaction: can read the cache now;/);
 		const session = w.runtime.session;
 		const original = session.model;
 		session.agent.state.model = { ...original, id: "claude-sonnet-4-5" };
@@ -743,11 +743,11 @@ test("the fallback compaction model's row, its list, its /cache-keeper lines and
 		saveConfig({ fallbackCompactionModel: "local/llama" });
 		status = await w.status();
 		assert.equal(lineOf(status, "next compaction:"), `next compaction: not from the cache, because the model changed since the last request; ${NOT_CACHED}`);
-		assert.equal(lineOf(status, "fallback compaction model ("), "fallback compaction model (writes the summary when the cache can't be used): llama [local] · window unknown · no price · can't be used: it declares no context window");
+		assert.equal(lineOf(status, "fallback compaction model ("), "fallback compaction model (asked to write the summary when the cache can't be used): llama [local] · window unknown · no price · can't be used: it declares no context window");
 		session.agent.state.model = original;
 		// A pick Pi can't use now is kept, and marked on the row and in /cache-keeper.
 		saveConfig({ fallbackCompactionModel: "google/gemini-9" });
-		assert.equal(lineOf(await w.status(), "fallback compaction model ("), "fallback compaction model (writes the summary when the cache can't be used): gemini-9 [google] · not available now: Pi no longer lists it");
+		assert.equal(lineOf(await w.status(), "fallback compaction model ("), "fallback compaction model (asked to write the summary when the cache can't be used): gemini-9 [google] · not available now: Pi no longer lists it");
 		menu = await w.menu();
 		assert.match(menu.text(), /\n {2}When the cache can't be used, compact with +gemini-9 \[google\] · not available now · default\n/);
 		await menu.close();
@@ -832,7 +832,7 @@ test("0.10.4: Provimux models in the list as Pi's /model picker shows them, at 8
 			w.runtime.services.resourceLoader.eventBus.emit("model-upstreams", PROVIMUX_ROUTES);
 			await w.answer();
 			// The current value and /cache-keeper: model-id [provider]; the Devin model's price is left out (its name says sub).
-			assert.equal(lineOf(await w.status(), "fallback compaction model ("), `fallback compaction model (writes the summary when the cache can't be used): devin/claude-opus-5-5 [provimux] · 1M window · ${DECIDED}`);
+			assert.equal(lineOf(await w.status(), "fallback compaction model ("), `fallback compaction model (asked to write the summary when the cache can't be used): devin/claude-opus-5-5 [provimux] · 1M window · ${DECIDED}`);
 			const menu = await w.menu();
 			assert.match(menu.text(), /\n {2}When the cache can't be used, compact with +devin\/claude-opus-5-5 \[provimux\] · default\n/);
 			menu.press(FALLBACK);
@@ -884,7 +884,7 @@ test("0.10.4: Provimux models in the list as Pi's /model picker shows them, at 8
 			await menu.close();
 			assert.deepEqual(ownOf(w.manager()), { settings: { fallbackCompactionModel: "provimux/anthropic/claude-opus-5.5" } });
 			// Both agree it is an API key: the price stays.
-			assert.equal(lineOf(await w.status(), "fallback compaction model ("), `fallback compaction model (writes the summary when the cache can't be used): anthropic/claude-opus-5.5 [provimux] (this session) · 1M window · $5.00 in, $25.00 out per M · ${DECIDED}`);
+			assert.equal(lineOf(await w.status(), "fallback compaction model ("), `fallback compaction model (asked to write the summary when the cache can't be used): anthropic/claude-opus-5.5 [provimux] (this session) · 1M window · $5.00 in, $25.00 out per M · ${DECIDED}`);
 		},
 		{ persisted: true },
 	);

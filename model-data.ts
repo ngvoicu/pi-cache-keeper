@@ -644,11 +644,60 @@ export async function fetchDataset(providerIds: string[], saved: DataStore, fetc
 }
 
 
+/** The most grapheme clusters a reported id keeps: what a terminal shows of it. */
+export const REPORTED_ID_CLUSTERS = 64;
+/** The most code points one cluster of a reported id keeps (a base character and a few marks). */
+const REPORTED_ID_CLUSTER_POINTS = 4;
+/** A hard cap in UTF-16 code units, whatever the clusters are made of. */
+export const REPORTED_ID_CODE_UNITS = 256;
+const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/**
+ * An id a proxy reported (an upstream's provider or model), cleaned once, where the report is read, so that no later use
+ * can print it raw: control and format characters (an escape sequence's ESC, a line break, a bidi override) and other
+ * blanks become one space, the ends are trimmed, each grapheme cluster keeps at most a few code points, and the id at most
+ * {@link REPORTED_ID_CLUSTERS} clusters and {@link REPORTED_ID_CODE_UNITS} code units (cut at its end with "…").
+ * Undefined for what is not a string, or nothing once cleaned: that upstream can't be read.
+ */
+export function cleanReportedId(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	// A string far beyond the caps is looked at only as far as they reach.
+	const limit = REPORTED_ID_CODE_UNITS * REPORTED_ID_CLUSTER_POINTS * 2;
+	const plain = value
+		.slice(0, limit)
+		.replace(/[\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Zl}\p{Zp}\s]+/gu, " ")
+		.trim();
+	const kept: string[] = [];
+	let units = 0;
+	let cut = value.length > limit;
+	for (const { segment } of graphemes.segment(plain)) {
+		const cluster = Array.from(segment).slice(0, REPORTED_ID_CLUSTER_POINTS).join("");
+		if (kept.length >= REPORTED_ID_CLUSTERS || units + cluster.length > REPORTED_ID_CODE_UNITS) {
+			cut = true;
+			break;
+		}
+		kept.push(cluster);
+		units += cluster.length;
+	}
+	// Room for the "…": one cluster and one code unit.
+	if (cut) {
+		while (kept.length > 0 && (kept.length > REPORTED_ID_CLUSTERS - 1 || units + 1 > REPORTED_ID_CODE_UNITS)) units -= (kept.pop() as string).length;
+	}
+	const out = kept.join("").trim();
+	if (!out) return undefined;
+	return cut ? `${out}…` : out;
+}
+
 const parseUpstream = (value: unknown): Upstream | undefined => {
-	if (!isPlainObject(value) || typeof value.provider !== "string" || !value.provider) return undefined;
+	if (!isPlainObject(value)) return undefined;
+	const provider = cleanReportedId(value.provider);
+	if (!provider) return undefined;
+	// A model id given but unreadable makes the upstream unreadable too; none given, the upstream's own model.
+	const model = value.model === undefined || value.model === "" ? undefined : cleanReportedId(value.model);
+	if (value.model !== undefined && value.model !== "" && !model) return undefined;
 	return {
-		provider: value.provider,
-		...(typeof value.model === "string" && value.model ? { model: value.model } : {}),
+		provider,
+		...(model ? { model } : {}),
 		...(typeof value.subscription === "boolean" ? { subscription: value.subscription } : {}),
 	};
 };

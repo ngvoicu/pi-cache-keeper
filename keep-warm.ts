@@ -366,8 +366,8 @@ export function spendingText(budget: WarmBudget, spending: WarmSpending): string
 /** The rule as the settings and /cache-keeper say it. */
 export function keepWarmRule(minutes: number, priced: boolean): string {
 	if (minutes <= 0) return "off";
-	const cap = priced ? "stops once the refreshes have cost as much as one cache miss (writing the context again)" : `at most ${MAX_UNPRICED_REFRESHES} refreshes (this model has no prices, so the cost of a miss is unknown)`;
-	return `re-sends your last request just before the cache expires, up to ${keepWarmLabel(minutes)} after Pi goes idle; ${cap}`;
+	const cap = priced ? "stops before the refreshes would cost more than one cache miss (writing the context again, less the cached read)" : `at most ${MAX_UNPRICED_REFRESHES} refreshes (this model has no prices, so the cost of a miss is unknown)`;
+	return `re-sends your last request with a one-token answer shortly before the cache expires, for up to ${keepWarmLabel(minutes)} after Pi goes idle; ${cap}`;
 }
 
 /** "off", "30 min", "1 h", "1.5 h". */
