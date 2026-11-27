@@ -487,6 +487,82 @@ test("what answered, named: in the footer where it is not what the values are fo
 	assert.doesNotMatch(await whole(), /answered by|last answer/);
 });
 
+test("routes saved by 0.10.7 with hostile ids: loaded through the report parser, so /cache-keeper and the footer print none raw", async () => {
+	// The reviewer's seeded store (a providers.dev entry under the raw id too, so a raw lookup would find it), then the
+	// store 0.10.7's own code wrote for hostile routes (tests/fixtures/store-0.10.7-hostile-ids.json).
+	const dirty = "devin\u001b[0m\nnext line\u202e" + "\u0301".repeat(10_000);
+	const legacy = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "fixtures", "store-0.10.7-hostile-ids.json"), "utf8"));
+	const stores = [
+		{
+			version: 1,
+			checkedAt: Date.now(),
+			providers: { [dirty]: { "matched-model": { short: 300 } } },
+			upstreams: { provimux: { "claude-opus-5-5": { upstreams: [{ provider: dirty, model: "matched-model", subscription: true }] } } },
+			written: {},
+		},
+		{ ...legacy, checkedAt: Date.now() },
+	];
+	const UNSAFE = /[\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Zl}\p{Zp}]/u;
+	for (const store of stores) {
+		writeFileSync(modelsPath, "{}");
+		writeFileSync(storePath, JSON.stringify(store));
+		const h = harness();
+		for (const id of Object.keys(store.upstreams.provimux).filter((id) => catalog.some((m) => m.provider === "provimux" && m.id === id))) {
+			h.select("provimux", id);
+			h.notices.length = 0;
+			await h.commands.get("cache-keeper")!("", h.ctx);
+			const text = h.notices.at(-1)!;
+			assert.ok(!text.includes(dirty) && !text.includes("\nnext line"), id);
+			for (const line of text.split("\n")) assert.doesNotMatch(line, UNSAFE, id);
+			const data = text.split("\n").find((line) => line.startsWith("model data from providers.dev: "))!;
+			assert.ok(data.length < 1_000, `${id}: ${data.length} code units`);
+			assert.doesNotMatch(h.statuses.get("cache-keeper") ?? "", UNSAFE, id);
+		}
+		assert.equal(h.requests.length, 0);
+	}
+});
+
+test("a refresh that wrote models.json but did not get Pi to load it says so, and how far it got", async () => {
+	// Pi's reload of its models fails after models.json was written: the file has the new values, Pi has not loaded them.
+	rmSync(storePath, { force: true });
+	writeFileSync(modelsPath, "{}");
+	let h = harness();
+	h.emit("model-upstreams", SURE_ROUTES);
+	const reload = h.ctx.modelRegistry.refresh;
+	h.ctx.modelRegistry.refresh = async () => {
+		throw new Error("fixture registry reload failed");
+	};
+	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
+	assert.notEqual(readFileSync(modelsPath, "utf8"), "{}");
+	assert.match(
+		h.notices.at(-1)!,
+		/^pi-cache-keeper wrote the new model data into .*models\.json, but Pi has not loaded it: fixture registry reload failed\. Pi uses the new values when it next reloads its models \(at the latest at its next start\); the footer and \/cache-keeper use the new data now\.$/,
+	);
+	// Why the notice does not say "/cache-keeper-refresh tries again": the file already holds the values, so a refresh
+	// finds nothing to change and asks Pi for no reload. Pi's next reload of its models (a start) takes them up.
+	h.ctx.modelRegistry.refresh = reload;
+	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
+	assert.match(h.notices.at(-1)!, /no model's values changed/);
+	assert.notEqual(h.model()!.contextWindow, 922_000);
+	h.reload();
+	assert.equal(h.ctx.modelRegistry.find("provimux", "gpt-6.1-sol")!.contextWindow, 922_000);
+
+	// Pi loaded them, and selecting the model in use again failed.
+	rmSync(storePath, { force: true });
+	writeFileSync(modelsPath, "{}");
+	h = harness();
+	h.emit("model-upstreams", SURE_ROUTES);
+	h.ctx.modelRegistry.find = () => {
+		throw new Error("fixture select failed");
+	};
+	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
+	assert.deepEqual(h.refreshed.length, 1);
+	assert.match(
+		h.notices.at(-1)!,
+		/^pi-cache-keeper wrote the new model data into .*models\.json and Pi loaded it, but selecting the model in use again failed: fixture select failed\. It takes the new values when you select it again, or at Pi's next start; /,
+	);
+});
+
 test("routes said while a refresh runs: what they add is fetched when it ends, once", async () => {
 	rmSync(storePath);
 	writeFileSync(modelsPath, "{}");

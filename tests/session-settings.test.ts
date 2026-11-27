@@ -113,7 +113,7 @@ test("the menu opens on this session; values set there are saved in the session 
 			const status = await w.status();
 			assert.match(status, /\ncompact when full: at 80% \(this session\) of the window: 800k of 1000k tokens on anthropic\/claude-sonnet-4-6/);
 			assert.match(status, /\nkeep warm while you are away \(this session\): re-sends your last request with a one-token answer shortly before the cache expires, for up to 4 h after Pi goes idle/);
-			assert.match(status, /\ncompact before expiry: on, from 140k tokens of context: in the last 20 s before the cache expires, while Pi is idle and the cache can be read, it compacts from the still-warm cache, so your next message writes a summary and the recent messages again, not the whole session\ncache retention: short: /, "a key it didn't set: unmarked");
+			assert.match(status, /\ncompact before expiry: on, from 140k tokens of context: in the last 20 s before the cache expires, while Pi is idle with no message queued and the cache can be read, it starts a compaction from the still-warm cache; when that succeeds, your next message writes a summary and the recent messages again, not the whole session\ncache retention: short: /, "a key it didn't set: unmarked");
 			assert.equal(lineOf(status, "settings:"), OWN);
 			// The entry is never sent to the model.
 			assert.ok(!JSON.stringify(first.buildSessionProjection().messages).includes("keepWarmMinutes"));
@@ -491,7 +491,7 @@ for (const kind of ["expiry", "full"] as const) {
 			{ persisted: true },
 		);
 		assert.deepEqual(result.thrown, []);
-		assert.equal(seen.status, kind === "expiry" ? "compact before expiry: off: this extension does not compact an idle session before its cache expires" : "compact when full: off: this extension doesn't compact as the context fills; Pi's own compaction starts at its threshold (by default when the window is nearly full), often with too little room left to summarize from the cache");
+		assert.equal(seen.status, kind === "expiry" ? "compact before expiry: off: this extension does not compact an idle session before its cache expires" : "compact when full: off: this extension doesn't compact as the context fills; Pi's own automatic compaction, where it is on in Pi's settings, starts at its threshold (by default when the window is nearly full), often with too little room left to summarize from the cache");
 		assert.equal(seen.compactions, 0);
 	});
 }
@@ -516,12 +516,12 @@ test("/cache-keeper marks each value by where it comes from", async () => {
 			await menu.close();
 			status = await w.status();
 			assert.equal(lineOf(status, "compact when full"), "compact when full: at the 400k-token cap from your settings (this session) on anthropic/claude-sonnet-4-6, leaving 128k for the summary");
-			assert.equal(lineOf(status, "compact before expiry"), "compact before expiry: on (this session), from 200k tokens of context (this session): in the last 20 s before the cache expires, while Pi is idle and the cache can be read, it compacts from the still-warm cache, so your next message writes a summary and the recent messages again, not the whole session");
+			assert.equal(lineOf(status, "compact before expiry"), "compact before expiry: on (this session), from 200k tokens of context (this session): in the last 20 s before the cache expires, while Pi is idle with no message queued and the cache can be read, it starts a compaction from the still-warm cache; when that succeeds, your next message writes a summary and the recent messages again, not the whole session");
 			menu = await w.menu();
 			menu.set("Compact when the context is", "off · this session");
 			menu.set("Or once it holds", "off · this session");
 			await menu.close();
-			assert.equal(lineOf(await w.status(), "compact when full"), "compact when full: off (this session): this extension doesn't compact as the context fills; Pi's own compaction starts at its threshold (by default when the window is nearly full), often with too little room left to summarize from the cache");
+			assert.equal(lineOf(await w.status(), "compact when full"), "compact when full: off (this session): this extension doesn't compact as the context fills; Pi's own automatic compaction, where it is on in Pi's settings, starts at its threshold (by default when the window is nearly full), often with too little room left to summarize from the cache");
 		},
 		{ persisted: true },
 	);
@@ -585,7 +585,7 @@ for (const kind of ["expiry", "full"] as const) {
 		const seen = JSON.parse(child.stdout.trim().split("\n").at(-1) ?? "{}");
 		assert.equal(seen.savedDuringStartup, true, "saved during the startup read");
 		assert.equal(seen.thrown, 0);
-		assert.equal(seen.status, kind === "expiry" ? "compact before expiry: off: this extension does not compact an idle session before its cache expires" : "compact when full: off: this extension doesn't compact as the context fills; Pi's own compaction starts at its threshold (by default when the window is nearly full), often with too little room left to summarize from the cache");
+		assert.equal(seen.status, kind === "expiry" ? "compact before expiry: off: this extension does not compact an idle session before its cache expires" : "compact when full: off: this extension doesn't compact as the context fills; Pi's own automatic compaction, where it is on in Pi's settings, starts at its threshold (by default when the window is nearly full), often with too little room left to summarize from the cache");
 		assert.equal(seen.calls, 0, "no compaction");
 	});
 }
@@ -734,7 +734,7 @@ test("the fallback compaction model's row, its list, its /cache-keeper lines and
 		// is still warm: the cached path; a model switch makes it cold).
 		let status = await w.status();
 		assert.equal(lineOf(status, "fallback compaction model ("), GEMINI_LINE);
-		assert.match(lineOf(status, "next compaction:") ?? "", /^next compaction: can read the cache now;/);
+		assert.match(lineOf(status, "next compaction:") ?? "", /^next compaction: from the cache, as far as can be told now;/);
 		const session = w.runtime.session;
 		const original = session.model;
 		session.agent.state.model = { ...original, id: "claude-sonnet-4-5" };

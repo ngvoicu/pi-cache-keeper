@@ -465,7 +465,7 @@ test("R1: /cache-keeper says why a period is left to Pi's own warming", async (t
 	fresh();
 	let h = harness({ lifetime: 30, cost: WITH_WRITE });
 	h.emit("agent_settled");
-	assert.match(await h.command("cache-keeper"), /keep warm while you are away: re-sends your last request with a one-token answer shortly before the cache expires, for up to 2 h after Pi goes idle; stops before the refreshes would cost more than one cache miss \(writing the context again, less the cached read\); this session is left to Pi's own warming: the cache lifetime \(30 s\) is under a minute/);
+	assert.match(await h.command("cache-keeper"), /keep warm while you are away: re-sends your last request with a one-token answer shortly before the cache expires, for up to 2 h after Pi goes idle; sends a refresh only while the total so far plus its expected cost stays within one cache miss \(writing the context again, less the cached read\), so the last one can take the total past it; this session is left to Pi's own warming: the cache lifetime \(30 s\) is under a minute/);
 	h = harness({ lifetime: 300, bridge: true, cost: WITH_WRITE });
 	h.emit("agent_settled");
 	assert.match(await h.command("cache-keeper"), /left to Pi's own warming: claude-bridge requests cannot be re-sent/);
@@ -838,7 +838,7 @@ test("R4: each end reason is recorded once, with the amounts, in the log, the fo
 	let r = await ended({ lifetime: 300, cost: WITH_WRITE }, undefined, 1440);
 	assert.equal(r.stop.stop, "budget");
 	assert.equal(r.footer, `cache warm · 0:24 left · keep-warm ended (budget reached): $1.98 spent, a miss costs $2.07${values("5m")}`);
-	assert.match(r.shown, /keep warm while you are away: re-sends your last request with a one-token answer shortly before the cache expires, for up to 24 h after Pi goes idle; stops before the refreshes would cost more than one cache miss \(writing the context again, less the cached read\); keep-warm ended \(budget reached\): \$1\.98 spent, a miss costs \$2\.07, until your next message \(refreshing has cost/);
+	assert.match(r.shown, /keep warm while you are away: re-sends your last request with a one-token answer shortly before the cache expires, for up to 24 h after Pi goes idle; sends a refresh only while the total so far plus its expected cost stays within one cache miss \(writing the context again, less the cached read\), so the last one can take the total past it; keep-warm ended \(budget reached\): \$1\.98 spent, a miss costs \$2\.07, until your next message \(refreshing has cost/);
 	r = await ended({ lifetime: 300 }, undefined, 1440);
 	assert.equal(r.footer, `cache warm · 5m left · keep-warm ended (budget reached): 10 of 10 refreshes${values("5m", "api, price unknown")}`, "ended when the 10th refresh settled");
 
@@ -955,8 +955,8 @@ test("R6: what the settings and /cache-keeper say", async (t) => {
 	fresh();
 	const h = harness({ lifetime: 300, cost: WITH_WRITE });
 	h.emit("agent_settled");
-	assert.match(await h.command("cache-keeper-settings"), /\nkeepWarmMinutes: 120 \[default\] \(re-sends your last request with a one-token answer shortly before the cache expires, for up to 2 h after Pi goes idle; stops before the refreshes would cost more than one cache miss \(writing the context again, less the cached read\); so far \$0 spent, a miss costs \$2\.07\)\n/);
-	assert.match(await h.command("cache-keeper"), /\nkeep warm while you are away: re-sends your last request with a one-token answer shortly before the cache expires, for up to 2 h after Pi goes idle; stops before the refreshes would cost more than one cache miss \(writing the context again, less the cached read\); so far \$0 spent/);
+	assert.match(await h.command("cache-keeper-settings"), /\nkeepWarmMinutes: 120 \[default\] \(re-sends your last request with a one-token answer shortly before the cache expires, for up to 2 h after Pi goes idle; sends a refresh only while the total so far plus its expected cost stays within one cache miss \(writing the context again, less the cached read\), so the last one can take the total past it; so far \$0 spent, a miss costs \$2\.07\)\n/);
+	assert.match(await h.command("cache-keeper"), /\nkeep warm while you are away: re-sends your last request with a one-token answer shortly before the cache expires, for up to 2 h after Pi goes idle; sends a refresh only while the total so far plus its expected cost stays within one cache miss \(writing the context again, less the cached read\), so the last one can take the total past it; so far \$0 spent/);
 	fresh({ keepWarmMinutes: 0 });
 	const off = harness({ lifetime: 300, cost: WITH_WRITE });
 	off.emit("agent_settled");
@@ -1920,7 +1920,7 @@ const FALLBACK_STATUS = "⚠ keep-warm: Pi's after 2 refreshes without a hit (/c
 const fallbackLineAt = (at: number, model = MODEL_KEY, kinds = "both missed the cache") =>
 	`two refreshes in a row without a hit for ${model} (the last at ${new Date(at).toTimeString().slice(0, 5)}): ${kinds}, so it is left to Pi's own warming; /cache-keeper-warm starts keeping it warm again`;
 const keepWarmLineOf = async (h: ReturnType<typeof harness>) => (await h.command("cache-keeper")).split("\n").find((l) => l.startsWith("keep warm while you are away:"));
-const RULE = "keep warm while you are away: re-sends your last request with a one-token answer shortly before the cache expires, for up to 2 h after Pi goes idle; stops before the refreshes would cost more than one cache miss (writing the context again, less the cached read)";
+const RULE = "keep warm while you are away: re-sends your last request with a one-token answer shortly before the cache expires, for up to 2 h after Pi goes idle; sends a refresh only while the total so far plus its expected cost stays within one cache miss (writing the context again, less the cached read), so the last one can take the total past it";
 // One idle period: Pi goes idle after a real answer, the extension decides, the refresh is due 25 s before expiry.
 async function nextPeriod(h: ReturnType<typeof harness>, first = false) {
 	if (!first) {
@@ -4798,4 +4798,39 @@ test("review 5: the same with the fallback compaction model on: Pi's own compact
 	const on = await unknownExpiryProbe({ fallbackCompactionModel: "scratch/target" });
 	assert.ok(!on.requests.includes("scratch"), `the picked model was asked: ${on.requests.join(", ")}`);
 	assert.deepEqual(on, UNKNOWN_EXPIRY_ON_090);
+});
+
+test("the budget as the code applies it: a refresh estimated within the miss can report more, and the line says what was spent", async (t) => {
+	// The reviewer's case: the gate lets one refresh go (its estimate fits within one miss), the provider reports it read
+	// nothing from the cache, and the total passes the miss. The rule says the last refresh can do that; the end says "more than".
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ modelData: false, compactBeforeExpiry: false });
+	const h = harness({ ui: true, lifetime: 300, cached: 120_000, cost: WITH_WRITE, respond: () => ({ usage: { input: 200_000 } }) });
+	h.emit("agent_settled");
+	await h.idle(280_000);
+	assert.equal(h.warms.length, 1);
+	const line = (await h.command("cache-keeper")).split("\n").find((l) => l.startsWith("keep warm while"))!;
+	assert.match(line, /sends a refresh only while the total so far plus its expected cost stays within one cache miss \(writing the context again, less the cached read\), so the last one can take the total past it/);
+	assert.match(line, /keep-warm ended \(budget reached\): \$0\.64 spent, a miss costs \$0\.41/);
+	assert.match(line, /refreshing has cost \$0\.64 since the last answer, more than the \$0\.41 one cache miss costs/);
+	assert.doesNotMatch(line, /as much as/);
+});
+
+test("with Pi's automatic compaction off, /cache-keeper says this extension's compactions don't run either, and none runs", async (t) => {
+	clock();
+	t.after(() => mock.timers.reset());
+	fresh({ modelData: false, keepWarmMinutes: 0, compactBeforeExpiry: true });
+	const h = harness({ ui: true, lifetime: 300, cached: 120_000, cost: WITH_WRITE });
+	const line = async (start: string) => (await h.command("cache-keeper")).split("\n").find((l) => l.startsWith(start))!;
+	h.emit("agent_settled");
+	// On: the promise, with its conditions.
+	assert.match(await line("compact before expiry"), /: in the last 20 s before the cache expires, while Pi is idle with no message queued and the cache can be read, it starts a compaction from the still-warm cache; when that succeeds, /);
+	writeFileSync(join(dir, "settings.json"), JSON.stringify({ ...JSON.parse(readFileSync(join(dir, "settings.json"), "utf8")), compaction: { enabled: false } }));
+	assert.match(await line("compact before expiry"), /^compact before expiry: on, but Pi's automatic compaction is off in its settings, so this extension does not compact before the cache expires either$/);
+	assert.doesNotMatch(await line("compact before expiry"), /starts a compaction/);
+	assert.match(await line("compact when full"), /; but Pi's automatic compaction is off in its settings, so this extension doesn't compact as the context fills either$/);
+	await h.idle(285_000);
+	assert.equal(h.state.compacts, 0);
+	assert.equal(traces().find((r) => r.event === "expiry")?.reason, "automatic compaction is off in Pi's settings");
 });

@@ -1,6 +1,8 @@
 // Renders each <figure> in figures.html to a 2x PNG next to it: node media/render-figures.mjs
 // Only some of them: node media/render-figures.mjs footer-states settings-menu
 // Needs Google Chrome (set CHROME for another path) and network access for the pi.dev fonts.
+// media/status-command.png is no longer drawn here or used by the README. It is kept for the README published with
+// 0.10.7, whose images npm shows from GitHub's main branch; it can go after the next release.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

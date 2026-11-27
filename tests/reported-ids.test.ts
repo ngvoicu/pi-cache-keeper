@@ -1,7 +1,8 @@
 // What a proxy reports is cleaned once, where the report is read: no later use (the footer, /cache-keeper's model data
 // line, the lookup against providers.dev's data) can print an id raw.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -12,6 +13,7 @@ import {
 	describeFound,
 	factsOf,
 	findFacts,
+	loadStore,
 	lookupsFor,
 	parseAnsweredEvent,
 	parseUpstreamsEvent,
@@ -111,4 +113,75 @@ test("in the footer, at every width from 1 to 200: no unsafe character, and no w
 			assert.ok(line.length <= 4 * Math.max(width, shortest) + 8, `${name} at ${width}: ${line.length} code units`);
 		}
 	}
+});
+
+test("a model id given empty, or empty once cleaned, makes the upstream unreadable; one not given is the upstream's own model", () => {
+	const answered = (upstream: unknown) => parseAnsweredEvent({ provider: "provimux", model: "claude-opus-5-5", upstreams: [upstream] })!.upstreams;
+	assert.deepEqual(answered({ provider: "devin", subscription: true }), [{ provider: "devin", subscription: true }]);
+	assert.deepEqual(answered({ provider: "devin", model: "", subscription: true }), []);
+	assert.deepEqual(answered({ provider: "devin", model: " \n\u202e ", subscription: true }), []);
+	assert.deepEqual(answered({ provider: "devin", model: null }), []);
+});
+
+// Routes saved by an earlier version, before reports were cleaned: they go through the same parser as a report.
+const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
+function withSavedStore<T>(write: (path: string) => void, read: () => T): T {
+	const dir = mkdtempSync(join(tmpdir(), "pck-store-"));
+	const before = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = dir;
+	try {
+		write(join(dir, "cache-keeper-models.json"));
+		return read();
+	} finally {
+		if (before === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = before;
+		rmSync(dir, { recursive: true, force: true });
+	}
+}
+
+test("a store written by 0.10.7 with hostile ids loads cleaned, exactly as the same routes said in a report", () => {
+	// tests/fixtures/store-0.10.7-hostile-ids.json: what 0.10.7's parseUpstreamsEvent and saveStore wrote for these routes
+	// (escape sequences, a newline, a bidi override, 10,000 combining marks, a 10,000-character id, an empty model id, which 0.10.7 saved as none given),
+	// with every character outside printable ASCII written as a \u escape: the same JSON value.
+	const fixture = join(FIXTURES, "store-0.10.7-hostile-ids.json");
+	const saved = JSON.parse(readFileSync(fixture, "utf8")) as { upstreams: { provimux: Record<string, unknown> } };
+	const loaded = withSavedStore((path) => copyFileSync(fixture, path), loadStore);
+	const routes = loaded.upstreams.provimux;
+	assert.deepEqual(routes, parseUpstreamsEvent({ provider: "provimux", models: saved.upstreams.provimux })!.models);
+	assert.deepEqual(Object.keys(routes), Object.keys(saved.upstreams.provimux));
+	for (const [id, route] of Object.entries(routes)) {
+		for (const upstream of [...route.upstreams, ...(route.fallbacks ?? [])]) {
+			for (const value of [upstream.provider, upstream.model ?? ""]) {
+				assert.doesNotMatch(value, UNSAFE, id);
+				assert.ok(clusters(value) <= REPORTED_ID_CLUSTERS && value.length <= REPORTED_ID_CODE_UNITS, `${id}: ${value.length} code units`);
+			}
+		}
+	}
+	assert.deepEqual(routes["gpt-6.1-sol"].upstreams, [{ provider: "openai-codex", model: "gpt-6.1-sol", subscription: true }]);
+	assert.deepEqual(routes["claude-opus-5-5"].fallbacks, [{ provider: "anthropic fake line", subscription: false }]);
+	// 0.10.7 read an empty model id as none given and saved the upstream without one: the upstream's own model.
+	assert.deepEqual(routes["devin/swe-2"].upstreams, [{ provider: "devin", subscription: true }]);
+});
+
+test("a saved route the parser refuses is not loaded; the rest of the store is", () => {
+	const loaded = withSavedStore(
+		(path) =>
+			writeFileSync(
+				path,
+				JSON.stringify({
+					version: 1,
+					providers: { anthropic: { "claude-opus-5-5": { short: 300 } } },
+					upstreams: {
+						provimux: { kept: { upstreams: [{ provider: "anthropic\u001b[0m" }] }, "not a list": { upstreams: "anthropic" }, number: 5, "no upstreams": {} },
+						"": { m: { upstreams: [{ provider: "anthropic" }] } },
+						"all refused": { m: { upstreams: null } },
+						"not an object": "provimux",
+					},
+					written: {},
+				}),
+			),
+		loadStore,
+	);
+	assert.deepEqual(loaded.upstreams, { provimux: { kept: { upstreams: [{ provider: "anthropic [0m" }] } } });
+	assert.deepEqual(Object.keys(loaded.providers), ["anthropic"]);
 });

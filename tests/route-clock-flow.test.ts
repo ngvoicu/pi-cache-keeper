@@ -493,7 +493,7 @@ for (const variant of ["reads everything", "reads 570,000 and writes 30,000 into
 		assert.deepEqual(s.wires.map((w) => [w.kind, w.at]), [["refresh", 3420]], "no summary at 3,700 s or 7,000 s, no refresh at 6,840 s");
 		assert.deepEqual(s.compactions, []);
 		assert.match(s.statuses.at(-1) ?? "", /^cache cold · next message full price · keep-warm: Pi's \(/, "cold, and the period is Pi's");
-		assert.match(await s.command(), /\ncache: expiry not known \(lifetime 5 min, the shortest lifetime read since\): the route changed \(the proxy reported another account or key answering, so the next request may not read this cache\); this extension counts it as expired and sends no refresh or summary on it\n/);
+		assert.match(await s.command(), /\ncache: expiry not known \(lifetime 5 min, the shortest lifetime read since\): the route changed \(the proxy's report of what answered differs from its report for the answer that wrote this cache, so the next request may not read this cache\); this extension counts it as expired and sends no refresh or summary on it\n/);
 	});
 }
 
@@ -521,7 +521,7 @@ test("another route with the same hour announced at 100 s, the first again at 13
 	// The two reports, whole, as the proxy sent them.
 	assert.match(stops[0].reason, /^the period's answer was served by \{.*"provider":"account-a","subscription":true\}\]\}, and a request of the model was served by \{.*"provider":"account-b","subscription":false\}\]\} since: a cache on one route says nothing about the other's$/);
 	assert.match(s.statuses.at(-1) ?? "", /^cache cold · next message full price · keep-warm: Pi's \(the route changed\)/);
-	assert.match(await s.command(), /\ncache: expiry not known \(lifetime 60 min, declared by the model\): the route changed \(the proxy reported another account or key answering, so the next request may not read this cache\); this extension counts it as expired and sends no refresh or summary on it\n/);
+	assert.match(await s.command(), /\ncache: expiry not known \(lifetime 60 min, declared by the model\): the route changed \(the proxy's report of what answered differs from its report for the answer that wrote this cache, so the next request may not read this cache\); this extension counts it as expired and sends no refresh or summary on it\n/);
 });
 
 // ------------------------------------------------------------------------------- the third review's finding 3: Pi's question
@@ -673,7 +673,7 @@ test("a reported switch from a subscription to an API key of one upstream is a c
 	assert.equal(s.decide(), undefined, "the period is Pi's");
 	// Nothing is known of the key's cache: cold, whatever Pi sent (it read "49m left by Pi's own warming").
 	assert.match(s.statuses.at(-1) ?? "", /^cache cold · /);
-	assert.match(await s.command(), /\ncache: expiry not known \(lifetime 60 min, [^)]*\): the route changed \(the proxy reported another account or key answering, so the next request may not read this cache\); this extension counts it as expired and sends no refresh or summary on it\n/);
+	assert.match(await s.command(), /\ncache: expiry not known \(lifetime 60 min, [^)]*\): the route changed \(the proxy's report of what answered differs from its report for the answer that wrote this cache, so the next request may not read this cache\); this extension counts it as expired and sends no refresh or summary on it\n/);
 	await s.until(3700);
 	assert.deepEqual(s.wires, [], "no refresh (on the third review one wrote 600,000 into the key's cache for $3.60)");
 });
@@ -765,7 +765,7 @@ test("after a reported change of route, neither the footer nor /cache-keeper cla
 	s.announce([KEY]);
 	await s.until(415);
 	assert.doesNotMatch(s.statuses.at(-1) ?? "", /cache warm/, "the footer claims no warm cache");
-	assert.match(await s.command(), /\ncache: expiry not known \(lifetime 5 min, [^)]*\): the route changed \(the proxy reported another account or key answering, so the next request may not read this cache\); this extension counts it as expired and sends no refresh or summary on it\n/);
+	assert.match(await s.command(), /\ncache: expiry not known \(lifetime 5 min, [^)]*\): the route changed \(the proxy's report of what answered differs from its report for the answer that wrote this cache, so the next request may not read this cache\); this extension counts it as expired and sends no refresh or summary on it\n/);
 	assert.deepEqual(s.wires, []);
 });
 
@@ -1054,7 +1054,7 @@ test("an unnamed answer during a period is a change of route: the helper's answe
 	s.announce([]);
 	await s.until(615);
 	assert.match(s.statuses.at(-1) ?? "", /^cache cold/, "nothing says which cache is warm");
-	assert.match(await s.command(), /: the route changed \(the proxy reported another account or key answering, so the next request may not read this cache\); this extension counts it as expired/);
+	assert.match(await s.command(), /: the route changed \(the proxy's report of what answered differs from its report for the answer that wrote this cache, so the next request may not read this cache\); this extension counts it as expired/);
 	await s.until(3500);
 	assert.deepEqual(s.wires.filter((w) => w.kind === "refresh"), [], "no refresh on a guessed route");
 	// Warming ended once, and the period is Pi's (what the clock read first against it is logged as the reason).

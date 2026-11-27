@@ -548,7 +548,7 @@ export function loadStore(): DataStore {
 			datasetVersion: typeof parsed.datasetVersion === "string" ? parsed.datasetVersion : undefined,
 			reading: positive(parsed.reading),
 			providers: part("providers") as DataStore["providers"],
-			upstreams: part("upstreams") as DataStore["upstreams"],
+			upstreams: loadRoutes(parsed.upstreams),
 			written: part("written") as DataStore["written"],
 		};
 	} catch {
@@ -692,9 +692,10 @@ const parseUpstream = (value: unknown): Upstream | undefined => {
 	if (!isPlainObject(value)) return undefined;
 	const provider = cleanReportedId(value.provider);
 	if (!provider) return undefined;
-	// A model id given but unreadable makes the upstream unreadable too; none given, the upstream's own model.
-	const model = value.model === undefined || value.model === "" ? undefined : cleanReportedId(value.model);
-	if (value.model !== undefined && value.model !== "" && !model) return undefined;
+	// A model id given but unreadable (an empty one included) makes the upstream unreadable too; none given, the
+	// upstream's own model.
+	const model = value.model === undefined ? undefined : cleanReportedId(value.model);
+	if (value.model !== undefined && !model) return undefined;
 	return {
 		provider,
 		...(model ? { model } : {}),
@@ -727,6 +728,21 @@ export function parseUpstreamsEvent(value: unknown): { provider: string; models:
 		if (parsed) models[id] = parsed;
 	}
 	return { provider: value.provider, models };
+}
+
+/**
+ * The routes saved in cache-keeper-models.json, by this version or an earlier one (0.10.7 saved them as the proxy said
+ * them, uncleaned): each pi provider's routes go through the same parser as an UPSTREAMS_EVENT, so what is loaded is
+ * cleaned the same way, and a route the parser refuses is not loaded.
+ */
+function loadRoutes(value: unknown): DataStore["upstreams"] {
+	const routes: DataStore["upstreams"] = {};
+	if (!isPlainObject(value)) return routes;
+	for (const [provider, models] of Object.entries(value)) {
+		const parsed = parseUpstreamsEvent({ provider, models });
+		if (parsed && Object.keys(parsed.models).length > 0) routes[provider] = parsed.models;
+	}
+	return routes;
 }
 
 /**
