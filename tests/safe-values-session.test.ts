@@ -60,7 +60,7 @@ test("a session's own compactAtPercent is taken of the window providers.dev's sa
 			const menu = await w.menu();
 			menu.set("Compact when the context is", "80% · this session");
 			await menu.close();
-			assert.match(lineOf(await w.status(), "when full") ?? "", /^when full: at 80% \(this session\): 320k of 400k on anthropic\/claude-sonnet-4-6/);
+			assert.match(lineOf(await w.status(), "compact when full") ?? "", /^compact when full: at 80% \(this session\) of the window: 320k of 400k tokens on anthropic\/claude-sonnet-4-6/);
 
 			// The next dataset: the only source of the window is pi's catalog. It is not written; the extension's own
 			// earlier value is taken out, so Pi's window is back, and the session's 80% is taken of it.
@@ -72,7 +72,7 @@ test("a session's own compactAtPercent is taken of the window providers.dev's sa
 			const store = JSON.parse(readFileSync(join(dir, "cache-keeper-models.json"), "utf8"));
 			assert.equal(store.reading, 2);
 			assert.deepEqual(store.providers.anthropic[MODEL], {}, "nothing taken from a pi.dev value");
-			assert.match(lineOf(await w.status(), "when full") ?? "", /^when full: at 80% \(this session\): 800k of 1000k on anthropic\/claude-sonnet-4-6/);
+			assert.match(lineOf(await w.status(), "compact when full") ?? "", /^compact when full: at 80% \(this session\) of the window: 800k of 1000k tokens on anthropic\/claude-sonnet-4-6/);
 		},
 		{ persisted: true },
 	);

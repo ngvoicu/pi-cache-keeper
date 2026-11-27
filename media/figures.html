@@ -166,28 +166,6 @@ cache warm · 59m left · long 1h<span class="dim"> (in use)</span> · <span cla
 <span class="dim"> log: ~/.pi/agent/cache-keeper.jsonl</span></pre></div>
 </figure>
 
-<figure id="status-command">
-<div class="term"><div class="bar"><i></i><i></i><i></i><span>pi · /cache-keeper</span></div>
-<pre> <span class="dim">pi-cache-keeper · anthropic/claude-opus-5-5</span>
- <span class="dim">cache: 59m left (lifetime 60 min, declared by the model)</span>
- <span class="dim">next compaction: cached path; last request 4 s ago with 185 messages, 1 since. The request prefix is checked when it</span>
- <span class="dim">runs.</span>
- <span class="dim">when full: at 90%: 900k of 1000k on anthropic/claude-opus-5-5, leaving 96k for the summary</span>
- <span class="dim">keep warm (this session): up to 4 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; so</span>
- <span class="dim">far $0 spent, a miss costs $2.36</span>
- <span class="dim">before expiry: on, from 140k tokens of context · retention long</span>
- <span class="dim">model data: claude-subscription/claude-opus-5-5: window 1,000,000, short cache 1 h, long cache 1 h</span>
- <span class="dim">(https://providers.dev, checked 180 min ago; /cache-keeper-refresh fetches it again)</span>
- <span class="dim">settings: this session's own: keepWarmMinutes 4 h (default 2 h); every other follows the defaults · /cache-keeper-settings</span>
- <span class="dim">log: ~/.pi/agent/cache-keeper.jsonl</span>
- 
- <span class="dim">This session:</span>
- <span class="dim">15:05:52 compact when full: cached, 99% of 904k from cache, 5k out, 41.6s, summary 9840 chars</span>
- <span class="dim">         vs Pi's compaction: 75% less, $0.59 instead of ~$2.4 (it sends ~451k tokens, none from cache)</span>
- <span class="dim">15:06:34   saved, 903k tokens summarized</span>
- <span class="dim">16:36:52 kept the cache warm, idle 57 min: 99% of 411k from cache, 1 out, $0.21; $0.21 of $2.36 (one cache miss) spent</span></pre></div>
-</figure>
-
 <figure id="summary-boundary">
 <div class="paper">
 <div class="kicker">Where the summary stops</div>

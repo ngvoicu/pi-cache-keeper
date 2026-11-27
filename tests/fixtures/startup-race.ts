@@ -27,7 +27,7 @@ const result = await h.inWindow(
 		seen.savedDuringStartup = saved;
 		await w.answer();
 		if (kind === "expiry") await w.ticks(282);
-		seen.status = h.lineOf(await w.status(), kind === "expiry" ? "before expiry" : "when full");
+		seen.status = h.lineOf(await w.status(), kind === "expiry" ? "compact before expiry" : "compact when full");
 		seen.calls = w.compactAt.length;
 	},
 	{ persisted: true },

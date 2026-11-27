@@ -465,7 +465,7 @@ test("R1: /cache-keeper says why a period is left to Pi's own warming", async (t
 	fresh();
 	let h = harness({ lifetime: 30, cost: WITH_WRITE });
 	h.emit("agent_settled");
-	assert.match(await h.command("cache-keeper"), /keep warm: up to 2 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; this session is left to Pi's own warming: the cache lifetime \(30 s\) is under a minute/);
+	assert.match(await h.command("cache-keeper"), /keep warm while you are away: re-sends your last request just before the cache expires, up to 2 h after Pi goes idle; stops once the refreshes have cost as much as one cache miss \(writing the context again\); this session is left to Pi's own warming: the cache lifetime \(30 s\) is under a minute/);
 	h = harness({ lifetime: 300, bridge: true, cost: WITH_WRITE });
 	h.emit("agent_settled");
 	assert.match(await h.command("cache-keeper"), /left to Pi's own warming: claude-bridge requests cannot be re-sent/);
@@ -838,7 +838,7 @@ test("R4: each end reason is recorded once, with the amounts, in the log, the fo
 	let r = await ended({ lifetime: 300, cost: WITH_WRITE }, undefined, 1440);
 	assert.equal(r.stop.stop, "budget");
 	assert.equal(r.footer, `cache warm · 0:24 left · keep-warm ended (budget reached): $1.98 spent, a miss costs $2.07${values("5m")}`);
-	assert.match(r.shown, /keep warm: up to 24 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; keep-warm ended \(budget reached\): \$1\.98 spent, a miss costs \$2\.07, until your next message \(refreshing has cost/);
+	assert.match(r.shown, /keep warm while you are away: re-sends your last request just before the cache expires, up to 24 h after Pi goes idle; stops once the refreshes have cost as much as one cache miss \(writing the context again\); keep-warm ended \(budget reached\): \$1\.98 spent, a miss costs \$2\.07, until your next message \(refreshing has cost/);
 	r = await ended({ lifetime: 300 }, undefined, 1440);
 	assert.equal(r.footer, `cache warm · 5m left · keep-warm ended (budget reached): 10 of 10 refreshes${values("5m", "api, price unknown")}`, "ended when the 10th refresh settled");
 
@@ -955,12 +955,12 @@ test("R6: what the settings and /cache-keeper say", async (t) => {
 	fresh();
 	const h = harness({ lifetime: 300, cost: WITH_WRITE });
 	h.emit("agent_settled");
-	assert.match(await h.command("cache-keeper-settings"), /\nkeepWarmMinutes: 120 \[default\] \(up to 2 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; so far \$0 spent, a miss costs \$2\.07\)\n/);
-	assert.match(await h.command("cache-keeper"), /\nkeep warm: up to 2 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; so far \$0 spent/);
+	assert.match(await h.command("cache-keeper-settings"), /\nkeepWarmMinutes: 120 \[default\] \(re-sends your last request just before the cache expires, up to 2 h after Pi goes idle; stops once the refreshes have cost as much as one cache miss \(writing the context again\); so far \$0 spent, a miss costs \$2\.07\)\n/);
+	assert.match(await h.command("cache-keeper"), /\nkeep warm while you are away: re-sends your last request just before the cache expires, up to 2 h after Pi goes idle; stops once the refreshes have cost as much as one cache miss \(writing the context again\); so far \$0 spent/);
 	fresh({ keepWarmMinutes: 0 });
 	const off = harness({ lifetime: 300, cost: WITH_WRITE });
 	off.emit("agent_settled");
-	assert.match(await off.command("cache-keeper"), /\nkeep warm: off\n/);
+	assert.match(await off.command("cache-keeper"), /\nkeep warm while you are away: off: this extension sends no refresh while you are away; Pi's own warming works as usual\n/);
 });
 
 // ----------------------------------------------------------------- R7: when in doubt, do not send and do not stop Pi
@@ -1447,7 +1447,7 @@ test("R7b/3: the last gate is the only path: with each single condition broken, 
 		// period's facts no longer hold (model, lifetime, a write of another lifetime), that the period is Pi's from then on.
 		if (label !== "the refresh was cancelled") {
 			const drift = ["the model changed", "the lifetime changed", "a write of another lifetime", "Pi's refresh wrote otherwise"].includes(label);
-			assert.match((await h.command("cache-keeper")).match(/keep warm: .*/)?.[0] ?? "", drift ? /left to Pi's own warming: / : /^keep warm: (off|.*\$0 spent.*)$/, `${label}: nothing counted`);
+			assert.match((await h.command("cache-keeper")).match(/keep warm while you are away: .*/)?.[0] ?? "", drift ? /left to Pi's own warming: / : /^keep warm while you are away: (off.*|.*\$0 spent.*)$/, `${label}: nothing counted`);
 			// Pi's decision stands while anything seen says the cache can be alive; the 60-second lifetime read last has passed.
 			if (drift) assert.deepEqual(h.decide(), label === "the lifetime changed" ? { action: "stop" } : undefined, `${label}: Pi's decision stands`);
 		}
@@ -1919,8 +1919,8 @@ const WARNING = warningFor("both missed the cache");
 const FALLBACK_STATUS = "⚠ keep-warm: Pi's after 2 refreshes without a hit (/cache-keeper-warm)";
 const fallbackLineAt = (at: number, model = MODEL_KEY, kinds = "both missed the cache") =>
 	`two refreshes in a row without a hit for ${model} (the last at ${new Date(at).toTimeString().slice(0, 5)}): ${kinds}, so it is left to Pi's own warming; /cache-keeper-warm starts keeping it warm again`;
-const keepWarmLineOf = async (h: ReturnType<typeof harness>) => (await h.command("cache-keeper")).split("\n").find((l) => l.startsWith("keep warm:"));
-const RULE = "keep warm: up to 2 h after Pi goes idle; stops once refreshing has cost as much as one cache miss";
+const keepWarmLineOf = async (h: ReturnType<typeof harness>) => (await h.command("cache-keeper")).split("\n").find((l) => l.startsWith("keep warm while you are away:"));
+const RULE = "keep warm while you are away: re-sends your last request just before the cache expires, up to 2 h after Pi goes idle; stops once the refreshes have cost as much as one cache miss (writing the context again)";
 // One idle period: Pi goes idle after a real answer, the extension decides, the refresh is due 25 s before expiry.
 async function nextPeriod(h: ReturnType<typeof harness>, first = false) {
 	if (!first) {
@@ -2006,7 +2006,7 @@ test("R9: two misses in a row: left to Pi from the next period's start, warned o
 	const attempts = h.state.attempts;
 	assert.equal(
 		await h.command("cache-keeper-warm"),
-		`pi-cache-keeper keeps ${MODEL_KEY} warm again, at the latest from your next message: an idle period already running whose own warming had not ended is kept warm again at once. The count of refreshes without a hit of provimux/sub/other is cleared too.`,
+		`pi-cache-keeper keeps ${MODEL_KEY} warm again, at the latest from your next message; if you are already away and this break's warming had not ended, from now. The count of refreshes in a row without a hit is set back to zero for provimux/sub/other too.`,
 	);
 	assert.equal(h.state.attempts, attempts, "the command sends nothing");
 	assert.deepEqual([misses()?.fallback.size, misses()?.counts.size], [0, 0]);
@@ -2014,12 +2014,12 @@ test("R9: two misses in a row: left to Pi from the next period's start, warned o
 	assert.deepEqual((await nextPeriod(h)).decided, { action: "stop" }, "owned again from the next period");
 	assert.equal(countOf(), 1, "counted from zero: one miss");
 	assert.deepEqual((await nextPeriod(h)).decided, { action: "stop" }, "still owned after one miss");
-	assert.equal(await h.command("cache-keeper-warm"), `pi-cache-keeper keeps ${MODEL_KEY} warm again, at the latest from your next message: an idle period already running whose own warming had not ended is kept warm again at once.`);
-	assert.equal(await h.command("cache-keeper-warm"), "Nothing to clear: no model was left to Pi's own warming, and no refresh was counted without a hit.");
+	assert.equal(await h.command("cache-keeper-warm"), `pi-cache-keeper keeps ${MODEL_KEY} warm again, at the latest from your next message; if you are already away and this break's warming had not ended, from now.`);
+	assert.equal(await h.command("cache-keeper-warm"), "Nothing to do: no model had been left to Pi's own warming, and no refresh without a hit was counted.");
 	settings({ keepWarmMinutes: 0, minContextTokens: 100_000, compactBeforeExpiry: false });
 	assert.equal(
 		await h.command("cache-keeper-warm"),
-		"Nothing to clear: no model was left to Pi's own warming, and no refresh was counted without a hit. Keep-warm itself is off (keepWarmMinutes: 0); /cache-keeper-settings turns it on.",
+		"Nothing to do: no model had been left to Pi's own warming, and no refresh without a hit was counted. Keep-warm itself is off (keepWarmMinutes: 0), so nothing is kept warm until you turn it on in /cache-keeper-settings (Keep the cache warm when idle).",
 		"it does not turn keep-warm on",
 	);
 	assert.equal(readSettings().cacheKeeper.keepWarmMinutes, 0);
@@ -2707,7 +2707,7 @@ test("after a hand-over on evidence against, the countdown counts the shortest l
 		// Counted from the answer at 1 s, five minutes: nothing is sent on it. Pi's refresh recorded at 350 s keeps the cache
 		// until 650 s: the footer and /cache-keeper count down to that.
 		assert.match(lastFooter(h) ?? "", /^cache warm · 4m left · /, `${label}: the countdown, to Pi's 650 s`);
-		assert.match(await h.command("cache-keeper"), /\ncache: 4m left by Pi's own warming \(lifetime 5 min, [^)]*\); nothing is sent on it\n/, `${label}: /cache-keeper too`);
+		assert.match(await h.command("cache-keeper"), /\ncache: 4m left by Pi's own warming \(lifetime 5 min, [^)]*\); this extension sends no refresh or summary on it\n/, `${label}: /cache-keeper too`);
 		await h.idle(2 * HOUR);
 		assert.equal(h.state.compacts, 0, `${label}: no summary`);
 		assert.deepEqual(refreshesOf(h), [], label);
@@ -3259,7 +3259,7 @@ test("R9: one miss counted, then the command with only a count to clear", async 
 	fresh({ compactBeforeExpiry: false });
 	const h = harness({ lifetime: 300, cost: WITH_WRITE, respond: () => HALF_MISS });
 	await nextPeriod(h, true);
-	assert.equal(await h.command("cache-keeper-warm"), `No model was left to Pi's own warming. The count of refreshes without a hit of ${MODEL_KEY} is cleared.`);
+	assert.equal(await h.command("cache-keeper-warm"), `No model had been left to Pi's own warming. The count of refreshes in a row without a hit is set back to zero for ${MODEL_KEY}.`);
 	assert.equal(countOf(), 0);
 });
 
@@ -3488,7 +3488,7 @@ test("prices in tiers count as prices: four zero base rates and a paid tier are 
 	const discounted = harness({ lifetime: 300, cost: tier(0.1) as never });
 	discounted.emit("agent_settled");
 	assert.deepEqual(discounted.decide(), { action: "stop" });
-	const line = (await discounted.command("cache-keeper")).split("\n").find((l) => l.startsWith("keep warm:"));
+	const line = (await discounted.command("cache-keeper")).split("\n").find((l) => l.startsWith("keep warm while you are away:"));
 	assert.match(line ?? "", /so far \$0 spent, a miss costs \$0\.54/);
 });
 
@@ -4400,7 +4400,7 @@ test("stop, after warming ended on a miss: /cache-keeper keeps its keep warm lin
 	assert.match(before ?? "", /keep-warm ended \(a refresh missed the cache\)/);
 	const given = writeStop(Date.now());
 	const shown = await h.command("cache-keeper");
-	assert.equal(shown.split("\n").find((l) => l.startsWith("keep warm:")), before, "unchanged");
+	assert.equal(shown.split("\n").find((l) => l.startsWith("keep warm while you are away:")), before, "unchanged");
 	assert.equal(
 		shown.split("\n").find((l) => l.startsWith("stopped:")),
 		`stopped: by /cache-keeper-stop at ${hhmm(given.at)}, until your next message: nothing is sent to keep this window's cache warm, and Pi's own warming is told to stop when it asks; this idle period's refreshes: $1.22 spent, a miss costs $2.07`,
@@ -4412,7 +4412,7 @@ test("stop, after warming ended on a miss: /cache-keeper keeps its keep warm lin
 	ok.emit("agent_settled");
 	const at = writeStop(Date.now());
 	const lines = (await ok.command("cache-keeper")).split("\n");
-	assert.equal(lines.find((l) => l.startsWith("keep warm:")), RULE);
+	assert.equal(lines.find((l) => l.startsWith("keep warm while you are away:")), RULE);
 	assert.equal(
 		lines.find((l) => l.startsWith("stopped:")),
 		`stopped: by /cache-keeper-stop at ${hhmm(at.at)}, until your next message: nothing is sent to keep this window's cache warm, and Pi's own warming is told to stop when it asks; compacting before expiry still runs; this idle period's refreshes: $0 spent, a miss costs $2.07`,
@@ -4774,7 +4774,7 @@ const unknownExpiryProbe = async (keeper: Record<string, unknown>) => {
 };
 // What 0.9.0 (v0.9.0, 4ef87ac) gives for the probe, captured by running this same test file there.
 const UNKNOWN_EXPIRY_ON_090 = {
-	status: ["cache: lifetime unknown, so no countdown", "next compaction: Pi's compaction, because the prompt cache's expiry is unknown: no lifetime can be read"],
+	status: ["cache: lifetime unknown, so no countdown, no compacting before expiry and no keeping warm", "next compaction: Pi's own compaction at full price, because the prompt cache's expiry is unknown: no lifetime can be read"],
 	result: null,
 	requests: [] as string[],
 	record: {

@@ -1225,8 +1225,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				trace(ctx, { event: "data", action: summary.models > 0 ? "updated" : "unchanged", models: summary.models, dataset: data.datasetVersion, downloaded: summary.downloaded });
 				showData(ctx);
 				if (!ctx.hasUI || (!announce && summary.models === 0)) return;
-				const changed = summary.models > 0 ? `${summary.models} model${summary.models === 1 ? "" : "s"} updated in ${modelsPathLabel()}` : `${modelsPathLabel()} already holds it`;
-				const current = ctx.model ? `\nThis model: ${describeFound(foundFor(ctx, ctx.model))}` : "";
+				const changed = summary.models > 0 ? `${summary.models} model${summary.models === 1 ? "" : "s"} updated in ${modelsPathLabel()}` : `nothing changed, ${modelsPathLabel()} already holds it`;
+				const found = ctx.model ? foundFor(ctx, ctx.model) : undefined;
+				const current = found ? `\nThis model: ${found.refs.length === 0 ? `providers.dev has no entry for it, so Pi's own values stay in use` : describeFound(found)}` : "";
 				ctx.ui.notify(`Model data from ${DATA_SOURCE}: ${changed}${announce ? current : ""}`, "info");
 			});
 		} catch (error) {
@@ -1234,7 +1235,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			ifSessionAlive(() => {
 				trace(ctx, { event: "data", action: "failed", reason: dataError });
 				showData(ctx);
-				if (ctx.hasUI && announce) ctx.ui.notify(`pi-cache-keeper could not refresh the model data: ${dataError}. The saved data stays in use.`, "warning");
+				if (ctx.hasUI && announce) ctx.ui.notify(`pi-cache-keeper could not fetch the model data from providers.dev: ${dataError}. Any data fetched before stays in use; /cache-keeper-refresh tries again.`, "warning");
 			});
 		}
 	};
@@ -2266,7 +2267,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const fallbackNote = (ctx: ExtensionContext): string => {
 		const ref = inEffect().fallbackCompactionModel;
 		const mark = ownMark("fallbackCompactionModel");
-		if (!ref) return `off${mark}: when the cache can't be read, Pi's compaction writes the summary on this session's model`;
+		if (!ref) return `off${mark}: when the cache can't be read, Pi's own compaction writes the summary on this session's model, at full price`;
 		const candidate = fallbackCandidate(ctx, ref);
 		// As Pi's picker names it: "devin/claude-opus-5-5 [provimux]".
 		const shown = fallbackModelLabel(ref);
@@ -2571,25 +2572,35 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (percent === 0 && cap === 0) {
 			const mine = marked ? (["compactAtPercent", "compactAtTokens"] as const).filter((name) => own[name] !== undefined) : [];
 			const from = mine.length === 2 ? " (this session)" : mine.length === 1 ? ` (${mine[0]} this session's, ${mine[0] === "compactAtPercent" ? "compactAtTokens" : "compactAtPercent"} the default)` : "";
-			return `off${from}: Pi compacts only when the window is nearly full, often with too little room left for a cached summary`;
+			return `off${from}: Pi compacts only when the window is nearly full, often with too little room left to summarize from the cache`;
 		}
 		const at = model ? fullThreshold(model, percent, cap) : undefined;
-		if (!model || at === undefined) return `at ${percent}%${m("compactAtPercent")} of the window; the current model declares no window, so not here`;
+		if (!model || at === undefined) return `at ${percent}%${m("compactAtPercent")} of the window, but the current model declares no window, so not on this model`;
 		const byCap = cap > 0 && at === cap;
 		const budget = summaryBudget(model, at);
 		const room = budget === undefined ? "" : `, leaving ${formatTokens(budget)} for the summary`;
-		const tight = budget !== undefined && budget < MIN_SUMMARY_TOKENS ? `, too little for a cached summary: pick a lower ${byCap ? "cap" : "percentage"}` : "";
-		const mark = byCap ? `at the ${formatTokens(cap)}-token cap${m("compactAtTokens")}` : `at ${percent}%${m("compactAtPercent")}: ${formatTokens(at)} of ${formatTokens(model.contextWindow)}`;
+		const tight = budget !== undefined && budget < MIN_SUMMARY_TOKENS ? `, too little to summarize from the cache: pick a lower ${byCap ? "token cap" : "percentage"} in /cache-keeper-settings` : "";
+		const mark = byCap ? `at the ${formatTokens(cap)}-token cap you set${m("compactAtTokens")}` : `at ${percent}%${m("compactAtPercent")} of the window: ${formatTokens(at)} of ${formatTokens(model.contextWindow)} tokens`;
 		return `${mark} on ${model.provider}/${model.id}${room}${tight}`;
 	};
 	const expiryNote = (marked = false) => {
 		const { compactBeforeExpiry, minContextTokens } = inEffect();
 		const m = (name: SessionKey) => (marked ? ownMark(name) : "");
-		return compactBeforeExpiry ? `on${m("compactBeforeExpiry")}, from ${formatTokens(minContextTokens)} tokens of context${m("minContextTokens")}` : `off${m("compactBeforeExpiry")}`;
+		return compactBeforeExpiry
+			? `on${m("compactBeforeExpiry")}, from ${formatTokens(minContextTokens)} tokens of context${m("minContextTokens")}: ${EXPIRY_LEAD_MS / 1000} s before the cache expires, while Pi is idle, it compacts from the still-warm cache, so your next message rewrites a summary, not the whole session`
+			: `off${m("compactBeforeExpiry")}: an idle session's cache just expires, and your next message writes the whole context again`;
+	};
+	// The retention in force, and what it asks the provider for.
+	const retentionNote = (model: Model<Api> | undefined): string => {
+		if (model?.api === BRIDGE_API) return "set by Claude Code";
+		const retention = process.env.PI_CACHE_RETENTION ?? "short";
+		if (retention === "long") return "long: requests ask for the longer cache where the provider has one (1 h instead of 5 min on Anthropic; writing it costs more)";
+		if (retention === "short") return "short: requests ask for the provider's default cache (5 min on Anthropic)";
+		return retention;
 	};
 	const keepWarmNote = (model: Model<Api> | undefined) => {
 		const minutes = warmMinutes(true);
-		if (minutes <= 0) return "off";
+		if (minutes <= 0) return "off: this extension sends no refresh while you are away; Pi's own warming works as usual";
 		const p = period;
 		const rule = keepWarmRule(minutes, p?.budget ? p.budget.priced : !model || hasPrices(model));
 		if (!p || running) return rule;
@@ -3023,22 +3034,32 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		});
 	};
 
+	// The commands take no arguments: one given is said to be ignored, and the command runs as without it.
+	const ignoredArgs = (name: string, args: string, ctx: ExtensionContext) => {
+		if (args.trim()) ctx.ui.notify(`/${name} takes no arguments, so "${args.trim()}" was ignored.`, "warning");
+	};
+
 	pi.registerCommand("cache-keeper-settings", {
-		description: "Change pi-cache-keeper's settings: compact when full, the fallback compaction model, compact before expiry, keep the cache warm, cache retention, model data",
-		handler: async (_args, ctx) => openSettings(ctx),
+		description: "Change when sessions compact, which model summarizes when the cache can't be used, and how long the cache is kept warm, for this session or all",
+		handler: async (args, ctx) => {
+			ignoredArgs("cache-keeper-settings", args, ctx);
+			await openSettings(ctx);
+		},
 	});
 
 	pi.registerCommand("cache-keeper-refresh", {
-		description: `Fetch the model data (input window, cache lifetimes, prices) from ${DATA_SOURCE} now and put it into Pi's models.json`,
-		handler: async (_args, ctx) => {
-			if (!config.modelData) return ctx.ui.notify("Model data from providers.dev is off. Turn it on in /cache-keeper-settings.", "info");
+		description: "Fetch the prices, input windows and cache lifetimes of your models from providers.dev again, now",
+		handler: async (args, ctx) => {
+			ignoredArgs("cache-keeper-refresh", args, ctx);
+			if (!config.modelData) return ctx.ui.notify("Nothing was fetched: model data from providers.dev is off. Turn it on in /cache-keeper-settings, on the row Model data.", "info");
 			await refreshAndReport(ctx, true, true);
 		},
 	});
 
 	pi.registerCommand("cache-keeper-stop", {
-		description: "Stop keeping idle caches warm in every Pi window, until each one's next message",
-		handler: async (_args, ctx) => {
+		description: "Stop warming idle caches in every Pi window, before a long break; each window warms again after your next message there",
+		handler: async (args, ctx) => {
+			ignoredArgs("cache-keeper-stop", args, ctx);
 			// The window as it was before the command.
 			const p = period;
 			const busy = running;
@@ -3075,8 +3096,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("cache-keeper-warm", {
-		description: "Start keeping the cache warm again for models two refreshes in a row without a hit left to Pi's own warming",
-		handler: async (_args, ctx) => {
+		description: "Keep a model's cache warm again after pi-cache-keeper gave up on it, when two refreshes in a row did not read the cache",
+		handler: async (args, ctx) => {
+			ignoredArgs("cache-keeper-warm", args, ctx);
 			obeyStop(ctx, true);
 			const fellBack = [...misses.fallback.keys()].sort();
 			const counted = [...misses.counts.entries()].filter(([model, count]) => count > 0 && !misses.fallback.has(model)).map(([model]) => model).sort();
@@ -3084,14 +3106,14 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			misses.fallbackKinds.clear();
 			misses.counts.clear();
 			misses.kinds.clear();
-			const off = warmMinutes(true) > 0 ? "" : " Keep-warm itself is off (keepWarmMinutes: 0); /cache-keeper-settings turns it on.";
+			const off = warmMinutes(true) > 0 ? "" : " Keep-warm itself is off (keepWarmMinutes: 0), so nothing is kept warm until you turn it on in /cache-keeper-settings (Keep the cache warm when idle).";
 			let text: string;
 			if (fellBack.length > 0) {
-				const also = counted.length > 0 ? ` The count of refreshes without a hit of ${counted.join(", ")} is cleared too.` : "";
-				text = `pi-cache-keeper keeps ${fellBack.join(", ")} warm again, at the latest from your next message: an idle period already running whose own warming had not ended is kept warm again at once.${also}${off}`;
+				const also = counted.length > 0 ? ` The count of refreshes in a row without a hit is set back to zero for ${counted.join(", ")} too.` : "";
+				text = `pi-cache-keeper keeps ${fellBack.join(", ")} warm again, at the latest from your next message; if you are already away and this break's warming had not ended, from now.${also}${off}`;
 			} else if (counted.length > 0) {
-				text = `No model was left to Pi's own warming. The count of refreshes without a hit of ${counted.join(", ")} is cleared.${off}`;
-			} else text = `Nothing to clear: no model was left to Pi's own warming, and no refresh was counted without a hit.${off}`;
+				text = `No model had been left to Pi's own warming. The count of refreshes in a row without a hit is set back to zero for ${counted.join(", ")}.${off}`;
+			} else text = `Nothing to do: no model had been left to Pi's own warming, and no refresh without a hit was counted.${off}`;
 			if (period?.stopped && !running) text += " A /cache-keeper-stop holds in this window until your next message; this command does not lift it.";
 			ctx.ui.notify(text, "info");
 			renderFooter(ctx);
@@ -3099,13 +3121,14 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("cache-keeper", {
-		description: "Show the prompt cache state, the model data in use and this session's compaction log",
-		handler: async (_args, ctx) => {
+		description: "See how long the prompt cache has left, how the next compaction will run, the settings and model data in use, and this session's log",
+		handler: async (args, ctx) => {
+			ignoredArgs("cache-keeper", args, ctx);
 			obeyStop(ctx, true);
 			const entries = ctx.sessionManager.getBranch();
 			const model = ctx.model;
 			const state = model && look(ctx, { model, entries });
-			let cache = "lifetime unknown, so no countdown";
+			let cache = "lifetime unknown, so no countdown, no compacting before expiry and no keeping warm";
 			if (state?.lifetime) {
 				let left = state.replied ? "the last request did not use the prompt cache" : "no request since the session started or compacted";
 				const now = Date.now();
@@ -3117,15 +3140,18 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				else if (state.sendBy !== undefined) left = state.sendBy > now ? `${formatRemaining(state.sendBy - now)} left` : "expired";
 				// Where the expiry is unknown, the cache counts as expired, and why.
 				else if (state.unknown) left = "expired";
-				const why = state.unknown ? (piKeeps ? `; nothing is sent on it: ${state.unknown}` : `, counted as expired: ${state.unknown}`) : piKeeps ? "; nothing is sent on it" : "";
-				cache = `${left} (lifetime ${formatDuration(state.lifetime.ms)}, ${state.lifetime.source})${why}`;
+				// The reason in plain words: a route is the account or key that answered.
+				const unknown = state.unknown === "the route changed" ? "the route changed (another account or key answered, and this cache is not on it)" : state.unknown;
+				const why = unknown ? (piKeeps ? `; this extension sends no refresh or summary on it: ${unknown}` : `, counted as expired: ${unknown}`) : piKeeps ? "; this extension sends no refresh or summary on it" : "";
+				const cost = left === "expired" ? "; your next message pays full price to write it again" : "";
+				cache = `${left} (lifetime ${formatDuration(state.lifetime.ms)}, ${state.lifetime.source})${why}${cost}`;
 			}
 			const check = checkCachedPath(ctx, entries, model);
 			const next = "reason" in check
 				? inEffect().fallbackCompactionModel && !check.reason.startsWith(EXPIRY_UNKNOWN)
-					? `not from the cache, because ${check.reason}; the fallback compaction model writes the summary where it can, else Pi's compaction`
-					: `Pi's compaction, because ${check.reason}`
-				: `cached path; last request ${formatDuration(Date.now() - check.request.at)} ago with ${check.request.transcript.length} messages, ${check.trailing.length} since. The request prefix is checked when it runs.`;
+					? `not from the cache, because ${check.reason}; the fallback compaction model (below) writes the summary where it can, else Pi's own compaction at full price`
+					: `Pi's own compaction at full price, because ${check.reason}`
+				: `from the cache, so it costs little; last request ${formatDuration(Date.now() - check.request.at)} ago with ${check.request.transcript.length} messages, ${check.trailing.length} since. When it runs, it first checks that it repeats that request exactly.`;
 			const stopped = stopNote();
 			let log: string[];
 			try {
@@ -3134,7 +3160,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					const versus = record.event === "compact" ? comparison(record) : undefined;
 					return versus ? [describeTrace(record), `         ${versus.text}`] : [describeTrace(record)];
 				});
-				log = records.length > 0 ? ["This session:", ...lines] : ["Nothing logged for this session yet."];
+				log = records.length > 0 ? ["This session (the latest entries of the log):", ...lines] : ["Nothing logged for this session yet."];
 			} catch (error) {
 				log = [`Could not read the log: ${error instanceof Error ? error.message : String(error)}`];
 			}
@@ -3143,14 +3169,15 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 					`pi-cache-keeper · ${model ? `${model.provider}/${model.id}` : "no model"}`,
 					`cache: ${cache}`,
 					`next compaction: ${next}`,
-					`when full: ${fullNote(model, true)}`,
-					`fallback compaction model: ${fallbackNote(ctx)}`,
-					`keep warm${ownMark("keepWarmMinutes")}: ${keepWarmNote(model)}`,
+					`compact when full: ${fullNote(model, true)}`,
+					`fallback compaction model (writes the summary when the cache can't be used): ${fallbackNote(ctx)}`,
+					`keep warm while you are away${ownMark("keepWarmMinutes")}: ${keepWarmNote(model)}`,
 					...(stopped ? [`stopped: ${stopped}`] : []),
-					`before expiry: ${expiryNote(true)} · retention ${model?.api === BRIDGE_API ? "set by Claude Code" : (process.env.PI_CACHE_RETENTION ?? "short")}`,
-					`model data: ${dataNote(ctx)}`,
-					`settings: ${ownKeys().length > 0 ? `this session's own: ${describeOwn(own, true)}; every other follows the defaults` : "the defaults (this session has none of its own)"} · /cache-keeper-settings`,
-					`log: ${TRACE_PATH_LABEL}`,
+					`compact before expiry: ${expiryNote(true)}`,
+					`cache retention: ${retentionNote(model)}`,
+					`model data from providers.dev: ${dataNote(ctx)}`,
+					`settings: ${ownKeys().length > 0 ? `this session's own: ${describeOwn(own, true)}; every other follows the defaults` : "the defaults (this session has none of its own)"} · change them with /cache-keeper-settings`,
+					`log file: ${TRACE_PATH_LABEL}`,
 					"",
 					...log,
 				].join("\n"),

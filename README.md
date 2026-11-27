@@ -27,6 +27,145 @@ pi install npm:pi-cache-keeper
 
 Then run `/reload` (Pi loads extensions only at startup or on `/reload`). It needs Pi 1.6.0 or newer. Compacting from the cache, compacting when full, compacting before expiry and [model data from providers.dev](#model-data-from-providersdev) are on by default; keeping the cache warm is off until you set `keepWarmMinutes`.
 
+## Commands
+
+| Command | What it does | When you would use it |
+|---|---|---|
+| `/cache-keeper` | Shows how long the prompt cache has left, how the next compaction will run, the settings and model data in use, and this session's log. | You want to know whether the cache is still warm, what a `⚠` in the footer means, or what the extension did. |
+| `/cache-keeper-settings` | Opens a menu to change when sessions compact, which model writes the summary when the cache can't be used, and how long the cache is kept warm, for this session or for all sessions. | You want to keep the cache warm through breaks, compact earlier, or pick a cheaper model for summaries. |
+| `/cache-keeper-refresh` | Fetches the prices, input windows and cache lifetimes of your models from providers.dev again, now. | The footer says a fetch failed, you added a provider, or you know providers.dev changed today. |
+| `/cache-keeper-stop` | Stops warming idle caches in every Pi window, until you next send that window a message. | Before a long break, so nothing is spent keeping caches warm while you are away. |
+| `/cache-keeper-warm` | Lets the extension keep a model's cache warm again after it gave up on it, when two refreshes in a row did not read the cache. | The footer says `⚠ keep-warm: Pi's after 2 refreshes without a hit (/cache-keeper-warm)`. |
+
+Pi's own `/compact` goes through the extension too: it reads the warm cache where it can.
+
+Easily confused:
+
+- `/cache-keeper-refresh` fetches providers.dev's prices and cache lifetimes again; [pi-provimux](https://github.com/ngvoicu/pi-provimux)'s `/provimux-refresh` reloads your gateway's model list and the accounts behind each model. Neither changes which account answers.
+- `/cache-keeper-warm` undoes the extension giving up on a model; it does not undo a `/cache-keeper-stop`. Only your next message in a window does that.
+
+The examples below are the commands' own output, from a run of the current code with the tests' sample sessions and providers.dev values; so are the figures on this page.
+
+### /cache-keeper
+
+**What it does.** It shows, in one block, what the extension knows right now about the model in use. Each line starts with what it is about:
+
+| Line | What it tells you |
+|---|---|
+| `cache:` | how long the prompt cache has left before it expires, how long it lasts and where that figure comes from. `expired` means your next message pays full price to write the whole conversation again. `lifetime unknown` means no countdown, no compacting before expiry and no keeping warm. |
+| `next compaction:` | whether the next compaction can read the warm cache (cheap) or not, and why not. |
+| `compact when full:` | when the extension compacts on its own as the context fills: a share of the model's window, or a token cap you set. |
+| `fallback compaction model (…):` | which model writes the summary when the cache can't be used, or `off`. |
+| `keep warm while you are away:` | whether the extension refreshes the cache while you are away, for how long, and what that has cost so far against what one cache miss would cost. |
+| `stopped:` | only after `/cache-keeper-stop`: until when nothing is sent to keep this window's cache warm. |
+| `compact before expiry:` | whether a large idle session is compacted just before its cache expires, and from what size. |
+| `cache retention:` | which cache the requests ask for: `long` (an hour on Anthropic) or `short` (the provider's default, 5 minutes on Anthropic). |
+| `model data from providers.dev:` | the providers.dev entry used for this model (as `provider/model`) and what it gave. More below. |
+| `settings:` | which values this session set for itself; every other value is the default. |
+| `log file:` | where every decision is written, then this session's latest entries. |
+
+A value this session set for itself is marked `(this session)`: `compact when full: at 80% (this session) of the window: …`, `keep warm while you are away (this session): …`.
+
+**Example.** You type `/cache-keeper` on Claude Sonnet 4.6, a few seconds after an answer, with keep-warm on for 2 hours, compacting when full turned off and model data off. You see:
+
+```text
+pi-cache-keeper · anthropic/claude-sonnet-4-6
+cache: 4m left (lifetime 5 min, declared by the model)
+next compaction: from the cache, so it costs little; last request 4 s ago with 2 messages, 1 since. When it runs, it first checks that it repeats that request exactly.
+compact when full: off: Pi compacts only when the window is nearly full, often with too little room left to summarize from the cache
+fallback compaction model (writes the summary when the cache can't be used): off: when the cache can't be read, Pi's own compaction writes the summary on this session's model, at full price
+keep warm while you are away: re-sends your last request just before the cache expires, up to 2 h after Pi goes idle; stops once the refreshes have cost as much as one cache miss (writing the context again); so far $0 spent, a miss costs $0.41
+compact before expiry: on, from 140k tokens of context: 20 s before the cache expires, while Pi is idle, it compacts from the still-warm cache, so your next message rewrites a summary, not the whole session
+cache retention: short: requests ask for the provider's default cache (5 min on Anthropic)
+model data from providers.dev: off
+settings: the defaults (this session has none of its own) · change them with /cache-keeper-settings
+log file: ~/.pi/agent/cache-keeper.jsonl
+
+This session (the latest entries of the log):
+05:51:15 kept the cache warm, idle 4 min: 99% of 120k from cache, 1 out, $0.036; $0.036 of $0.41 (one cache miss) spent
+```
+
+**Reading the model data line.** It names the providers.dev entry that describes the model and what it gave (`claude-subscription/claude-opus-5-5: window 1,000,000, short cache 1 h, long cache 1 h, price $4/$20 per million`), when it was checked, and that `/cache-keeper-refresh` fetches it again. `no entry for this model` means providers.dev has nothing for it, so Pi's own values are used; without a cache lifetime there, there is no countdown. Through a proxy such as pi-provimux it also says what answered last:
+
+```text
+model data from providers.dev: claude-subscription/claude-opus-5-5: window 1,000,000, short cache 1 h, long cache 1 h, price $4/$20 per million; the last answer came from devin (login), looked up as devin/claude-fable-5-2: no entry for this model (https://providers.dev, checked 0 s ago; /cache-keeper-refresh fetches it again)
+```
+
+That reads: the values are for a Claude login, but the last answer came from a Devin login. The extension looked for providers.dev's entry `devin/claude-fable-5-2`, found none, and so knows no cache lifetime or price for what answered. The footer then shows `⚠ answered by devin (login)` and no countdown. When the route the values are for answered, the line ends with `answered by: anthropic (login)` instead. Where a value is a guess, the line says which values are the smaller of the login's and the API key's, and which were not used. [Through a proxy](#through-a-proxy) has the details.
+
+**What it changes, and for how long.** Nothing: it only reads and shows.
+
+**What it does not do.** It does not refresh the cache, fetch model data or compact. The footer shows the short form of the same facts all the time ([The footer](#the-footer)).
+
+### /cache-keeper-settings
+
+**What it does.** It opens a menu of the extension's settings. It opens on **this session**: each warming and compaction row shows its value and whether it is this session's own (`4 h · this session`) or the default (`2 h · default`). Enter steps through the values. The first row, "Editing", switches to the **defaults for all sessions** and back. The menu describes the selected row in plain words, and for "Compact when the context is" it works out where that falls on the current model.
+
+**Example.** You type `/cache-keeper-settings`. You see:
+
+![The settings menu: "pi-cache-keeper · editing this session · its own values are saved in the session; every other follows the defaults". Rows: Editing: this session; Compact when the context is 90% · default; Or once it holds off · default; Compact before the cache expires on · default; Keep the cache warm when idle 4 h · this session; Before expiry, only from 140k · default; Back to the defaults: drop 1 own value; Cache retention · all sessions long; Model data · all sessions on. Under them, the description of the selected row: "The warming and compaction values you pick below hold for this session only, saved in it: after a resume, and in a fork made after them. Every value marked default follows the defaults, also when they change later. Enter edits the defaults for all sessions instead." Then "Enter/Space to change · Esc to cancel".](media/settings-menu.png)
+
+Outside the TUI (RPC mode) it lists both layers instead, each value with `[default]` or `[this session; default …]`.
+
+**What it changes, and for how long.** A value marked `this session` holds for this session only. It is saved in the session when the menu closes, so it holds after a resume and in a fork made after it. A default holds for every session that has no value of its own, from the next decision on, also in other Pi windows: it is saved in `~/.pi/agent/settings.json`. "Cache retention" and "Model data" are always for all sessions.
+
+**What it does not do.** It does not change Pi's own settings: Pi's compaction and its own cache warming keep theirs. Each setting is explained in [Settings](#settings).
+
+### /cache-keeper-refresh
+
+**What it does.** It fetches the model data from providers.dev now: each model's input window, cache lifetimes and prices. It writes them into Pi's `~/.pi/agent/models.json` and says how many models changed and what the current model got. The extension already does this by itself at the start of an interactive session when the data is a day old, so you rarely need it.
+
+**Example.** You type `/cache-keeper-refresh`. You see:
+
+```text
+Model data from https://providers.dev: 1 model updated in ~/.pi/agent/models.json
+This model: openai-codex/gpt-6.1-sol or openai/gpt-6.1-sol: window 922,000, short cache 5 min, price $2/$10 per million; cache short: the smaller of the login's and the API key's, because which one serves the model is not known; not used: long (it depends on whether a subscription login or an API key serves the model, which is not known)
+```
+
+Here the model is reached through a proxy that may use a ChatGPT login or an OpenAI API key, so the extension uses the smaller of the two values and says so.
+
+When nothing changed: `Model data from https://providers.dev: nothing changed, ~/.pi/agent/models.json already holds it`. For a model providers.dev doesn't know: `This model: providers.dev has no entry for it, so Pi's own values stay in use`. When providers.dev can't be reached: `pi-cache-keeper could not fetch the model data from providers.dev: <the reason>. Any data fetched before stays in use; /cache-keeper-refresh tries again.` With model data turned off: `Nothing was fetched: model data from providers.dev is off. Turn it on in /cache-keeper-settings, on the row Model data.`
+
+**What it changes, and for how long.** The values in `models.json`, for every session and every Pi window, until the next fetch. Values you set there yourself are never touched.
+
+**What it does not do.** It does not change which account answers, and it does not reload a gateway's model list (pi-provimux's `/provimux-refresh` does that). It sends nothing about your sessions: providers.dev gets only the names of the providers you use. More: [Model data from providers.dev](#model-data-from-providersdev).
+
+### /cache-keeper-stop
+
+**What it does.** It stops all idle cache warming in every Pi window that uses the same `~/.pi/agent`: the extension's refreshes, and Pi's own idle warming the next time it asks. Each window warms again as usual after the answer to the next message you send it.
+
+**Example.** You type `/cache-keeper-stop` while the extension keeps this window's cache warm. You see:
+
+```text
+Warming is stopped in every Pi window that uses ~/.pi/agent, until each window's next message.
+This window: the extension was keeping this idle period warm, and that has ended ($0 spent, a miss costs $0.41).
+Other windows: each reads the stop before it sends anything, and its footer says "warming stopped" within a second where it shows a countdown. How many there are can't be known from here, and a window that has not loaded this version (no /reload since the update) doesn't read it.
+A refresh already on its way is not called back. A stop can't be taken back: a window warms again as usual after the answer to the next message you send it.
+Compacting before the cache expires still runs where it is on (compactBeforeExpiry); it starts no warming again.
+```
+
+`/cache-keeper` then has a `stopped:` line, and the footer says `warming stopped until your next message`.
+
+**What it changes, and for how long.** Every Pi window that uses the same `~/.pi/agent` and has loaded this version, until your next message in each window. It changes no setting.
+
+**What it does not do.** It can't be taken back, and `/cache-keeper-warm` does not lift it. It does not stop compacting before expiry, Pi's warming during a run, or a refresh already on its way. More: [Stopping it in every window](#stopping-it-in-every-window).
+
+### /cache-keeper-warm
+
+**What it does.** When two refreshes in a row of a model did not read the cache (they missed it, or did not say what they cost), the extension stops keeping that model warm and leaves it to Pi's own warming; the footer says `⚠ keep-warm: Pi's after 2 refreshes without a hit (/cache-keeper-warm)`. This command takes that back for every such model, and sets every model's count of refreshes without a hit back to zero.
+
+**Example.** You type `/cache-keeper-warm` after that warning. You see:
+
+```text
+pi-cache-keeper keeps anthropic/claude-sonnet-4-6 warm again, at the latest from your next message; if you are already away and this break's warming had not ended, from now.
+```
+
+With nothing to take back: `Nothing to do: no model had been left to Pi's own warming, and no refresh without a hit was counted.` With keep-warm off, it adds: `Keep-warm itself is off (keepWarmMinutes: 0), so nothing is kept warm until you turn it on in /cache-keeper-settings (Keep the cache warm when idle).`
+
+**What it changes, and for how long.** Every session in this Pi process (`/new`, `/resume` and `/reload` keep it), until Pi is restarted or two refreshes in a row miss again.
+
+**What it does not do.** It sends nothing, does not turn keep-warm on, and does not lift a `/cache-keeper-stop`. More: [Keeping the cache warm](#keeping-the-cache-warm).
+
 ## The footer
 
 The extension adds one line to Pi's footer (in powerline-footer, the `extension_statuses` segment): the cache countdown, then what went wrong, then the values in use for the current model. powerline-footer drops that segment as a whole when it doesn't fit, also with no other status beside it (in its 0.22.0, at 40, 60 and 80 columns it was hidden, at 148 shown in full); `/cache-keeper` shows everything.
@@ -102,35 +241,6 @@ With keep-warm off none of these show but the stop, and with [model data](#model
 3. Errors go last, down to a bare `⚠` that stands for all of them (`/cache-keeper` says what it is). The countdown always stays.
 
 A part that fits again once a larger one has gone comes back, and room left over goes back to the wording of the most important parts first. So what changes what you do comes first (something went wrong, the time left), then what you pay (the lifetime in use, the price), then what explains it. At 60 columns the line reads `warm 59m · long 1h · short 5m · sent 1h · api $3/$15`; at 40, `warm 59m · long 1h · api $3/$15`, or with a failed refresh `warm 0:25 · ⚠ keep-warm failed · long 1h`. Pi puts every extension's status on this one line, ordered by key, and cuts it at the right edge; errors right after the countdown are the last to be cut when another extension's status takes some of the room.
-
-## Commands
-
-| Command | What it does |
-|---|---|
-| `/cache-keeper` | shows the cache right now, whether the next compaction would read it, the settings in effect (marking the ones this session set for itself), the model data in use, and this session's log |
-| `/cache-keeper-settings` | opens the settings menu on this session's settings, with the defaults for all sessions one step away; outside the TUI it lists both (see [Settings](#settings)) |
-| `/cache-keeper-warm` | starts keeping the cache warm again for the models two refreshes in a row without a hit left to Pi's own warming, and clears every model's count of them; it takes effect at the latest from your next message (an idle period already running whose own warming had not ended is kept warm again at once), sends nothing and doesn't turn keep-warm on; it does not lift a `/cache-keeper-stop` (see [Keeping the cache warm](#keeping-the-cache-warm)) |
-| `/cache-keeper-stop` | stops keeping idle caches warm in every Pi window that uses the same settings, until the next message you send each window: the extension sends no further refresh and Pi's own idle warming is told to stop when it next asks; compacting before expiry still runs; it changes no setting and can't be taken back (see [Stopping it in every window](#stopping-it-in-every-window)) |
-| `/cache-keeper-refresh` | fetches the model data from providers.dev now, puts it into Pi's `models.json`, and says how many models changed and what the current model got (see [Model data](#model-data-from-providersdev)) |
-| `/compact` | Pi's own command; it goes through the cached path too |
-
-**`/cache-keeper`**:
-
-![The output of /cache-keeper: "pi-cache-keeper · anthropic/claude-opus-5-5. cache: 59m left (lifetime 60 min, declared by the model). next compaction: cached path; last request 4 s ago with 185 messages, 1 since. The request prefix is checked when it runs. when full: at 90%: 900k of 1000k on anthropic/claude-opus-5-5, leaving 96k for the summary. keep warm (this session): up to 4 h after Pi goes idle; stops once refreshing has cost as much as one cache miss; so far $0 spent, a miss costs $2.36. before expiry: on, from 140k tokens of context · retention long. model data: claude-subscription/claude-opus-5-5: window 1,000,000, short cache 1 h, long cache 1 h (https://providers.dev, checked 180 min ago; /cache-keeper-refresh fetches it again). settings: this session's own: keepWarmMinutes 4 h (default 2 h); every other follows the defaults · /cache-keeper-settings. log: ~/.pi/agent/cache-keeper.jsonl. This session: 15:05:52 compact when full: cached, 99% of 904k from cache, 5k out, 41.6s, summary 9840 chars. vs Pi's compaction: 75% less, $0.59 instead of ~$2.4 (it sends ~451k tokens, none from cache). 15:06:34 saved, 903k tokens summarized. 16:36:52 kept the cache warm, idle 57 min: 99% of 411k from cache, 1 out, $0.21; $0.21 of $2.36 (one cache miss) spent."](media/status-command.png)
-
-Each value shown that this session set for itself is marked `(this session)` (`when full: at 80% (this session): …`, `keep warm (this session): …`, `before expiry: on, from 200k tokens of context (this session)`); a value that comes from the defaults is not. The `settings` line lists those values beside the defaults they replace; without any, it reads `settings: the defaults (this session has none of its own)`.
-
-The `fallback compaction model` line names the [fallback compaction model](#compacting-with-another-model-when-the-cache-cant-be-used) in effect, named as Pi's `/model` picker names it (`model-id [provider]`), marked `(this session)` where the session set it, with its window and its price or `subscription` where its name doesn't say otherwise (see the list below) (`fallback compaction model: gemini-2.5-flash [google] (this session) · 1M window · $0.30 in, $2.50 out per M · whether it writes a summary is decided at each compaction, from the part Pi cuts off`), `not available now` for a pick Pi can't use now, or `off: when the cache can't be read, Pi's compaction writes the summary on this session's model`. It doesn't say which model will write the next summary: that is decided at the compaction, from the part Pi cuts off then. Where the next compaction couldn't be read from the cache, the `next compaction` line says so and why (`not from the cache, because the prompt cache has expired; the fallback compaction model writes the summary where it can, else Pi's compaction`).
-
-The `model data` line names the providers.dev entry that describes the model and what it gave. When a guess is in use it says which values are the smaller of the login's and the API key's, and which were not used; when another kind of credential answered, it gives that one's values too.
-
-**`/cache-keeper-settings`**:
-
-![The settings menu: "pi-cache-keeper · editing this session · its own values are saved in the session; every other follows the defaults". Rows: Editing: this session; Compact when the context is 90% · default; Or once it holds off · default; Compact before the cache expires on · default; Keep the cache warm when idle 4 h · this session; Before expiry, only from 140k · default; Back to the defaults: drop 1 own value; Cache retention · all sessions long; Model data · all sessions on. Under them, the description of the selected row: "The warming and compaction values you pick below hold for this session only, saved in it: after a resume, and in a fork made after them. Every value marked default follows the defaults, also when they change later. Enter edits the defaults for all sessions instead." Then "Enter/Space to change · Esc to cancel".](media/settings-menu.png)
-
-Each row maps to a setting below. The menu opens on this session: the first row, "Editing", switches it to the defaults for all sessions and back. The menu describes the selected row, and for "Compact when the context is" it works out where that falls on the current model.
-
-The figures on this page are the extension's own output, from a run of the current code with sample sessions and sample providers.dev values.
 
 ## Settings
 
@@ -398,9 +508,9 @@ So a route whose short tier lasts an hour (a proxy on a Claude subscription logi
 
 **Owned or left alone.** Where the model's prices make one refresh cost at least as much as the cache miss it would avoid (a cached read priced like an uncached one), the extension doesn't take the period: it is left to Pi's own warming from its start (`at this model's prices a refresh costs as much as a miss`). A period the extension takes, it refreshes. A period left to Pi from its start, for any reason, is read exactly as with keep-warm off: the countdown, the footer and compacting before expiry follow the same tier and lifetime. One the extension took is counted by its clock for the whole period, whoever warms it: the shortest lifetime read, from the period's own last fact ([below](#keeping-the-cache-warm)).
 
-**What the period started with holds.** A period the extension keeps warm fixes, when it starts, the model, the tier its request asked for and the request's lifetime, and counts the expiry with that lifetime, or with a shorter one read since (below). Switching the retention later changes nothing for a request already sent. If what is read later no longer agrees with that lifetime (above: a proxy reporting an upstream whose tier lasts otherwise or nothing known, new model data, a refresh of Pi's or of the extension's that wrote into a cache of another lifetime), or the model changed, warming ends for the period without another refresh, the period is Pi's from then on (above: Pi's warming is no longer told to stop, but if it was told so earlier in the period it stays stopped), and the log says what: `the request's cache now lasts 5 min by the route's data, the cached request was written with 60 min`. It is asked when the period starts, on every check of the countdown (at least every 15 seconds), when Pi's warming asks, at the last gate before a refresh leaves, and when one of the extension's refreshes settles, its own report first: a refresh that read 95% from the cache and wrote the rest into the 5-minute cache is a hit for the budget, and still ends the period's warming. The shortest lifetime read (a write into both caches as the shorter, the format's default where the route gives the tier none) never rises again, also when the route's data gives the longer one back, and the period's countdown counts it from the period's own last fact: its answer, or when its latest refresh that reported a hit left. Never from when a refresh of Pi's was recorded: Pi's own refresh entries never move this expiry, before the hand-over or after, also for a period whose request was let go. Nothing is sent on a cache past that expiry. Where Pi's warming keeps such a period (handed over, or the model left to Pi after two misses) and its route has not been seen to change, the footer and `/cache-keeper` count down to the moment nothing seen, Pi's own refreshes included, says the cache the period's answer and Pi's refreshes wrote on that route is alive any more (`/cache-keeper`: `4m left by Pi's own warming …; nothing is sent on it`): an upper bound from what was seen, not a check of the provider. After a reported change of route both read cold (below): nothing is known of the other route's cache. Compacting before expiry still goes by the expiry above, so it sends nothing then. One limit: after a model switch away and back, the footer shows no countdown until the next answer, while `/cache-keeper` counts the time Pi's warming gives.
+**What the period started with holds.** A period the extension keeps warm fixes, when it starts, the model, the tier its request asked for and the request's lifetime, and counts the expiry with that lifetime, or with a shorter one read since (below). Switching the retention later changes nothing for a request already sent. If what is read later no longer agrees with that lifetime (above: a proxy reporting an upstream whose tier lasts otherwise or nothing known, new model data, a refresh of Pi's or of the extension's that wrote into a cache of another lifetime), or the model changed, warming ends for the period without another refresh, the period is Pi's from then on (above: Pi's warming is no longer told to stop, but if it was told so earlier in the period it stays stopped), and the log says what: `the request's cache now lasts 5 min by the route's data, the cached request was written with 60 min`. It is asked when the period starts, on every check of the countdown (at least every 15 seconds), when Pi's warming asks, at the last gate before a refresh leaves, and when one of the extension's refreshes settles, its own report first: a refresh that read 95% from the cache and wrote the rest into the 5-minute cache is a hit for the budget, and still ends the period's warming. The shortest lifetime read (a write into both caches as the shorter, the format's default where the route gives the tier none) never rises again, also when the route's data gives the longer one back, and the period's countdown counts it from the period's own last fact: its answer, or when its latest refresh that reported a hit left. Never from when a refresh of Pi's was recorded: Pi's own refresh entries never move this expiry, before the hand-over or after, also for a period whose request was let go. Nothing is sent on a cache past that expiry. Where Pi's warming keeps such a period (handed over, or the model left to Pi after two misses) and its route has not been seen to change, the footer and `/cache-keeper` count down to the moment nothing seen, Pi's own refreshes included, says the cache the period's answer and Pi's refreshes wrote on that route is alive any more (`/cache-keeper`: `4m left by Pi's own warming …; this extension sends no refresh or summary on it`): an upper bound from what was seen, not a check of the provider. After a reported change of route both read cold (below): nothing is known of the other route's cache. Compacting before expiry still goes by the expiry above, so it sends nothing then. One limit: after a model switch away and back, the footer shows no countdown until the next answer, while `/cache-keeper` counts the time Pi's warming gives.
 
-**Where the expiry is unknown, nothing is sent.** It is unknown for the rest of the period in two cases: no lifetime can be read any more for a request that states none (the route's data gives its tier nothing); or a request of the period's model was served by another route than the one that served the period's answer, also when the first route is reported again later: a cache on one route says nothing about another's. The route is what a proxy reports served a request (`model-upstreams:answered`), kept for each model on its own and compared whole: every field of the report counts, so a subscription login and an API key of one upstream are different routes, also where they share model data; a report about another model never counts for this one, and a model switch keeps the reports. A report names no request, so it counts as the period's own only where it came while the period's request was out: after the extension saw that request leave and before its answer ended. That report is the period's route; where reports in that window differ, the period is Pi's from its start (`keep-warm: Pi's (the route changed)`). A report of the model after the answer ended and before Pi went idle may be another request's (a helper's, on another account): where it differs from the answer's own, or where none came for the answer, the period is Pi's from its start too. Where none came in the window and none after it, the route's configured upstreams stand in, and a later first report that differs from them reads as a change. So a proxy should report what served a request before its answer ends. The window gives timing, not a request: where the answer's own request was not reported, a lone report in its window can come from Pi's own warming, refreshing beside the answer on another account, and is then taken as the answer's route; that costs at most one refresh into a cold cache in that period. A provider no proxy describes never changes route. For a period the extension took, the countdown then reads cold, `/cache-keeper` says why (`counted as expired: the route changed`), whatever Pi's warming sent, and no refresh and no summary goes out on that cache: compacting before expiry doesn't start, a summary already being prepared is cancelled at its last check, and compacting for another reason (the context full, `/compact`) uses Pi's own compaction. With keep-warm on, where a gateway reports another route during a period (with Pi's refresh landing on it, say), nothing is sent, and your next message after the cache expired pays to write the context again. A period the extension declined at its start for its route (`keep-warm: Pi's (the route changed)`) is read as with keep-warm off: from its answer and the route's data, so its countdown can show time left on a cache the new route doesn't have, and compacting before expiry can send a summary that reads nothing from the cache. The period's facts hold only while the branch in front of you still holds its answer: after `/tree` to another branch the countdown is that branch's own, counted from that branch's answer and tier exactly as with keep-warm off, and nothing of the period left behind (its tier, its confirmed refreshes) carries over, also after keep-warm is switched off. Going back with `/tree` to a branch whose period was kept warm by refreshes, after another period started, counts from that branch's answer only, so its countdown can read cold while the refreshed cache still lasts.
+**Where the expiry is unknown, nothing is sent.** It is unknown for the rest of the period in two cases: no lifetime can be read any more for a request that states none (the route's data gives its tier nothing); or a request of the period's model was served by another route than the one that served the period's answer, also when the first route is reported again later: a cache on one route says nothing about another's. The route is what a proxy reports served a request (`model-upstreams:answered`), kept for each model on its own and compared whole: every field of the report counts, so a subscription login and an API key of one upstream are different routes, also where they share model data; a report about another model never counts for this one, and a model switch keeps the reports. A report names no request, so it counts as the period's own only where it came while the period's request was out: after the extension saw that request leave and before its answer ended. That report is the period's route; where reports in that window differ, the period is Pi's from its start (`keep-warm: Pi's (the route changed)`). A report of the model after the answer ended and before Pi went idle may be another request's (a helper's, on another account): where it differs from the answer's own, or where none came for the answer, the period is Pi's from its start too. Where none came in the window and none after it, the route's configured upstreams stand in, and a later first report that differs from them reads as a change. So a proxy should report what served a request before its answer ends. The window gives timing, not a request: where the answer's own request was not reported, a lone report in its window can come from Pi's own warming, refreshing beside the answer on another account, and is then taken as the answer's route; that costs at most one refresh into a cold cache in that period. A provider no proxy describes never changes route. For a period the extension took, the countdown then reads cold, `/cache-keeper` says why (`counted as expired: the route changed (another account or key answered, and this cache is not on it)`), whatever Pi's warming sent, and no refresh and no summary goes out on that cache: compacting before expiry doesn't start, a summary already being prepared is cancelled at its last check, and compacting for another reason (the context full, `/compact`) uses Pi's own compaction. With keep-warm on, where a gateway reports another route during a period (with Pi's refresh landing on it, say), nothing is sent, and your next message after the cache expired pays to write the context again. A period the extension declined at its start for its route (`keep-warm: Pi's (the route changed)`) is read as with keep-warm off: from its answer and the route's data, so its countdown can show time left on a cache the new route doesn't have, and compacting before expiry can send a summary that reads nothing from the cache. The period's facts hold only while the branch in front of you still holds its answer: after `/tree` to another branch the countdown is that branch's own, counted from that branch's answer and tier exactly as with keep-warm off, and nothing of the period left behind (its tier, its confirmed refreshes) carries over, also after keep-warm is switched off. Going back with `/tree` to a branch whose period was kept warm by refreshes, after another period started, counts from that branch's answer only, so its countdown can read cold while the refreshed cache still lasts.
 
 **One gate before a refresh leaves.** Every refresh passes one last check, the only way out, after which it is only counted and sent. In this order, read afresh: it was not cancelled (a run started: nothing goes out or is counted, and it is tried again); keep-warm is still on in the settings; the period is the one it was started for and warming has not ended; the model is the period's, and everything read since agrees with its lifetime (`lifetime-evidence.ts`, above), else the period is Pi's from then on; Pi is idle with nothing queued (else withheld and tried again); the last safe moment has not passed; and the output limit is within the one proven for the API: 1 token for `anthropic-messages` and `openai-completions`, 16 for `openai-responses`. Anything else withholds it, and warming ends for the period with the reason. So a refresh that could generate a long answer never leaves, whatever led to it. The refresh is built with the thinking level its request shows it was sent with (thinking off where the request had none), so the provider builds the smallest limit.
 

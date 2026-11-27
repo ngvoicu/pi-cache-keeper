@@ -493,7 +493,7 @@ for (const variant of ["reads everything", "reads 570,000 and writes 30,000 into
 		assert.deepEqual(s.wires.map((w) => [w.kind, w.at]), [["refresh", 3420]], "no summary at 3,700 s or 7,000 s, no refresh at 6,840 s");
 		assert.deepEqual(s.compactions, []);
 		assert.match(s.statuses.at(-1) ?? "", /^cache cold · next message full price · keep-warm: Pi's \(/, "cold, and the period is Pi's");
-		assert.match(await s.command(), /\ncache: expired \(lifetime 5 min, the shortest lifetime read since\), counted as expired: the route changed\n/);
+		assert.match(await s.command(), /\ncache: expired \(lifetime 5 min, the shortest lifetime read since\), counted as expired: the route changed \(another account or key answered, and this cache is not on it\); your next message pays full price to write it again\n/);
 	});
 }
 
@@ -521,7 +521,7 @@ test("another route with the same hour announced at 100 s, the first again at 13
 	// The two reports, whole, as the proxy sent them.
 	assert.match(stops[0].reason, /^the period's answer was served by \{.*"provider":"account-a","subscription":true\}\]\}, and a request of the model was served by \{.*"provider":"account-b","subscription":false\}\]\} since: a cache on one route says nothing about the other's$/);
 	assert.match(s.statuses.at(-1) ?? "", /^cache cold · next message full price · keep-warm: Pi's \(the route changed\)/);
-	assert.match(await s.command(), /\ncache: expired \(lifetime 60 min, declared by the model\), counted as expired: the route changed\n/);
+	assert.match(await s.command(), /\ncache: expired \(lifetime 60 min, declared by the model\), counted as expired: the route changed \(another account or key answered, and this cache is not on it\); your next message pays full price to write it again\n/);
 });
 
 // ------------------------------------------------------------------------------- the third review's finding 3: Pi's question
@@ -673,7 +673,7 @@ test("a reported switch from a subscription to an API key of one upstream is a c
 	assert.equal(s.decide(), undefined, "the period is Pi's");
 	// Nothing is known of the key's cache: cold, whatever Pi sent (it read "49m left by Pi's own warming").
 	assert.match(s.statuses.at(-1) ?? "", /^cache cold · /);
-	assert.match(await s.command(), /\ncache: expired \(lifetime 60 min, [^)]*\), counted as expired: the route changed\n/);
+	assert.match(await s.command(), /\ncache: expired \(lifetime 60 min, [^)]*\), counted as expired: the route changed \(another account or key answered, and this cache is not on it\); your next message pays full price to write it again\n/);
 	await s.until(3700);
 	assert.deepEqual(s.wires, [], "no refresh (on the third review one wrote 600,000 into the key's cache for $3.60)");
 });
@@ -765,7 +765,7 @@ test("after a reported change of route, neither the footer nor /cache-keeper cla
 	s.announce([KEY]);
 	await s.until(415);
 	assert.doesNotMatch(s.statuses.at(-1) ?? "", /cache warm/, "the footer claims no warm cache");
-	assert.match(await s.command(), /\ncache: expired \(lifetime 5 min, [^)]*\), counted as expired: the route changed\n/);
+	assert.match(await s.command(), /\ncache: expired \(lifetime 5 min, [^)]*\), counted as expired: the route changed \(another account or key answered, and this cache is not on it\); your next message pays full price to write it again\n/);
 	assert.deepEqual(s.wires, []);
 });
 

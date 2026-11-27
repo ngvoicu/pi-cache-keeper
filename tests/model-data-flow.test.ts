@@ -283,7 +283,7 @@ test("/cache-keeper-refresh fetches again, keeps a value the user set, and a fai
 	const before = readFileSync(modelsPath, "utf8");
 	h.state.online = false;
 	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
-	assert.match(h.notices.at(-1)!, /could not refresh the model data: offline\. The saved data stays in use\./);
+	assert.match(h.notices.at(-1)!, /could not fetch the model data from providers\.dev: offline\. Any data fetched before stays in use; \/cache-keeper-refresh tries again\./);
 	assert.equal(readFileSync(modelsPath, "utf8"), before);
 	// The saved data stays in use, and the footer says so right away, with its age.
 	assert.equal(h.statuses.get("cache-keeper"), "⚠ providers.dev refresh failed: data 1m old · short 5m ⚠ · long ? · sub or api $2/$10 per M · ⚠ login or API key unknown: shorter values");
@@ -291,6 +291,16 @@ test("/cache-keeper-refresh fetches again, keeps a value the user set, and a fai
 	h.state.online = true;
 	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
 	assert.equal(h.statuses.get("cache-keeper"), "short 5m ⚠ · long ? · sub or api $2/$10 per M · ⚠ login or API key unknown: shorter values");
+
+	// An argument is not taken: it is said to be ignored, and the command runs as without it.
+	h.notices.length = 0;
+	await h.commands.get("cache-keeper-refresh")!("now", h.ctx);
+	assert.equal(h.notices[0], '/cache-keeper-refresh takes no arguments, so "now" was ignored.');
+	assert.match(h.notices.at(-1)!, /^Model data from https:\/\/providers\.dev: nothing changed, .*models\.json already holds it\nThis model: /);
+	// A model providers.dev has no entry for is said in plain words.
+	h.select("provimux", "no-such-model");
+	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
+	assert.match(h.notices.at(-1)!, /\nThis model: providers\.dev has no entry for it, so Pi's own values stay in use$/);
 });
 
 test("with modelData set to false, the values this extension wrote are taken out and the user's stay", async () => {
@@ -356,7 +366,7 @@ test("a proxy extension that knows what serves its models: their values, fetched
 		h.notices.length = 0;
 		await h.commands.get("cache-keeper")!("", h.ctx);
 		assert.match(h.notices.at(-1)!, /cache: .*\(lifetime 5 min, declared by the model\)/);
-		assert.match(h.notices.at(-1)!, /model data: claude-subscription\/claude-opus-5-5: .*; the last answer came from anthropic \(API key\): anthropic\/claude-opus-5-5: .*short cache 5 min/);
+		assert.match(h.notices.at(-1)!, /model data from providers\.dev: claude-subscription\/claude-opus-5-5: .*; the last answer came from anthropic \(API key\): anthropic\/claude-opus-5-5: .*short cache 5 min/);
 	} finally {
 		if (retention === undefined) delete process.env.PI_CACHE_RETENTION;
 		else process.env.PI_CACHE_RETENTION = retention;
@@ -407,7 +417,7 @@ test("what answered, named: in the footer where it is not what the values are fo
 	const note = async () => {
 		h.notices.length = 0;
 		await h.commands.get("cache-keeper")!("", h.ctx);
-		return /model data: (.*)/.exec(h.notices.at(-1)!)![1];
+		return /model data from providers\.dev: (.*)/.exec(h.notices.at(-1)!)![1];
 	};
 	// No report yet: nothing said of what answered.
 	assert.doesNotMatch(await note(), /answered by|last answer/);

@@ -246,7 +246,7 @@ async function runCombo(combo: Combo): Promise<Outcome> {
 	const keepWarmLine = async () => {
 		notes.length = 0;
 		await commands.get("cache-keeper")?.("", ctx);
-		return notes.join("\n").split("\n").find((line) => line.startsWith("keep warm:")) ?? "";
+		return notes.join("\n").split("\n").find((line) => line.startsWith("keep warm while you are away:")) ?? "";
 	};
 	const traces = () =>
 		readFileSync(tracePath, "utf8")
