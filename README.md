@@ -115,7 +115,7 @@ Outside the TUI (RPC mode) it lists both layers instead, each value with `[defau
 
 ### /cache-keeper-refresh
 
-**What it does.** It fetches the model data from providers.dev now: each model's input window, cache lifetimes and prices. It writes them into Pi's `~/.pi/agent/models.json` and says how many models changed and what the current model got. The extension already asks providers.dev by itself at the start of an interactive session when its data is a day old, was read by an earlier version, or has none for a provider you use (unless model data is off or `PI_OFFLINE` is set); there it downloads the data again only when providers.dev's dataset changed or a provider is missing, while this command downloads it in any case. So you rarely need it.
+**What it does.** It fetches the model data from providers.dev now: each model's input window, cache lifetimes and prices. It writes them into Pi's `~/.pi/agent/models.json` and says how many models changed and what the current model got. The extension already asks providers.dev by itself at the start of an interactive session when its data is a day old, was read by an earlier version, or has none for a provider you use (unless model data is off or `PI_OFFLINE` is set); there it downloads the data again when providers.dev's dataset changed, a provider is missing, or the saved data was read by an earlier version. This command asks for the data again in any case, unless a check is already under way, which it then joins. So you rarely need it.
 
 **Example.** You type `/cache-keeper-refresh`. You see:
 
@@ -518,7 +518,7 @@ So a route whose short tier lasts an hour (a proxy on a Claude subscription logi
 
 **A cache that has expired is never refreshed.** A refresh then would write the whole context at full price. When the timer runs late (the computer slept), the countdown stops at expiry, and a refresh due in the last half of its lead (the last 12.5 seconds of a 5-minute cache) is not sent; the last check is made just before the request leaves, so one that couldn't leave in time is withheld.
 
-Each refresh reads the whole context from the cache: about a tenth of the input price on Anthropic. In one measured session, a refresh of a 692k-token Claude context cost $0.14, against about $6.90 to write it again at that model's cache-write price. On a subscription it is free but counts toward your usage. Each refresh keeps its line in the transcript ([What it says](#what-it-says)); refreshes are listed in `/cache-keeper` and the log too, with what they have spent of the budget, and the footer shows `cache warm · refreshing` while one runs.
+A refresh that hits reads at least 90% of its prompt from the cache, at about a tenth of the input price on Anthropic. In one measured session, a refresh of a 692k-token Claude context cost $0.14, against about $6.90 to write it again at that model's cache-write price. On a subscription it is free but counts toward your usage. Each refresh keeps its line in the transcript ([What it says](#what-it-says)); refreshes are listed in `/cache-keeper` and the log too, with what they have spent of the budget, and the footer shows `cache warm · refreshing` while one runs.
 
 After a restart, the countdown doesn't know about refreshes sent before it, so it may show the cache as cold early.
 
