@@ -841,7 +841,8 @@ const BASES = new Set(["measured_through_provimux", "measured", "documented"]);
 /**
  * One entry of a gateway's figures (Provimux's contract 1, `Entry`) as facts: the input window and output limit, the
  * cache lifetime to rely on per profile (`rely_on_s`; null or an unknown basis: none), and the price, where it is
- * charged per token or given for comparison (`per_use`, `reference`), as Pi's `cost`. A value not known is left out.
+ * charged per token or given for comparison (`per_use`, `reference`) and states its input, output and cache read
+ * prices, as Pi's `cost`. A value not known is left out.
  */
 export function gatewayEntryOf(value: unknown): GatewayEntry | undefined {
 	if (!isPlainObject(value)) return undefined;
@@ -868,11 +869,13 @@ export function gatewayEntryOf(value: unknown): GatewayEntry | undefined {
 	if (price && (price.billing === "per_use" || price.billing === "reference")) {
 		const input = atLeastZero(price.input);
 		const out = atLeastZero(price.output);
-		if (input !== undefined && out !== undefined) {
+		const cacheRead = atLeastZero(price.cache_read);
+		// A cache read price not stated is not known, and a refresh is mostly a cache read: no price rather than a free read.
+		if (input !== undefined && out !== undefined && cacheRead !== undefined) {
 			const writes = (Array.isArray(price.cache_write) ? price.cache_write : []).filter(isPlainObject).filter((item) => atLeastZero(item.price) !== undefined);
 			const unstated = writes.find((item) => item.lifetime_s === null || item.lifetime_s === undefined);
 			const timed = writes.filter((item) => positive(item.lifetime_s) !== undefined).sort((a, b) => (a.lifetime_s as number) - (b.lifetime_s as number));
-			const cost: Cost = { input, output: out, cacheRead: atLeastZero(price.cache_read) ?? 0, cacheWrite: atLeastZero((unstated ?? timed[0])?.price) ?? 0 };
+			const cost: Cost = { input, output: out, cacheRead, cacheWrite: atLeastZero((unstated ?? timed[0])?.price) ?? 0 };
 			const tiers: CostTier[] = [];
 			let previous: Omit<CostTier, "inputTokensAbove"> = cost;
 			const items = (Array.isArray(price.tiers) ? price.tiers : []).filter(isPlainObject).filter((tier) => Number.isSafeInteger(tier.input_tokens_above)).sort((a, b) => (a.input_tokens_above as number) - (b.input_tokens_above as number));

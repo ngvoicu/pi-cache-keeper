@@ -76,6 +76,11 @@ test("an entry of the gateway's figures as facts: window, output limit, the life
 	const bare = gatewayEntryOf(entry({ billing: "unknown", short: null, long: 0 }));
 	assert.deepEqual(bare?.facts, { window: 1_000_000, maxOutput: 128_000, long: 0 });
 	assert.equal(gatewayEntryOf(entry({ basis: "a-basis-not-known" }))?.facts.short, undefined);
+	// The review's case (2026-11-27): an entry of the published dataset that states no cache read price
+	// (openrouter/moondream/moondream3-preview): no price, never a free cache read.
+	const unstated = entry();
+	(unstated.price as Record<string, unknown>).cache_read = null;
+	assert.equal(gatewayEntryOf(unstated)?.facts.cost, undefined);
 	assert.equal(gatewayEntryOf("junk"), undefined);
 });
 
