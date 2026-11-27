@@ -156,7 +156,7 @@ import {
 } from "./model-data.ts";
 import { agentDirLabel, covers, firstSaid, noteMessage, readStop, rememberLoad, seenFor, stopPathLabel, writeStop, type StopRead } from "./stop-record.ts";
 import { answerToPi, end, leave, mayLeave, onAgainst, settle, WAITING, warmer, type Warmer, type WarmPhase } from "./warm-period.ts";
-import { formatFooter, lifetimesView, priceAt, sentView, tierInUse, type Countdown, type DataView, type FooterView, type KeepWarmView, type PriceView } from "./footer.ts";
+import { formatFooter, lifetimesView, lookupsText, NOTE_ID_COLUMNS, priceAt, sentView, servedText, servedView, tierInUse, type Countdown, type DataView, type FooterView, type KeepWarmView, type PriceView } from "./footer.ts";
 
 /** A session's own value of a setting. */
 type SessionValue = number | boolean | string;
@@ -1124,7 +1124,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			else if (!fetched && process.env.PI_OFFLINE) dataView.fetch = "offline";
 			if (fetched && dataError !== undefined) dataView.staleMs = Date.now() - (data.checkedAt as number);
 			if (found && found.refs.length === 0) dataView.noEntry = true;
-			if (otherwise) dataView.served = accessVia({ upstreams: otherwise });
+			if (otherwise) dataView.served = servedView(otherwise);
 			if (lifetimes.short.mark === "guess" || lifetimes.long.mark === "guess") dataView.guess = via === "sub" || via === "api" ? "login" : "access";
 		}
 		// The countdown on another tier than the model's own, or counted from another model's answer (also where this model
@@ -2626,10 +2626,16 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const model = ctx.model;
 		let found = model ? describeFound(foundFor(ctx, model)) : "no model";
 		const otherwise = servedOtherwise(model);
+		const lastAnswer = answeredFor(model);
 		if (model && otherwise) {
-			const via = accessVia({ upstreams: otherwise });
-			const what = via === "api" ? "an API key" : via === "sub" ? "a login" : "another account";
-			found += `; the last answer came from ${what}: ${describeFound(findFacts(lookupsFor(model, { upstreams: otherwise }), data.providers))}`;
+			// What answered, and the entries looked up for it where not all of them were found.
+			const lookups = lookupsFor(model, { upstreams: otherwise });
+			const facts = findFacts(lookups, data.providers);
+			const lookedUp = facts.refs.length < lookups.length ? `, looked up as ${lookupsText(lookups)}` : "";
+			found += `; the last answer came from ${servedText(servedView(otherwise, NOTE_ID_COLUMNS))}${lookedUp}: ${describeFound(facts)}`;
+		} else if (model && lastAnswer && lastAnswer.length > 0) {
+			// The expected route answered: what it was, each upstream the report names (several: not known which).
+			found += `; answered by: ${lastAnswer.map((upstream) => servedText(servedView([upstream], NOTE_ID_COLUMNS))).join(" or ")}`;
 		}
 		return `${found} (${DATA_SOURCE}, checked ${formatDuration(Date.now() - data.checkedAt)} ago${failed}; /cache-keeper-refresh fetches it again)`;
 	};

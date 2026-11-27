@@ -348,7 +348,7 @@ test("a proxy extension that knows what serves its models: their values, fetched
 	assert.equal(h.statuses.get("cache-keeper"), LOGIN);
 	answered([key("anthropic")]);
 	// The values follow what answered (the key's 5-minute short cache, its price), with a warning right at the front.
-	assert.equal(h.statuses.get("cache-keeper"), "⚠ answered by an API key · short 5m · long 1h · api $2/$10 per M");
+	assert.equal(h.statuses.get("cache-keeper"), "⚠ answered by anthropic (API key) · short 5m · long 1h · api $2/$10 per M");
 	// With Pi's short retention the key's cache lasts 5 minutes, the login's an hour.
 	const retention = process.env.PI_CACHE_RETENTION;
 	process.env.PI_CACHE_RETENTION = "short";
@@ -356,7 +356,7 @@ test("a proxy extension that knows what serves its models: their values, fetched
 		h.notices.length = 0;
 		await h.commands.get("cache-keeper")!("", h.ctx);
 		assert.match(h.notices.at(-1)!, /cache: .*\(lifetime 5 min, declared by the model\)/);
-		assert.match(h.notices.at(-1)!, /model data: claude-subscription\/claude-opus-5-5: .*; the last answer came from an API key: anthropic\/claude-opus-5-5: .*short cache 5 min/);
+		assert.match(h.notices.at(-1)!, /model data: claude-subscription\/claude-opus-5-5: .*; the last answer came from anthropic \(API key\): anthropic\/claude-opus-5-5: .*short cache 5 min/);
 	} finally {
 		if (retention === undefined) delete process.env.PI_CACHE_RETENTION;
 		else process.env.PI_CACHE_RETENTION = retention;
@@ -391,6 +391,58 @@ test("a proxy extension that knows what serves its models: their values, fetched
 	answered([key("anthropic")]);
 	h.select("provimux", "claude-opus-5-5");
 	assert.equal(h.statuses.get("cache-keeper"), LOGIN);
+});
+
+test("what answered, named: in the footer where it is not what the values are for, in /cache-keeper always, with the entries looked up", async () => {
+	rmSync(storePath);
+	writeFileSync(modelsPath, "{}");
+	const h = harness();
+	h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
+	await h.settle();
+	h.emit("model-upstreams", SURE_ROUTES);
+	await h.settle();
+	h.select("provimux", "claude-opus-5-5");
+	const LOGIN = "short 1h · long 1h · sub, counted at $2/$10 per M";
+	const answered = (upstreams: unknown[]) => h.emit("model-upstreams:answered", { provider: "provimux", model: "claude-opus-5-5", upstreams });
+	const note = async () => {
+		h.notices.length = 0;
+		await h.commands.get("cache-keeper")!("", h.ctx);
+		return /model data: (.*)/.exec(h.notices.at(-1)!)![1];
+	};
+	// No report yet: nothing said of what answered.
+	assert.doesNotMatch(await note(), /answered by|last answer/);
+	// The expected route answered: named in /cache-keeper only, not in the footer.
+	answered([login("anthropic")]);
+	assert.equal(h.statuses.get("cache-keeper"), LOGIN);
+	assert.match(await note(), /^claude-subscription\/claude-opus-5-5: [^;]*; answered by: anthropic \(login\) \(https:\/\/providers\.dev, checked /);
+	// A login of another service whose model has no entry: which, and which entry was looked for.
+	answered([login("devin", "claude-fable-5-2")]);
+	assert.match(h.statuses.get("cache-keeper")!, /^⚠ answered by devin \(login\) · /);
+	assert.match(await note(), /; the last answer came from devin \(login\), looked up as devin\/claude-fable-5-2: no entry for this model \(/);
+	// An API key, named; its entry found: its values, as before.
+	answered([key("anthropic")]);
+	assert.match(h.statuses.get("cache-keeper")!, /^⚠ answered by anthropic \(API key\) · /);
+	assert.match(await note(), /; the last answer came from anthropic \(API key\): anthropic\/claude-opus-5-5: .*short cache 5 min/);
+	// An API key of a provider not fetched: no entry, the lookup said.
+	answered([key("openrouter")]);
+	assert.match(h.statuses.get("cache-keeper")!, /^⚠ answered by openrouter \(API key\) · /);
+	assert.match(await note(), /; the last answer came from openrouter \(API key\), looked up as openrouter\/claude-opus-5-5: no entry for this model \(/);
+	// An id providers.dev's data does not know, its kind not given: shown as reported.
+	answered([{ provider: "brand-new-gateway" }]);
+	assert.match(h.statuses.get("cache-keeper")!, /^⚠ answered by brand-new-gateway · /);
+	assert.match(await note(), /; the last answer came from brand-new-gateway, looked up as brand-new-gateway\/claude-opus-5-5: no entry for this model \(/);
+	// Several upstreams: the kind alone; every entry looked up named.
+	answered([login("devin", "claude-fable-5-2"), key("openrouter")]);
+	assert.match(h.statuses.get("cache-keeper")!, /^⚠ answered by another account · /);
+	assert.match(await note(), /; the last answer came from another account, looked up as devin\/claude-fable-5-2 or openrouter\/claude-opus-5-5: no entry for this model \(/);
+	// An empty report names nothing: no warning, no "answered by".
+	answered([]);
+	assert.equal(h.statuses.get("cache-keeper"), LOGIN);
+	assert.doesNotMatch(await note(), /answered by|last answer/);
+	// Markup in a reported id reaches neither as markup.
+	answered([{ provider: "evil\u001b[2J\nid", subscription: true }]);
+	assert.match(h.statuses.get("cache-keeper")!, /^⚠ answered by evil \[2J id \(login\) · /);
+	assert.doesNotMatch(await note(), /\u001b|\n/);
 });
 
 test("routes said while a refresh runs: what they add is fetched when it ends, once", async () => {

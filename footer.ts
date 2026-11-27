@@ -1,6 +1,6 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { CacheMarker } from "./keep-warm.ts";
-import { fieldStates, usableLifetime, type Found, type Via } from "./model-data.ts";
+import { accessVia, fieldStates, usableLifetime, type Found, type Upstream, type Via } from "./model-data.ts";
 import { formatCacheStatus, formatRemaining, stopLabel, type WarmStop } from "./trace.ts";
 
 /**
@@ -80,6 +80,62 @@ export function lifetimeText(seconds: number): string {
 /** A price per million tokens: "$5", "$0.25", "$37.5". */
 const usd = (amount: number) => `$${amount >= 100 ? Math.round(amount) : Number(amount.toPrecision(3))}`;
 const tokenCount = (count: number) => (count >= 1_000_000 ? `${Number((count / 1_000_000).toFixed(1))}M` : count >= 1000 ? `${Math.round(count / 1000)}k` : String(count));
+/**
+ * Text that comes from outside (a provider id a proxy reported), as plain text: control and format characters (an escape
+ * sequence's ESC, a line break, a bidi override) become a space, runs of blanks one, and what is wider than `columns` is
+ * cut at its end ("…"). Never markup: the theme only colours it.
+ */
+export function outsideText(text: string, columns: number): string {
+	const plain = text.replace(/[\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Zl}\p{Zp}\s]+/gu, " ").trim();
+	if (visibleWidth(plain) <= columns) return plain;
+	let cut = "";
+	for (const char of plain) {
+		if (visibleWidth(cut + char) > columns - 1) break;
+		cut += char;
+	}
+	return `${cut.trimEnd()}…`;
+}
+/** The widest a reported provider id is shown in the footer, and in `/cache-keeper`. */
+export const FOOTER_ID_COLUMNS = 24;
+export const NOTE_ID_COLUMNS = 64;
+
+/**
+ * What answered, as a proxy reported it: the provider by its id as the report gives it (`by`, cut to `columns`), where
+ * the report names one upstream with a readable id, and the kind of credential. Several upstreams name none.
+ */
+export interface ServedView {
+	via: Via;
+	by?: string;
+}
+export function servedView(upstreams: Upstream[], columns = FOOTER_ID_COLUMNS): ServedView {
+	const via = accessVia({ upstreams });
+	const by = upstreams.length === 1 ? outsideText(upstreams[0].provider, columns) : "";
+	return by ? { via, by } : { via };
+}
+/** The kind alone, where nothing is named: "a login", "an API key", "another account". */
+export const SERVED_KIND: Record<Via, string> = { api: "an API key", sub: "a login", "sub or api": "another account" };
+/** The kind beside a name: "login", "API key"; none where the report does not say. */
+export const SERVED_NAMED: Record<Via, string | undefined> = { api: "API key", sub: "login", "sub or api": undefined };
+/** "devin (login)", "openrouter (API key)", "devin" (the kind not reported); unnamed: the kind alone. */
+export function servedText(view: ServedView): string {
+	if (!view.by) return SERVED_KIND[view.via];
+	const kind = SERVED_NAMED[view.via];
+	return kind ? `${view.by} (${kind})` : view.by;
+}
+
+/**
+ * The providers.dev entries looked up, shortest: "devin/claude-fable-5-2"; several of one model
+ * "(claude-subscription or anthropic)/claude-fable-5-2"; of several models joined with "or". Ids from a proxy's report
+ * are shown as text, cut as the other reported ids are.
+ */
+export function lookupsText(lookups: Array<{ provider: string; model: string }>): string {
+	const byModel = new Map<string, string[]>();
+	for (const { provider, model } of lookups) byModel.set(model, [...(byModel.get(model) ?? []), outsideText(provider, NOTE_ID_COLUMNS)]);
+	return [...byModel]
+		.map(([model, providers]) => `${providers.length === 1 ? providers[0] : `(${providers.join(" or ")})`}/${outsideText(model, NOTE_ID_COLUMNS)}`)
+		.join(" or ");
+}
+
 /** How old the saved data is: "40m", "26h", "3d". */
 function ageText(ms: number): string {
 	if (ms < 2 * 3_600_000) return `${Math.max(1, Math.round(ms / 60_000))}m`;
@@ -164,7 +220,7 @@ export interface DataView {
 	fetch?: "failed" | "offline";
 	staleMs?: number;
 	noEntry?: boolean;
-	served?: Via;
+	served?: ServedView;
 	guess?: "access" | "login";
 }
 
@@ -392,7 +448,15 @@ function pricePart(view: PriceView): Part {
 	return { forms: [[segment(comma), segment("price unknown", "dim")], [segment(narrowLead), segment("$–", "dim")]], priority: PRIORITY.price };
 }
 
-const SERVED: Record<Via, [string, string]> = { api: ["an API key", "API key"], sub: ["a login", "login"], "sub or api": ["another account", "other account"] };
+/** Unnamed, narrow: "⚠ API key answered". */
+const SERVED_NARROW: Record<Via, string> = { api: "API key", sub: "login", "sub or api": "other account" };
+
+/** "⚠ answered by devin (login)", narrow "⚠ devin login"; unnamed "⚠ answered by a login", narrow "⚠ login answered". */
+function servedPart(view: ServedView): Part {
+	const kind = SERVED_NAMED[view.via];
+	const narrow = view.by ? (kind ? `⚠ ${view.by} ${kind}` : `⚠ by ${view.by}`) : `⚠ ${SERVED_NARROW[view.via]} answered`;
+	return plainPart(PRIORITY.served, [`⚠ answered by ${servedText(view)}`, narrow, ALERT], "warning");
+}
 
 /** The line's parts, in reading order. */
 export function footerParts(view: FooterView): Part[] {
@@ -405,10 +469,7 @@ export function footerParts(view: FooterView): Part[] {
 	}
 	const warm = view.keepWarm ? keepWarmPart(view.keepWarm) : undefined;
 	if (warm && warm.priority === PRIORITY.warmAlert) parts.push(warm);
-	if (data?.served) {
-		const [wide, narrow] = SERVED[data.served];
-		parts.push(plainPart(PRIORITY.served, [`⚠ answered by ${wide}`, `⚠ ${narrow} answered`, ALERT], "warning"));
-	}
+	if (data?.served) parts.push(servedPart(data.served));
 	if (data?.fetch === "failed") parts.push(plainPart(PRIORITY.dataAlert, ["⚠ providers.dev: no data, fetch failed", "⚠ providers.dev failed", ALERT], "warning"));
 	if (data?.staleMs !== undefined) {
 		parts.push(plainPart(PRIORITY.dataAlert, [`⚠ providers.dev refresh failed: data ${ageText(data.staleMs)} old`, `⚠ data ${ageText(data.staleMs)} old`, ALERT], "warning"));

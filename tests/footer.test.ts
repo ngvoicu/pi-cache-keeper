@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import test, { mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { clockText, fitParts, footerParts, formatFooter, lifetimesView, priceAt, sentView, tierInUse, type FooterView, type Tone } from "../footer.ts";
+import { clockText, fitParts, footerParts, formatFooter, lifetimesView, lookupsText, outsideText, priceAt, sentView, servedText, servedView, tierInUse, type FooterView, type Tone } from "../footer.ts";
 import { requestCache } from "../keep-warm.ts";
 import { factsOf, findFacts, lookupsFor, type DataStore } from "../model-data.ts";
 
@@ -276,8 +276,8 @@ test("a countdown on another model's tier is said to be so, right after it, and 
 
 test("providers.dev in the footer: an answer from elsewhere, no data, stale data, PI_OFFLINE, a guess", () => {
 	const values = { lifetimes: claude.lifetimes, price: claude.price };
-	assert.equal(formatFooter(warm(4 * MIN, { ...values, data: { served: "api" } })), "cache warm · 4m left · ⚠ answered by an API key · long 1h (in use) · short 5m · api $5/$25 per M");
-	assert.equal(formatFooter({ ...values, data: { served: "sub" } }), "⚠ answered by a login · long 1h (in use) · short 5m · api $5/$25 per M");
+	assert.equal(formatFooter(warm(4 * MIN, { ...values, data: { served: { via: "api" } } })), "cache warm · 4m left · ⚠ answered by an API key · long 1h (in use) · short 5m · api $5/$25 per M");
+	assert.equal(formatFooter({ ...values, data: { served: { via: "sub" } } }), "⚠ answered by a login · long 1h (in use) · short 5m · api $5/$25 per M");
 	assert.equal(formatFooter({ lifetimes: { inUse: "long", short: {}, long: {} }, price: { via: "api", rates: { input: 2, output: 10 } }, data: { fetch: "failed" } }), "⚠ providers.dev: no data, fetch failed · cache lifetime unknown · api $2/$10 per M");
 	assert.equal(formatFooter({ ...values, data: { staleMs: 26 * HOUR } }), "⚠ providers.dev refresh failed: data 26h old · long 1h (in use) · short 5m · api $5/$25 per M");
 	assert.equal(formatFooter({ ...values, data: { staleMs: 40 * MIN } }), "⚠ providers.dev refresh failed: data 40m old · long 1h (in use) · short 5m · api $5/$25 per M");
@@ -287,6 +287,54 @@ test("providers.dev in the footer: an answer from elsewhere, no data, stale data
 	const guessed = { lifetimes: { inUse: "long" as const, short: { seconds: 300, mark: "guess" as const }, long: { mark: "partial" as const } }, price: { via: "sub or api" as const, rates: { input: 2, output: 10 } } };
 	assert.equal(formatFooter({ ...guessed, data: { guess: "access" } }), "long ? (in use) · short 5m ⚠ · sub or api $2/$10 per M · ⚠ login or API key unknown: shorter values");
 	assert.equal(formatFooter({ ...guessed, price: { via: "sub", subscription: true }, data: { guess: "login" } }), "long ? (in use) · short 5m ⚠ · sub, no per-token price · ⚠ no entry for this login: shorter values");
+});
+
+test("what answered, by name: the provider id as the report gives it, then the kind; several or none named: the kind alone", () => {
+	const values = { lifetimes: claude.lifetimes, price: claude.price };
+	const line = (upstreams: Parameters<typeof servedView>[0], width?: number) => formatFooter(warm(59 * MIN, { ...values, data: { served: servedView(upstreams) } }), width);
+	// One login, one API key, named.
+	assert.equal(line([{ provider: "devin", subscription: true }]), "cache warm · 59m left · ⚠ answered by devin (login) · long 1h (in use) · short 5m · api $5/$25 per M");
+	assert.equal(line([{ provider: "openrouter", subscription: false }]), "cache warm · 59m left · ⚠ answered by openrouter (API key) · long 1h (in use) · short 5m · api $5/$25 per M");
+	// An id providers.dev's data does not know: shown as reported.
+	assert.equal(line([{ provider: "some-new-gateway", model: "x", subscription: true }]), "cache warm · 59m left · ⚠ answered by some-new-gateway (login) · long 1h (in use) · short 5m · api $5/$25 per M");
+	// One upstream whose kind the report does not give: named, no kind.
+	assert.equal(line([{ provider: "antigravity" }]), "cache warm · 59m left · ⚠ answered by antigravity · long 1h (in use) · short 5m · api $5/$25 per M");
+	// Several upstreams: not known which, so none is named; the kind alone, as before.
+	assert.equal(line([{ provider: "devin", subscription: true }, { provider: "antigravity", subscription: true }]), "cache warm · 59m left · ⚠ answered by a login · long 1h (in use) · short 5m · api $5/$25 per M");
+	assert.equal(line([{ provider: "anthropic", subscription: true }, { provider: "anthropic", subscription: false }]), "cache warm · 59m left · ⚠ answered by another account · long 1h (in use) · short 5m · api $5/$25 per M");
+	// An empty report names nothing.
+	assert.deepEqual(servedView([]), { via: "sub or api" });
+	assert.equal(servedText(servedView([])), "another account");
+	// Narrow: "⚠ devin login", "⚠ openrouter API key", "⚠ by antigravity"; unnamed as before.
+	assert.equal(line([{ provider: "devin", subscription: true }], 60), "warm 59m · ⚠ devin login · long 1h · short 5m · api $5/$25");
+	assert.equal(line([{ provider: "openrouter", subscription: false }], 60), "warm 59m · ⚠ openrouter API key · long 1h · api $5/$25");
+	assert.equal(line([{ provider: "antigravity" }], 40), "warm 59m · ⚠ by antigravity · long 1h");
+	assert.equal(line([{ provider: "devin", subscription: true }, { provider: "antigravity", subscription: true }], 60), "warm 59m · ⚠ login answered · long 1h · api $5/$25");
+	assert.equal(line([{ provider: "devin", subscription: true }], 14), "warm 59m · ⚠", "at the last, the mark alone");
+	// In the warning colour, as text.
+	assert.match(formatFooter({ data: { served: servedView([{ provider: "devin", subscription: true }]) } }, Number.POSITIVE_INFINITY, paint)!, /^<warning>⚠ answered by devin \(login\)<\/>$/);
+});
+
+test("a reported provider id is text: control and format characters go, and it is cut to its width", () => {
+	// An escape sequence, a line break, a bidi override: no markup reaches the footer.
+	const view = servedView([{ provider: "dev\u001b[31min\nx\u202e", subscription: true }]);
+	assert.equal(view.by, "dev [31min x");
+	assert.doesNotMatch(formatFooter({ data: { served: view } })!, /[\u0000-\u001f\u007f-\u009f\u202e]/);
+	// Longer than 24 columns: cut at its end, in the footer; 64 in /cache-keeper.
+	const long = "a-provider-id-much-longer-than-any-real-one";
+	assert.equal(servedView([{ provider: long, subscription: true }]).by, "a-provider-id-much-long…");
+	assert.equal(visibleWidth(servedView([{ provider: long, subscription: true }]).by!), 24);
+	assert.equal(servedView([{ provider: long, subscription: true }], 64).by, long);
+	assert.equal(outsideText("模型".repeat(20), 10), "模型模型…", "wide characters count their columns");
+	// An id that is nothing once cleaned names nothing.
+	assert.deepEqual(servedView([{ provider: "\u0007\u200b", subscription: false }]), { via: "api" });
+});
+
+test("the entries looked up, shortest", () => {
+	assert.equal(lookupsText([{ provider: "devin", model: "claude-fable-5-2" }]), "devin/claude-fable-5-2");
+	assert.equal(lookupsText([{ provider: "claude-subscription", model: "claude-fable-5-2" }, { provider: "anthropic", model: "claude-fable-5-2" }]), "(claude-subscription or anthropic)/claude-fable-5-2");
+	assert.equal(lookupsText([{ provider: "devin", model: "a" }, { provider: "openrouter", model: "anthropic/b" }]), "devin/a or openrouter/anthropic/b");
+	assert.equal(lookupsText([{ provider: "x\u001b]8;;", model: "m\n" }]), "x ]8;;/m");
 });
 
 test("narrow terminals: wording goes first, then the least important values; the countdown and errors stay", () => {
@@ -331,14 +379,14 @@ test("at every width from 1 to 200 columns, in every state: within the width, an
 	const views: FooterView[] = [
 		warm(59 * MIN),
 		warm(59 * MIN, { keepWarm: { goal: { minutes: 120, until: Date.now() + HOUR, budget: { spent: "$0.36", of: "$2.07" } } }, ...claude }),
-		warm(25_000, { keepWarm: { goal: { minutes: 1440, until: Date.now() + 23 * HOUR, budget: { spent: "9", of: "10", refreshes: true } } }, ...claude, data: { served: "api" } }),
+		warm(25_000, { keepWarm: { goal: { minutes: 1440, until: Date.now() + 23 * HOUR, budget: { spent: "9", of: "10", refreshes: true } } }, ...claude, data: { served: { via: "api" } } }),
 		warm(59 * MIN, { ...claude, price: { via: "sub", subscription: true, rates: { input: 4, output: 20, above: 200_000 } } }),
 		warm(59 * MIN, { lifetimes: { inUse: "short", short: { seconds: 3600 }, long: { seconds: 3600 } }, sent: { what: { lifetimes: [], tiers: ["short"] }, conflict: false }, price: { via: "sub", subscription: true } }),
 		{ countdown: { state: "running" }, lifetimes: { inUse: "long", short: { seconds: 3600 }, long: { seconds: 3600 } }, sent: { what: { lifetimes: [], tiers: ["short"] }, conflict: false }, price: { via: "sub", subscription: true } },
-		warm(59 * MIN, { ...claude, lifetimes: { inUse: "short", short: { seconds: 300 }, long: { seconds: 3600 } }, countdownTier: "long", data: { served: "api" } }),
+		warm(59 * MIN, { ...claude, lifetimes: { inUse: "short", short: { seconds: 300 }, long: { seconds: 3600 } }, countdownTier: "long", data: { served: { via: "api" } } }),
 		{ countdown: { state: "cold" }, keepWarm: { fallback: true }, ...claude },
 		warm(24_000, { keepWarm: { ended: { stop: "budget", limit: "24 h", amounts: "$1.98 spent, a miss costs $2.07" } }, ...claude }),
-		warm(24_000, { keepWarm: { ended: { stop: "missed", limit: "2 h", amounts: "$1.22 spent, a miss costs $2.07" } }, ...claude, data: { served: "api", staleMs: 30 * HOUR } }),
+		warm(24_000, { keepWarm: { ended: { stop: "missed", limit: "2 h", amounts: "$1.22 spent, a miss costs $2.07" } }, ...claude, data: { served: { via: "api" }, staleMs: 30 * HOUR } }),
 		{ lifetimes: { inUse: "long", short: { seconds: 300, mark: "guess" }, long: { mark: "partial" } }, price: { via: "sub or api", partial: true }, data: { guess: "access", fetch: "offline", noEntry: true } },
 		{ lifetimes: { inUse: "long", short: {}, long: {} }, sent: { what: "none", conflict: false, retention: "long" }, price: { via: "api" }, data: { fetch: "failed" } },
 		warm(11 * HOUR, {
@@ -346,8 +394,12 @@ test("at every width from 1 to 200 columns, in every state: within the width, an
 			lifetimes: { inUse: "long", short: { seconds: 1800 }, long: { seconds: 43_200 } },
 			sent: { what: { lifetimes: [30 * MIN, 12 * HOUR], tiers: [] }, conflict: true },
 			price: { via: "api", rates: { input: 1.25, output: 10 } },
-			data: { served: "sub" },
+			data: { served: { via: "sub" } },
 		}),
+		warm(59 * MIN, { ...claude, data: { served: { via: "sub", by: "devin" } } }),
+		warm(25_000, { keepWarm: { ended: { stop: "failed", limit: "2 h", amounts: "$0.18 spent, a miss costs $2.07" } }, ...claude, data: { served: { via: "api", by: "openrouter" } } }),
+		{ countdown: { state: "cold" }, ...claude, data: { served: servedView([{ provider: "a-provider-id-much-longer-than-any-real-one", subscription: true }]) } },
+		warm(59 * MIN, { ...claude, data: { served: { via: "sub or api", by: "antigravity" } } }),
 	];
 	const text = (form: { text: string }[]) => form.map((piece) => piece.text).join("");
 	const isValue = (first: string) => /^(long|short|cache lifetime|api|sub|sent [^⚠])/.test(first);

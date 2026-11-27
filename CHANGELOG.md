@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **What answered, by name** — Through a proxy, the footer's warning names the upstream that answered by the provider id the proxy reported, then the kind: `⚠ answered by devin (login)`, narrower `⚠ devin login`; `⚠ answered by openrouter (API key)` (was `⚠ answered by a login` / `an API key`). Where the report names several upstreams, the kind alone, as before. `/cache-keeper` names it the same way and, where an entry is missing, the providers.dev entries looked up (`the last answer came from devin (login), looked up as devin/claude-fable-5-2: no entry for this model`); where the expected route answered it says so too (`answered by: anthropic (login)`). A reported id is shown as plain text, control characters removed, cut to 24 columns in the footer and 64 in `/cache-keeper`.
+
 ## [0.10.7] - 2026-11-24
 
 ### Removed
