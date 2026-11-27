@@ -1,6 +1,6 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { CacheMarker } from "./keep-warm.ts";
-import { accessVia, fieldStates, usableLifetime, type Found, type Upstream, type Via } from "./model-data.ts";
+import { accessVia, fieldStates, tokenCount, usableLifetime, type Found, type Upstream, type Via } from "./model-data.ts";
 import { formatCacheStatus, formatRemaining, stopLabel, type WarmStop } from "./trace.ts";
 
 /**
@@ -79,7 +79,6 @@ export function lifetimeText(seconds: number): string {
 }
 /** A price per million tokens: "$5", "$0.25", "$37.5". */
 const usd = (amount: number) => `$${amount >= 100 ? Math.round(amount) : Number(amount.toPrecision(3))}`;
-const tokenCount = (count: number) => (count >= 1_000_000 ? `${Number((count / 1_000_000).toFixed(1))}M` : count >= 1000 ? `${Math.round(count / 1000)}k` : String(count));
 /**
  * Text that comes from outside (a provider id a proxy reported), as plain text: control and format characters (an escape
  * sequence's ESC, a line break, a bidi override) become a space, runs of blanks one, and what is wider than `columns` is

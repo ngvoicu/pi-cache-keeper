@@ -2390,6 +2390,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		showData(ctx);
 	});
 	pi.on("session_tree", (_event, ctx) => {
+		// Shown only: the branch now selected decides what answered, not a refresh's report from before the move.
+		liveNamed = undefined;
 		// Another branch may hold other settings of the session's own: the latest entry on the branch now decides, from here
 		// on as a change made in the menu would.
 		readOwn(ctx);
@@ -2864,7 +2866,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (ctx.model && named) {
 			const own = foundFor(ctx, ctx.model);
 			const configured = data.checkedAt === undefined ? `${describeFound(own)} (not fetched yet${failed}; /cache-keeper-refresh fetches it)` : `${describeFound(own)} (checked ${formatDuration(Date.now() - data.checkedAt)} ago${failed}; /cache-keeper-refresh fetches it again)`;
-			const last = named.entry === null ? "no data: Provimux has not named a providers.dev entry for it" : `${describeFound(shownModel(ctx.model, named).found)} (from Provimux; /provimux-refresh reads it again)`;
+			const shown = shownModel(ctx.model, named);
+			// The price the footer states: at the current context, its tier included.
+			const rates = hasPrices(shown.model) ? priceAt(shown.model.cost, ctx.getContextUsage()?.tokens ?? undefined) : undefined;
+			const last = named.entry === null ? "no data: Provimux has not named a providers.dev entry for it" : `${describeFound(shown.found, rates)} (from Provimux; /provimux-refresh reads it again)`;
 			return `configured route: ${configured}; last answer, from ${servedText(servedView(named.upstreams, NOTE_ID_COLUMNS))}: ${last}. The footer's lifetimes and price are the last answer's. The countdown, keep-warm and the values in ${modelsPathLabel()} are what they would be without Provimux's figures`;
 		}
 		if (data.checkedAt === undefined) return `not fetched yet${failed}; /cache-keeper-refresh fetches it`;

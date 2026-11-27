@@ -360,6 +360,30 @@ test("figures told again with the same routes: the footer is drawn again; nothin
 	}
 });
 
+// The review's case (2026-11-27): 400,000 tokens of context on an entry whose price has a higher tier above 272,000.
+// /cache-keeper states the price the footer states, tier included.
+test("a price tier: /cache-keeper states the footer's price, tier included", async () => {
+	writeFileSync(settingsPath, JSON.stringify(SHORT));
+	try {
+		const id = "gpt-6.1-sol";
+		const ref = "openrouter/openai/gpt-6.1-sol";
+		if (!catalog.some((model) => model.id === id)) catalog.push({ ...proxy(id), contextWindow: 1_000_000 });
+		const tiered = { price: { billing: "per_use", input: 2, output: 10, cache_read: 0.1, cache_write: [], tiers: [{ input_tokens_above: 272_000, input: 4, output: 15, cache_read: 0.2, cache_write: null }] } };
+		const h = harness();
+		h.ctx.getContextUsage = () => ({ tokens: 400_000 });
+		await started(h, { provider: "provimux", models: { [id]: { upstreams: [OPENROUTER_KEY] } }, figures: figures({ [ref]: tiered }) });
+		h.select(id);
+		const footer = await run(h, id, OPENROUTER_KEY, ref, OPENROUTER_ACCOUNT, message(id, 1000, { cacheRead: 399_999 }));
+		assert.match(footer, /api \$4\/\$15 per M above 272k/);
+		assert.match(await h.note(), /last answer, from openrouter \(API key\): openrouter\/openai\/gpt-6\.1-sol \([^)]*\): price \$4\/\$15 per million above 272k \(from Provimux;/);
+		h.ctx.getContextUsage = () => ({ tokens: 1000 });
+		assert.match(await h.note(), /: price \$2\/\$10 per million \(from Provimux;/);
+		h.handlers.get("session_shutdown")!({}, h.ctx);
+	} finally {
+		writeFileSync(settingsPath, JSON.stringify({ cacheKeeper: { compactBeforeExpiry: false } }));
+	}
+});
+
 test("a name the owner set (opus): shown with the entry its answer names; registered in Pi as before", async () => {
 	writeFileSync(settingsPath, JSON.stringify(SHORT));
 	try {

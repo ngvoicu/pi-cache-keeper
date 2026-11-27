@@ -944,7 +944,11 @@ export function namedText(entries: Array<string | null>): string {
 	return `no data for ${entries.map((entry) => (entry === null ? "an answer without an entry" : shownEntry(entry))).join(" or ")}`;
 }
 
-export function describeFound(found: Found): string {
+/** A token count as the footer writes it: "272k", "1.5M". */
+export const tokenCount = (count: number) => (count >= 1_000_000 ? `${Number((count / 1_000_000).toFixed(1))}M` : count >= 1000 ? `${Math.round(count / 1000)}k` : String(count));
+
+/** `rates`: for entries the gateway named, the price at the current context, as the footer states it (its tier included). */
+export function describeFound(found: Found, rates?: { input: number; output: number; above?: number }): string {
 	// Entries the gateway named and has no values for: said, with nothing guessed.
 	if (found.named && found.refs.length === 0) return `${namedText(found.named.entries)}${found.named.entries.some((entry) => entry !== null) ? " (Provimux holds no providers.dev figures for it)" : ""}`;
 	// The line's label names providers.dev: "none" is its.
@@ -959,7 +963,7 @@ export function describeFound(found: Found): string {
 	const parts = [
 		facts.window === undefined ? undefined : `window ${facts.windowAtLeast ? "at least " : ""}${facts.window.toLocaleString("en-US")}`,
 		...(["short", "long"] as const).map((tier) => (facts[tier] === undefined ? undefined : facts[tier] === 0 ? `no safe ${tier} cache lifetime${rests(tier)}` : `${tier} cache ${lifetimeLabel(facts[tier])}${rests(tier)}`)),
-		facts.cost ? `price $${facts.cost.input}/$${facts.cost.output} per million${one?.price?.billing === "reference" ? " (the API list price; this account is not billed per token)" : ""}` : undefined,
+		facts.cost ? `price ${found.named && rates ? `$${rates.input}/$${rates.output} per million${rates.above === undefined ? "" : ` above ${tokenCount(rates.above)}`}` : `$${facts.cost.input}/$${facts.cost.output} per million`}${one?.price?.billing === "reference" ? " (the API list price; this account is not billed per token)" : ""}` : undefined,
 	].filter((part) => part !== undefined);
 	if (found.named) {
 		const dataset = found.named.figures?.datasetVersion;
