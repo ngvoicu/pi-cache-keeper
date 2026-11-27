@@ -2633,9 +2633,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const dataNote = (ctx: ExtensionContext): string => {
 		if (!config.modelData) return "off";
 		const failed = dataError ? `; the last refresh failed: ${dataError}` : "";
-		if (data.checkedAt === undefined) return `not fetched from ${DATA_SOURCE} yet${failed}; /cache-keeper-refresh fetches it`;
+		if (data.checkedAt === undefined) return `not fetched yet${failed}; /cache-keeper-refresh fetches it`;
 		const model = ctx.model;
-		let found = model ? describeFound(foundFor(ctx, model)) : "no model";
+		const own = model ? foundFor(ctx, model) : undefined;
+		let found = own ? `${describeFound(own)}${own.refs.length === 0 ? ", so Pi's own values are used" : ""}` : "no model";
 		const otherwise = servedOtherwise(model);
 		const lastAnswer = answeredFor(model);
 		if (model && otherwise) {
@@ -2648,7 +2649,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			// The expected route answered: what it was, each upstream the report names (several: not known which).
 			found += `; answered by: ${lastAnswer.map((upstream) => servedText(servedView([upstream], NOTE_ID_COLUMNS))).join(" or ")}`;
 		}
-		return `${found} (${DATA_SOURCE}, checked ${formatDuration(Date.now() - data.checkedAt)} ago${failed}; /cache-keeper-refresh fetches it again)`;
+		return `${found} (checked ${formatDuration(Date.now() - data.checkedAt)} ago${failed}; /cache-keeper-refresh fetches it again)`;
 	};
 
 	// A session's own value, as the menu and the transcript say it.
@@ -2695,7 +2696,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			`keepWarmMinutes: ${layer("keepWarmMinutes")} (${keepWarmNote(ctx.model)})`,
 			`fallbackCompactionModel: ${layer("fallbackCompactionModel")} (${fallbackNote(ctx)})`,
 			`cacheRetention: ${config.cacheRetention} (all sessions)`,
-			`modelData: ${config.modelData} (all sessions) (${dataNote(ctx)})`,
+			`modelData: ${config.modelData} (all sessions) (${config.modelData ? `from providers.dev: ${dataNote(ctx)}` : "off"})`,
 			ownKeys().length > 0 ? `This session's own: ${describeOwn(own, true)}; every other setting follows the defaults.` : "This session has no settings of its own: every setting follows the defaults.",
 		].join("\n");
 	};

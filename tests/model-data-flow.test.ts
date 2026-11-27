@@ -301,6 +301,9 @@ test("/cache-keeper-refresh fetches again, keeps a value the user set, and a fai
 	h.select("provimux", "no-such-model");
 	await h.commands.get("cache-keeper-refresh")!("", h.ctx);
 	assert.match(h.notices.at(-1)!, /\nThis model: providers\.dev has no entry for it, so Pi's own values stay in use$/);
+	// /cache-keeper: the line's label names providers.dev, once.
+	await h.commands.get("cache-keeper")!("", h.ctx);
+	assert.match(h.notices.at(-1)!, /\nmodel data from providers\.dev: none for this model, so Pi's own values are used \(checked \d+ s ago; \/cache-keeper-refresh fetches it again\)\n/);
 });
 
 test("with modelData set to false, the values this extension wrote are taken out and the user's stay", async () => {
@@ -424,11 +427,11 @@ test("what answered, named: in the footer where it is not what the values are fo
 	// The expected route answered: named in /cache-keeper only, not in the footer.
 	answered([login("anthropic")]);
 	assert.equal(h.statuses.get("cache-keeper"), LOGIN);
-	assert.match(await note(), /^claude-subscription\/claude-opus-5-5: [^;]*; answered by: anthropic \(login\) \(https:\/\/providers\.dev, checked /);
+	assert.match(await note(), /^claude-subscription\/claude-opus-5-5: [^;]*; answered by: anthropic \(login\) \(checked /);
 	// A login of another service whose model has no entry: which, and which entry was looked for.
 	answered([login("devin", "claude-fable-5-2")]);
 	assert.match(h.statuses.get("cache-keeper")!, /^⚠ answered by devin \(login\) · /);
-	assert.match(await note(), /; the last answer came from devin \(login\), looked up as devin\/claude-fable-5-2: no entry for this model \(/);
+	assert.match(await note(), /; the last answer came from devin \(login\), looked up as devin\/claude-fable-5-2: none for this model \(/);
 	// An API key, named; its entry found: its values, as before.
 	answered([key("anthropic")]);
 	assert.match(h.statuses.get("cache-keeper")!, /^⚠ answered by anthropic \(API key\) · /);
@@ -436,15 +439,15 @@ test("what answered, named: in the footer where it is not what the values are fo
 	// An API key of a provider not fetched: no entry, the lookup said.
 	answered([key("openrouter")]);
 	assert.match(h.statuses.get("cache-keeper")!, /^⚠ answered by openrouter \(API key\) · /);
-	assert.match(await note(), /; the last answer came from openrouter \(API key\), looked up as openrouter\/claude-opus-5-5: no entry for this model \(/);
+	assert.match(await note(), /; the last answer came from openrouter \(API key\), looked up as openrouter\/claude-opus-5-5: none for this model \(/);
 	// An id providers.dev's data does not know, its kind not given: shown as reported.
 	answered([{ provider: "brand-new-gateway" }]);
 	assert.match(h.statuses.get("cache-keeper")!, /^⚠ answered by brand-new-gateway · /);
-	assert.match(await note(), /; the last answer came from brand-new-gateway, looked up as brand-new-gateway\/claude-opus-5-5: no entry for this model \(/);
+	assert.match(await note(), /; the last answer came from brand-new-gateway, looked up as brand-new-gateway\/claude-opus-5-5: none for this model \(/);
 	// Several upstreams: the kind alone; every entry looked up named.
 	answered([login("devin", "claude-fable-5-2"), key("openrouter")]);
 	assert.match(h.statuses.get("cache-keeper")!, /^⚠ answered by another account · /);
-	assert.match(await note(), /; the last answer came from another account, looked up as devin\/claude-fable-5-2 or openrouter\/claude-opus-5-5: no entry for this model \(/);
+	assert.match(await note(), /; the last answer came from another account, looked up as devin\/claude-fable-5-2 or openrouter\/claude-opus-5-5: none for this model \(/);
 	// An empty report names nothing: no warning, no "answered by".
 	answered([]);
 	assert.equal(h.statuses.get("cache-keeper"), LOGIN);

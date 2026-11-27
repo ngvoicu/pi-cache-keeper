@@ -285,7 +285,7 @@ test("what providers.dev has for each field: a lifetime evaluations found unsafe
 		describeFound(unsure),
 		"claude-subscription/claude-opus-5-5 or anthropic/claude-opus-5-5: window 1,000,000, short cache 5 min, long cache 1 h, price $4/$20 per million; cache short: the smaller of the login's and the API key's, because which one serves the model is not known",
 	);
-	assert.equal(describeFound(exact("openai", "nope")), "no entry for this model");
+	assert.equal(describeFound(exact("openai", "nope")), "none for this model");
 });
 
 test("what goes into models.json: the window replaces pi's, lifetimes and prices only fill what pi lacks", () => {

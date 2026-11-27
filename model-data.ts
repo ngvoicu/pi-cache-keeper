@@ -692,9 +692,10 @@ export function parseAnsweredEvent(value: unknown): { provider: string; model: s
 
 const lifetimeLabel = (seconds: number): string => (seconds % 3600 === 0 ? `${seconds / 3600} h` : seconds % 60 === 0 ? `${seconds / 60} min` : `${seconds} s`);
 
-/** One line for `/cache-keeper`: which entry describes the model and what it gave. */
+/** One part of `/cache-keeper`'s `model data from providers.dev:` line: which entry describes the model and what it gave. */
 export function describeFound(found: Found): string {
-	if (found.refs.length === 0) return "no entry for this model";
+	// The line's label names providers.dev: "none" is its.
+	if (found.refs.length === 0) return "none for this model";
 	const { facts } = found;
 	const parts = [
 		facts.window === undefined ? undefined : `window ${facts.windowAtLeast ? "at least " : ""}${facts.window.toLocaleString("en-US")}`,

@@ -1,4 +1,5 @@
 // Renders each <figure> in figures.html to a 2x PNG next to it: node media/render-figures.mjs
+// Only some of them: node media/render-figures.mjs footer-states settings-menu
 // Needs Google Chrome (set CHROME for another path) and network access for the pi.dev fonts.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -8,7 +9,10 @@ import { fileURLToPath } from "node:url";
 
 const chrome = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const source = new URL("figures.html", import.meta.url);
-const ids = [...readFileSync(source, "utf8").matchAll(/<figure id="([\w-]+)"/g)].map((match) => match[1]);
+const all = [...readFileSync(source, "utf8").matchAll(/<figure id="([\w-]+)"/g)].map((match) => match[1]);
+const asked = process.argv.slice(2);
+for (const id of asked) if (!all.includes(id)) throw new Error(`no figure ${id} in figures.html`);
+const ids = asked.length > 0 ? asked : all;
 // A fresh profile per run: a reused one restores the previous window size and garbles the screenshot.
 const run = (args) => {
 	const profile = mkdtempSync(join(tmpdir(), "figures-chrome-"));
