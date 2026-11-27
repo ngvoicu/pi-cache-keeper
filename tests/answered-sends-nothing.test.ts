@@ -6,7 +6,7 @@
 // every cost booked must be the same. With PCK_RELEASED set to another copy's index.ts (pi-cache-keeper 0.10.8), the
 // first run is that copy's. Nothing leaves the process: the global fetch throws.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { mock } from "node:test";
@@ -120,6 +120,8 @@ interface Setup {
 	released?: boolean;
 	/** What happens while the period's request is out, after it was sent and before its answer ends (a proxy's report). */
 	whileOut?: (announce: (upstreams: readonly unknown[]) => void) => void;
+	/** At the session's start, before the period's run: what a proxy extension tells (its routes, say). */
+	atStart?: (routes: (payload: unknown) => void) => void;
 	/** What happens in the period's run after its answer, before Pi goes idle (a proxy's reports, say). */
 	afterAnswer?: (run: { announce: (upstreams: readonly unknown[]) => void; until: (at: number) => Promise<void> }) => Promise<void> | void;
 }
@@ -242,6 +244,7 @@ async function session(s: Setup) {
 		if (compaction) await compaction;
 	};
 	emit("session_start");
+	s.atStart?.((payload) => bus.get("model-upstreams")?.(payload));
 	// Pi's own warmer: its refreshes through the same adapter and provider; its questions to the extension, recorded.
 	const decisions: { at: number; answer: string | undefined }[] = [];
 	const warmer =
@@ -350,16 +353,17 @@ const LOGIN_ACCOUNT = "a.cccccccccccccccccccc";
 const KEY_ACCOUNT = "a.dddddddddddddddddddd";
 const login = { provider: "anthropic", subscription: true };
 const key = { provider: "openrouter", subscription: false };
-/** One entry's figures as the extension saves them with the routes: other lifetimes and prices than Pi has registered. */
+/** One entry's figures as the gateway gives them (contract 1): other lifetimes and prices than Pi has registered. */
 const figure = (input: number, output: number, cacheRead: number, cacheWrite: number, short: number, long?: number) => ({
-	facts: { short, ...(long === undefined ? {} : { long }), cost: { input, output, cacheRead, cacheWrite } },
-	basis: { short: { basis: "measured" } },
+	price: { billing: "per_use", input, output, cache_read: cacheRead, cache_write: [{ lifetime_s: null, price: cacheWrite }] },
+	cache: { short: { rely_on_s: short, basis: "measured" }, ...(long === undefined ? {} : { long: { rely_on_s: long, basis: "measured" } }) },
 });
 const FIGURES = {
 	"claude-subscription/claude-fable-5-2": figure(4, 20, 0.4, 5, 3600, 3600),
 	"openrouter/anthropic/claude-fable-5.2": figure(10, 50, 0.5, 12.5, 150, 3600),
 	"openai-codex/gpt-6.2-sol": figure(2, 10, 0.1, 0, 150),
 	"openrouter/openai/gpt-6.1-sol": figure(4, 20, 0.4, 0, 300),
+	"claude-subscription/claude-opus-5-5": figure(4, 20, 0.4, 5, 3600, 3600),
 };
 interface Said {
 	upstream: Record<string, unknown>;
@@ -378,6 +382,13 @@ interface Case {
 	refreshedBy?: Said;
 	/** The routes the gateway's list gives after a reload at 30 s (a key demoted while Pi is open). */
 	reload?: Record<string, unknown>;
+	/**
+	 * The figures held at the start lack these entries; the read the answer brings (pi-provimux now, not 105.0.8) tells
+	 * them at 5 s with the routes last told, while the gateway's own priorities changed (finding 15's case).
+	 */
+	figuresLater?: string[];
+	/** At this time the session switches to another model, and back a minute later. */
+	switchAt?: number;
 	piWarmer?: boolean;
 }
 const fable = (promptCache?: { short?: number; long?: number }) => ({ ...claudeGateway(), provider: "provimux", id: "claude-fable-5-2", cost: { input: 8, output: 40, cacheRead: 0.4, cacheWrite: 10 }, promptCache });
@@ -406,6 +417,21 @@ const CASES: Case[] = [
 		minutes: 30,
 		until: 1200,
 	},
+	{
+		name: "an answer's list read after a key was put first on the gateway, Pi's own warmer, keep-warm off",
+		model: fable({ short: 3600, long: 3600 }),
+		route: { upstreams: [login], fallbacks: [key] },
+		answer: answeredBy(key, "openrouter/anthropic/claude-fable-5.2", KEY_ACCOUNT),
+		figuresLater: ["openrouter/anthropic/claude-fable-5.2"],
+		piWarmer: true,
+		minutes: 0,
+		until: 1200,
+	},
+	// The owner's case and a name the owner set, through a turn, the extension's refreshes (where it makes them), idle
+	// minutes and a switch to another model and back: every footer's time and keep-warm parts are compared below.
+	{ name: "the owner's fallback through a switch away and back", model: fable({ short: 3600, long: 3600 }), route: { upstreams: [login], fallbacks: [key] }, answer: answeredBy(key, "openrouter/anthropic/claude-fable-5.2", KEY_ACCOUNT), switchAt: 400, minutes: 30, until: 900 },
+	{ name: "the owner's fallback, the login's refreshes, a switch away and back", model: fable({ short: 300, long: 3600 }), route: { upstreams: [login], fallbacks: [key] }, answer: answeredBy(key, "openrouter/anthropic/claude-fable-5.2", KEY_ACCOUNT), refreshedBy: answeredBy(login, "claude-subscription/claude-fable-5-2", LOGIN_ACCOUNT), switchAt: 400, minutes: 30, until: 900 },
+	{ name: "a name the owner set (opus), keep-warm, a switch away and back", model: { ...fable({ short: 3600, long: 3600 }), id: "opus", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }, route: { upstreams: [{ ...login, model: "opus" }] }, answer: answeredBy({ ...login, model: "opus" }, "claude-subscription/claude-opus-5-5", LOGIN_ACCOUNT), switchAt: 600, minutes: 30, until: 1200 },
 	{ name: "three hours of keep-warm", model: fable({ short: 300, long: 3600 }), route: { upstreams: [login], fallbacks: [key] }, answer: answeredBy(login, "claude-subscription/claude-fable-5-2", LOGIN_ACCOUNT), minutes: 180, until: 11_000 },
 ];
 
@@ -422,8 +448,11 @@ async function run(c: Case, released: boolean) {
 		checkedAt: START,
 		providers: { "claude-subscription": {}, anthropic: {}, openrouter: {}, "openai-codex": {} },
 		upstreams: { provimux: { [c.model.id]: c.route } },
-		...(released ? {} : { gateway: { provimux: { state: "held", entries: FIGURES } } }),
 	};
+	const held = (entries: Record<string, unknown>) => ({ contract: 1, state: "held", entries });
+	const atFirst = Object.fromEntries(Object.entries(FIGURES).filter(([ref]) => !c.figuresLater?.includes(ref)));
+	// What pi-provimux tells at the start: 105.0.8 the routes, now the routes with the gateway's figures.
+	const told = (entries: Record<string, unknown>) => ({ provider: "provimux", models: { [c.model.id]: c.route }, ...(released ? {} : { figures: held(entries) }) });
 	let current: Awaited<ReturnType<typeof session>> | undefined;
 	const s = await session({
 		model: c.model,
@@ -438,29 +467,59 @@ async function run(c: Case, released: boolean) {
 		},
 		piWarmer: c.piWarmer,
 		released,
+		atStart: (routes) => routes(told(atFirst)),
 	});
 	current = s;
 	try {
+		if (c.figuresLater && !released) {
+			await s.until(5);
+			s.routes(told(FIGURES));
+		}
 		if (c.reload) {
 			await s.until(30);
-			s.routes({ provider: "provimux", models: { [c.model.id]: c.reload } });
+			s.routes({ ...told(FIGURES), models: { [c.model.id]: c.reload } });
+		}
+		if (c.switchAt) {
+			await s.until(c.switchAt);
+			s.ctx.model = { ...c.model, id: "another-model" };
+			s.emit("model_select");
+			await s.until(c.switchAt + 60);
+			s.ctx.model = c.model;
+			s.emit("model_select");
 		}
 		await s.until(c.until);
 		const booked = s.traces().filter((record: Any) => record.event === "warm" && record.usage).map((record: Any) => ({ refresh: record.refresh, cost: record.usage.cost, spent: record.budget?.spent, limit: record.budget?.limit }));
 		const piWarm = s.branch.filter((entry: Any) => entry.kind === "cache_warm").map((entry: Any) => entry.usage.cost.total);
-		return { wires: s.wires, booked, piWarm, decisions: s.decisions };
+		const note = await s.command();
+		return { wires: s.wires, booked, piWarm, decisions: s.decisions, shown: s.statuses, note };
 	} finally {
 		s.done();
 	}
 }
 
 const N = 4000;
+/** A footer's parts that speak of time or keep-warm (and everything else 0.10.8 says), without the lifetimes, the price and the data notes. */
+const timeParts = (footer: string | undefined) =>
+	(footer ?? "")
+		.split(" · ")
+		.filter((part) => !/^(short|long) |^cache lifetime unknown$|^(sub|api|sub or api)\b|^price unknown$|^providers\.dev: no data|^no data/.test(part))
+		.join(" · ");
 
 for (const c of CASES) {
 	test(`what answered changes nothing that is sent or booked: ${c.name}`, async () => {
 		const before = await run(c, true);
 		const now = await run(c, false);
-		console.log(JSON.stringify({ case: c.name, released: before, now }));
+		// Every footer drawn: what speaks of time or keep-warm, word for word as 0.10.8 drew it.
+		const timeLine = (shown: string[]) => shown.map(timeParts).filter((parts, i, all) => i === 0 || parts !== all[i - 1]);
+		assert.deepEqual(timeLine(now.shown), timeLine(before.shown));
+		const { shown: shownBefore, note: noteBefore, ...releasedRun } = before;
+		const { shown, note, ...nowRun } = now;
+		// With PCK_FOOTERS set to a file: every footer drawn and /cache-keeper at the end, both runs, for reading side by side.
+		if (process.env.PCK_FOOTERS) appendFileSync(process.env.PCK_FOOTERS, `${JSON.stringify({ case: c.name, released: { footers: shownBefore.filter((text, i, all) => text !== all[i - 1]), note: noteBefore }, now: { footers: shown.filter((text, i, all) => text !== all[i - 1]), note } })}\n`);
+		console.log(JSON.stringify({ case: c.name, released: releasedRun, now: nowRun, footer: { released: shownBefore.filter(Boolean).at(-1), now: shown.filter(Boolean).at(-1) } }));
+		// The entry's price reached the footer: the figures were told and used for what is shown.
+		const { input, output } = (FIGURES as Record<string, { price: { input: number; output: number } }>)[c.answer.entry].price;
+		assert.ok(shown.some((text) => text.includes(`$${input}/$${output}`)), `${c.name}: ${shown.at(-1)}`);
 		assert.deepEqual(now.wires, before.wires);
 		assert.deepEqual(now.booked, before.booked);
 		assert.deepEqual(now.piWarm, before.piWarm);

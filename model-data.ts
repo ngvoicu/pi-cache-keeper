@@ -80,8 +80,6 @@ export interface DataStore {
 	upstreams: Record<string, Record<string, Route>>;
 	/** pi provider id → model id → what this extension wrote into models.json. */
 	written: Record<string, Record<string, Written>>;
-	/** pi provider id → the figures the gateway behind it gave (Provimux), as its extension last told them. */
-	gateway?: Record<string, GatewayFigures>;
 }
 
 export const emptyStore = (): DataStore => ({ version: 1, providers: {}, upstreams: {}, written: {} });
@@ -375,9 +373,6 @@ function entryLookup(entry: string | null): Lookup {
 	return { provider: entry.slice(0, slash), model: entry.slice(slash + 1), entry };
 }
 
-/** Whether every lookup is of an entry the gateway named: its values are then the gateway's alone. */
-export const allNamed = (lookups: Lookup[]): boolean => lookups.length > 0 && lookups.every((lookup) => lookup.entry !== undefined);
-
 /** How a model is reached: a subscription login ("sub"), an API key ("api"), or either (a proxy that does not say). */
 export type Via = "sub" | "api" | "sub or api";
 
@@ -603,7 +598,6 @@ export function loadStore(): DataStore {
 			providers: part("providers") as DataStore["providers"],
 			upstreams: loadRoutes(parsed.upstreams),
 			written: part("written") as DataStore["written"],
-			...(isPlainObject(parsed.gateway) ? { gateway: loadGateway(parsed.gateway) } : {}),
 		};
 	} catch {
 		// Missing, cut short or from another version: start again; the next refresh fills it.
@@ -907,26 +901,6 @@ export function parseGatewayFigures(value: unknown): GatewayFigures | undefined 
 	const version = cleanReportedId(value.dataset_version);
 	const generated = typeof value.generated_at === "string" ? day(value.generated_at.slice(0, 10)) : undefined;
 	return { state, ...(version ? { datasetVersion: version } : {}), ...(generated ? { generatedAt: generated } : {}), entries };
-}
-
-/** Saved gateway figures, read back through the same parser as they were first read (their entries already as facts). */
-function loadGateway(value: unknown): DataStore["gateway"] {
-	const gateway: NonNullable<DataStore["gateway"]> = {};
-	if (!isPlainObject(value)) return gateway;
-	for (const [provider, figures] of Object.entries(value)) {
-		if (!isPlainObject(figures) || typeof figures.state !== "string" || !isPlainObject(figures.entries)) continue;
-		const entries: Record<string, GatewayEntry> = {};
-		for (const [ref, entry] of Object.entries(figures.entries)) {
-			if (isPlainObject(entry) && isPlainObject(entry.facts) && isPlainObject(entry.basis)) entries[ref] = entry as unknown as GatewayEntry;
-		}
-		gateway[provider] = {
-			state: figures.state,
-			...(typeof figures.datasetVersion === "string" ? { datasetVersion: figures.datasetVersion } : {}),
-			...(typeof figures.generatedAt === "string" ? { generatedAt: figures.generatedAt } : {}),
-			entries,
-		};
-	}
-	return gateway;
 }
 
 /**

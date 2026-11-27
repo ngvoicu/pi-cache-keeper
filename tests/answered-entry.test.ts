@@ -14,6 +14,8 @@ const modelsPath = join(dir, "models.json");
 const storePath = join(dir, "cache-keeper-models.json");
 writeFileSync(settingsPath, JSON.stringify({ cacheKeeper: { compactBeforeExpiry: false } }));
 const { default: cacheKeeper } = await import("../index.ts");
+// With PCK_RELEASED set to another copy's index.ts (pi-cache-keeper 0.10.8), the twin runs below are that copy's.
+const { default: releasedKeeper } = process.env.PCK_RELEASED ? await import(process.env.PCK_RELEASED) : { default: cacheKeeper };
 const { describeFound, findFacts, gatewayEntryOf, loadStore, lookupsFor, parseAnsweredEvent, parseEntryEvent, parseGatewayFigures, parseUpstreamsEvent } = await import("../model-data.ts");
 const fireworks = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "fixtures", "fireworks-entries.json"), "utf8")) as { entries: Array<{ ref: string; pricing: { billing: string; rules: Array<{ meter: string; amount: number }> } }> };
 
@@ -138,7 +140,7 @@ const proxy = (id: string, cost = { input: 8, output: 40, cacheRead: 0.8, cacheW
 const catalog: FakeModel[] = [proxy("claude-fable-5-2"), proxy("opus", { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }), proxy("house-model", { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })];
 
 /** `branch`: the session's entries, as one branch; `sessions`: Pi's own SessionManager in its place (a real tree). */
-function harness(branch: unknown[] = [], sessions?: { getBranch(): unknown[]; getEntries(): unknown[]; appendCustomEntry(type: string, data: unknown): string }) {
+function harness(branch: unknown[] = [], sessions?: { getBranch(): unknown[]; getEntries(): unknown[]; appendCustomEntry(type: string, data: unknown): string }, keeper: (pi: never) => void = cacheKeeper) {
 	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 	const commands = new Map<string, (args: string, ctx: unknown) => Promise<unknown>>();
 	const statuses = new Map<string, string | undefined>();
@@ -189,7 +191,7 @@ function harness(branch: unknown[] = [], sessions?: { getBranch(): unknown[]; ge
 			return true;
 		},
 	};
-	cacheKeeper(pi as never);
+	keeper(pi as never);
 	const ctx = {
 		hasUI: true,
 		mode: "print",
@@ -288,6 +290,16 @@ const run = async (h: Harness, model: string, upstream: Record<string, unknown>,
 	await h.settle();
 	return h.statuses.get("cache-keeper")!;
 };
+/** The same run as pi-provimux 105.0.8 tells it: the answer alone. */
+const runUnnamed = async (h: Harness, model: string, upstream: Record<string, unknown>, answer: ReturnType<typeof message>) => {
+	h.handlers.get("agent_start")!({}, h.ctx);
+	h.emit("model-upstreams:answered", { provider: "provimux", model, upstreams: [upstream] });
+	h.branch.push(answer);
+	h.handlers.get("message_end")!({ message: answer.message }, h.ctx);
+	h.handlers.get("agent_settled")!({}, h.ctx);
+	await h.settle();
+	return h.statuses.get("cache-keeper")!;
+};
 const started = async (h: Harness, routes: unknown = ROUTES, reason = "startup") => {
 	h.handlers.get("session_start")!({ reason }, h.ctx);
 	await h.settle();
@@ -295,7 +307,9 @@ const started = async (h: Harness, routes: unknown = ROUTES, reason = "startup")
 	await h.settle();
 };
 const SHORT = { cacheKeeper: { cacheRetention: "short", compactBeforeExpiry: false } };
-const FALLBACK = /^cache warm · 4m left · ⚠ answered by openrouter \(API key\) · short 5m \(in use\) · long 1h · api \$10\/\$50 per M$/;
+// 0.10.8 says here: "⚠ answered by openrouter (API key) · cache lifetime unknown · api $8/$40 per M · providers.dev: no data
+// for this model", with no countdown (it knows no lifetime). Only the lifetimes and the price are the entry's.
+const FALLBACK = /^⚠ answered by openrouter \(API key\) · short 5m · long 1h · api \$10\/\$50 per M$/;
 
 test("after a fallback: the footer and /cache-keeper's last answer show the entry that answered; nothing else changes", async () => {
 	writeFileSync(settingsPath, JSON.stringify(SHORT));
@@ -307,7 +321,7 @@ test("after a fallback: the footer and /cache-keeper's last answer show the entr
 		assert.match(await run(h, FABLE, OPENROUTER_KEY, OPENROUTER, OPENROUTER_ACCOUNT, message(FABLE, 1000, { cacheRead: 4000 })), FALLBACK);
 		assert.match(
 			await h.note(),
-			/^configured route: none for this model \(checked [^;]+; \/cache-keeper-refresh fetches it again\); last answer, from openrouter \(API key\): openrouter\/anthropic\/claude-fable-5\.2 \(Provimux's copy of providers\.dev's data, dataset standin0 of 2026-11-27\): window 1,000,000, short cache 5 min \(measured, 2026-11-17\), long cache 1 h \(measured, 2026-11-17\), price \$10\/\$50 per million \(from Provimux; \/provimux-refresh reads it again\)\. The footer's lifetime, countdown and price are the last answer's; keeping the cache warm and the values in \S+ go by the configured route's, as before$/,
+			/^configured route: none for this model \(checked [^;]+; \/cache-keeper-refresh fetches it again\); last answer, from openrouter \(API key\): openrouter\/anthropic\/claude-fable-5\.2 \(Provimux's copy of providers\.dev's data, dataset standin0 of 2026-11-27\): window 1,000,000, short cache 5 min \(measured, 2026-11-17\), long cache 1 h \(measured, 2026-11-17\), price \$10\/\$50 per million \(from Provimux; \/provimux-refresh reads it again\)\. The footer's lifetimes and price are the last answer's\. The countdown, keep-warm and the values in \S+ are what they would be without Provimux's figures$/,
 		);
 		// What is registered in Pi is what it was: the figures are shown, never written.
 		assert.equal(JSON.stringify(h.overrides() ?? null), before);
@@ -323,13 +337,36 @@ test("after a fallback: the footer and /cache-keeper's last answer show the entr
 	}
 });
 
+// Finding 15's other half: pi-provimux tells the figures an answer's list read brought with the routes last told. Here
+// that changes what is shown, and nothing else: no saved data, no models.json, the routes as they were.
+test("figures told again with the same routes: the footer is drawn again; nothing is saved or written", async () => {
+	writeFileSync(settingsPath, JSON.stringify(SHORT));
+	try {
+		const h = harness();
+		const missing = { ...ROUTES, figures: figures({ [LOGIN_ENTRY]: entry({ input: 8, output: 40, short: 3600, long: 3600 }) }) };
+		await started(h, missing);
+		h.select(FABLE);
+		assert.equal(await run(h, FABLE, OPENROUTER_KEY, OPENROUTER, OPENROUTER_ACCOUNT, message(FABLE, 1000, { cacheRead: 4000 })), "⚠ answered by openrouter (API key) · cache lifetime unknown · api, price unknown · providers.dev: no data for openrouter/anthropic/claude-fable-5.2");
+		const saved = readFileSync(storePath, "utf8");
+		const written = JSON.stringify(h.overrides() ?? null);
+		h.emit("model-upstreams", ROUTES);
+		await h.settle();
+		assert.match(h.statuses.get("cache-keeper")!, FALLBACK);
+		assert.equal(readFileSync(storePath, "utf8"), saved);
+		assert.equal(JSON.stringify(h.overrides() ?? null), written);
+		h.handlers.get("session_shutdown")!({}, h.ctx);
+	} finally {
+		writeFileSync(settingsPath, JSON.stringify({ cacheKeeper: { compactBeforeExpiry: false } }));
+	}
+});
+
 test("a name the owner set (opus): shown with the entry its answer names; registered in Pi as before", async () => {
 	writeFileSync(settingsPath, JSON.stringify(SHORT));
 	try {
 		const h = harness();
 		await started(h);
 		h.select("opus");
-		assert.match(await run(h, "opus", { ...LOGIN, model: "opus" }, OPUS, LOGIN_ACCOUNT, message("opus", 1000, { cacheRead: 4000 })), /^cache warm · 59m left · short 1h \(in use\) · long 1h · sub, counted at \$4\/\$20 per M$/);
+		assert.match(await run(h, "opus", { ...LOGIN, model: "opus" }, OPUS, LOGIN_ACCOUNT, message("opus", 1000, { cacheRead: 4000 })), /^short 1h · long 1h · sub, counted at \$4\/\$20 per M$/);
 		assert.match(await h.note(), /; last answer, from anthropic \(login\): claude-subscription\/claude-opus-5-5 \(Provimux's copy [^)]*\): window 1,000,000, short cache 1 h \(measured, 2026-11-17\), long cache 1 h \(measured, 2026-11-17\), price \$4\/\$20 per million \(the API list price; this account is not billed per token\) \(from Provimux; \/provimux-refresh reads it again\)\./);
 		// Looked up as 0.10.8 looks it up (by the name: nothing), so nothing is written for it.
 		assert.equal(h.overrides()?.provimux?.modelOverrides?.opus, undefined);
@@ -363,67 +400,83 @@ test("answers without entries (pi-provimux 105.0.8, or a gateway without figures
 	await h.settle();
 	assert.match(h.statuses.get("cache-keeper")!, /^⚠ answered by openrouter \(API key\) · cache lifetime unknown · api \$8\/\$40 per M · providers\.dev: no data for this model$/);
 	assert.match(await h.note(), /the last answer came from openrouter \(API key\), looked up as openrouter\/claude-fable-5-2: none for this model \(checked /);
-	assert.equal(loadStore().gateway, undefined);
+	assert.ok(!("gateway" in loadStore()));
 	assert.ok(h.branch.length === 0, "nothing is written into the session");
 	h.handlers.get("session_shutdown")!({}, h.ctx);
 });
 
+// The parts of a footer that speak of time or keep-warm: all but the lifetimes, the price and the data notes.
+const timeParts = (footer: string | undefined) =>
+	(footer ?? "").split(" · ").filter((part) => !/^(short|long) |^cache lifetime unknown$|^(sub|api|sub or api)\b|^price unknown$|^providers\.dev: no data|^no data/.test(part));
+
 // The reviews' history cases (2026-11-27): what is shown follows the model's own last answer on the branch you are on.
-test("the entry belongs to its answer: another model and back, an answer on another model, a new answer, /tree, a 1-hour write, a resume", async () => {
+// Each step runs twice: as pi-provimux 105.0.8 tells it (no entry, no figures; with PCK_RELEASED, by 0.10.8 itself), and
+// as it tells it now. What speaks of time is word for word the same; only the lifetimes and the price are the entry's.
+test("the entry belongs to its answer, and time is told as before: another model and back, an answer on another model, a new answer, /tree, a 1-hour write, a resume", async () => {
 	writeFileSync(settingsPath, JSON.stringify(SHORT));
-	try {
-		const h = harness();
-		await started(h);
+	const steps = async (named: boolean) => {
+		const shown: Record<string, string | undefined> = {};
+		const keeper = named ? cacheKeeper : releasedKeeper;
+		const routes = named ? ROUTES : ROUTES_ONLY;
+		const runOn = (h: Harness, model: string, upstream: Record<string, unknown>, ref: string, account: string, answer: ReturnType<typeof message>) =>
+			named ? run(h, model, upstream, ref, account, answer) : runUnnamed(h, model, upstream, answer);
+		const h = harness([], undefined, keeper);
+		await started(h, routes);
 		h.select(FABLE);
-		const fallbackAnswer = message(FABLE, 1000, { cacheRead: 4000 });
-		assert.match(await run(h, FABLE, OPENROUTER_KEY, OPENROUTER, OPENROUTER_ACCOUNT, fallbackAnswer), FALLBACK, "the fallback");
-		assert.equal(h.branch.filter((entry) => (entry as { customType?: string }).customType === "cache-keeper-answered").length, 1, "kept once");
-
+		shown.fallback = await runOn(h, FABLE, OPENROUTER_KEY, OPENROUTER, OPENROUTER_ACCOUNT, message(FABLE, 1000, { cacheRead: 4000 }));
+		shown.kept = String(h.branch.filter((entry) => (entry as { customType?: string }).customType === "cache-keeper-answered").length);
 		h.select("opus");
 		h.select(FABLE);
 		h.handlers.get("agent_settled")!({}, h.ctx);
-		assert.match(h.statuses.get("cache-keeper")!, FALLBACK, "back from another model");
-
-		// An answer on another model (a 1-hour write on opus) leaves this model's shown countdown and tier its own.
+		shown.back = h.statuses.get("cache-keeper");
 		h.select("opus");
-		await run(h, "opus", { ...LOGIN, model: "opus" }, OPUS, LOGIN_ACCOUNT, message("opus", 0, { cacheWrite: 4000, cacheWrite1h: 4000 }));
+		await runOn(h, "opus", { ...LOGIN, model: "opus" }, OPUS, LOGIN_ACCOUNT, message("opus", 0, { cacheWrite: 4000, cacheWrite1h: 4000 }));
 		h.select(FABLE);
 		h.handlers.get("agent_settled")!({}, h.ctx);
-		assert.match(h.statuses.get("cache-keeper")!, FALLBACK, "after an answer on another model");
-
+		shown.otherModel = h.statuses.get("cache-keeper");
 		const loginAnswer = message(FABLE, 0, { cacheRead: 4000 });
-		assert.match(await run(h, FABLE, LOGIN, LOGIN_ENTRY, LOGIN_ACCOUNT, loginAnswer), /^cache warm · 60m left · short 1h \(in use\) · long 1h · sub, counted at \$8\/\$40 per M$/, "the login answers");
-
+		shown.login = await runOn(h, FABLE, LOGIN, LOGIN_ENTRY, LOGIN_ACCOUNT, loginAnswer);
 		h.branch.splice(h.branch.indexOf(loginAnswer));
 		h.handlers.get("session_tree")!({}, h.ctx);
 		h.handlers.get("agent_settled")!({}, h.ctx);
-		assert.match(h.statuses.get("cache-keeper")!, FALLBACK, "/tree back to the fallback");
-
+		shown.tree = h.statuses.get("cache-keeper");
 		h.branch.unshift(message(FABLE, 60_000, { cacheWrite: 4000, cacheWrite1h: 4000 }));
 		h.handlers.get("agent_settled")!({}, h.ctx);
-		assert.match(h.statuses.get("cache-keeper")!, FALLBACK, "after an earlier 1-hour write");
+		shown.oneHour = h.statuses.get("cache-keeper");
 		h.handlers.get("session_shutdown")!({}, h.ctx);
-
-		// Resumed six minutes after the fallback: its 5-minute cache is gone, never "54m left" from the login's hour.
-		const kept = h.branch.find((one) => (one as { customType?: string }).customType === "cache-keeper-answered") as { data: { at: number } };
+		// Resumed six minutes after the fallback.
+		const kept = h.branch.find((one) => (one as { customType?: string }).customType === "cache-keeper-answered") as { data: { at: number } } | undefined;
 		const resumedAnswer = message(FABLE, 6 * 60_000, { cacheRead: 4000 });
-		const resumed = harness([resumedAnswer, { ...kept, data: { ...kept.data, at: resumedAnswer.message.timestamp } }]);
-		await started(resumed, ROUTES, "resume");
+		const resumed = harness([resumedAnswer, ...(kept ? [{ ...kept, data: { ...kept.data, at: resumedAnswer.message.timestamp } }] : [])], undefined, keeper);
+		await started(resumed, routes, "resume");
 		resumed.select(FABLE);
 		resumed.handlers.get("agent_settled")!({}, resumed.ctx);
-		const after = resumed.statuses.get("cache-keeper")!;
-		assert.doesNotMatch(after, /54m left/);
-		assert.match(after, /answered by openrouter \(API key\) · short 5m \(in use\) · long 1h · api \$10\/\$50 per M$/);
+		shown.resumed = resumed.statuses.get("cache-keeper");
 		resumed.handlers.get("session_shutdown")!({}, resumed.ctx);
-
-		// The provider's extension no longer gives figures (back to pi-provimux 105.0.8): a recorded entry is ignored, and
-		// the footer reads as 0.10.8's.
-		const downgraded = harness([resumedAnswer, { ...kept, data: { ...kept.data, at: resumedAnswer.message.timestamp } }]);
+		// The provider's extension no longer gives figures (back to pi-provimux 105.0.8): a recorded entry is ignored.
+		const downgraded = harness([resumedAnswer, ...(kept ? [{ ...kept, data: { ...kept.data, at: resumedAnswer.message.timestamp } }] : [])], undefined, keeper);
 		await started(downgraded, ROUTES_ONLY, "resume");
 		downgraded.select(FABLE);
 		downgraded.handlers.get("agent_settled")!({}, downgraded.ctx);
-		assert.equal(downgraded.statuses.get("cache-keeper"), "cache lifetime unknown · sub, counted at $8/$40 per M · providers.dev: no data for this model");
+		shown.downgraded = downgraded.statuses.get("cache-keeper");
 		downgraded.handlers.get("session_shutdown")!({}, downgraded.ctx);
+		return shown;
+	};
+	try {
+		const before = await steps(false);
+		const now = await steps(true);
+		console.log(JSON.stringify({ before, now }, null, 1));
+		for (const step of Object.keys(before)) if (step !== "kept") assert.deepEqual(timeParts(now[step]), timeParts(before[step]), step);
+		assert.equal(now.kept, "1", "kept once");
+		const QUIET = /^short 5m · long 1h · api \$10\/\$50 per M$/;
+		assert.match(now.fallback!, FALLBACK);
+		assert.match(now.back!, QUIET);
+		assert.match(now.otherModel!, /^cache warm · 60m left · ⚠ countdown on another model's long tier · short 5m · long 1h · api \$10\/\$50 per M$/);
+		assert.match(now.login!, /^cache warm · 60m left · ⚠ countdown on another model's long tier · short 1h · long 1h · sub, counted at \$8\/\$40 per M$/);
+		assert.match(now.tree!, /^cache warm · 60m left · ⚠ countdown on another model's long tier · short 5m · long 1h · api \$10\/\$50 per M$/);
+		assert.match(now.oneHour!, /^cache warm · 60m left · ⚠ countdown on another model's long tier · long 1h \(in use\) · short 5m · api \$10\/\$50 per M$/);
+		assert.match(now.resumed!, QUIET);
+		assert.equal(now.downgraded, before.downgraded);
 	} finally {
 		writeFileSync(settingsPath, JSON.stringify({ cacheKeeper: { compactBeforeExpiry: false } }));
 	}
@@ -446,7 +499,8 @@ test("/tree onto the answer itself: its record is found by the answer, off the b
 		h.select(FABLE);
 		h.handlers.get("session_tree")!({}, h.ctx);
 		h.handlers.get("agent_settled")!({}, h.ctx);
-		assert.match(h.statuses.get("cache-keeper")!, FALLBACK);
+		// No report in this process (0.10.8 says no "answered by" here either): the entry's lifetimes and price.
+		assert.match(h.statuses.get("cache-keeper")!, /^short 5m · long 1h · api \$10\/\$50 per M$/);
 		h.handlers.get("session_shutdown")!({}, h.ctx);
 	} finally {
 		writeFileSync(settingsPath, JSON.stringify({ cacheKeeper: { compactBeforeExpiry: false } }));

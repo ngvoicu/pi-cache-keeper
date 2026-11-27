@@ -625,9 +625,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// (the route serving the model, the route's lifetime for the request's tier); what it says against the period goes to
 	// who warms it (`changeHands`), recorded as a skip unless the caller takes it (`taken`). Its expiry is `sendBy`: where
 	// it is unknown, nothing is sent.
-	// `at.shown`: only what the footer shows for a named answer (that entry's model, from its own answer on), read plainly
-	// and returned before anything else here happens: it reaches no period, no hand-over and no decision.
-	const look = (ctx: ExtensionContext, at: { model?: Model<Api>; entries?: SessionEntry[]; shown?: Model<Api> } = {}, taken?: (handed: Handed) => void): CacheView => {
+	const look = (ctx: ExtensionContext, at: { model?: Model<Api>; entries?: SessionEntry[] } = {}, taken?: (handed: Handed) => void): CacheView => {
 		const model = at.model ?? ctx.model;
 		if (!model) return { regime: "plain", cached: false, replied: false };
 		const entries = at.entries ?? ctx.sessionManager.getBranch();
@@ -639,14 +637,13 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const served = servedModel(model);
 		const routed = own ? servedModel(model, own.upstreams) : model;
 		// The session's model is not the one the period's cached request was written with.
-		if (!at.shown && p?.fixed && key !== p.fixed.model && model === ctx.model) handTo(ctx, p, { reason: `the model is now ${key}, the cached request was written with ${p.fixed.model}`, label: "the model changed" }, taken);
-		const clock = !at.shown && p?.taken && p.fixed?.model === key ? p.clock : undefined;
+		if (p?.fixed && key !== p.fixed.model && model === ctx.model) handTo(ctx, p, { reason: `the model is now ${key}, the cached request was written with ${p.fixed.model}`, label: "the model changed" }, taken);
+		const clock = p?.taken && p.fixed?.model === key ? p.clock : undefined;
 		const view = cacheView(
-			at.shown ?? served,
+			served,
 			entries,
 			clock && p?.fixed ? { clock, on: warmMinutes() > 0, served: routed, routeKey: own?.identity ?? standIn(model), dataMs: lifetimeFor(routed, p.fixed.tier)?.ms, requested: p.fixed.requested } : undefined,
 		);
-		if (at.shown) return view;
 		if (p && view.regime === "period" && view.against) handTo(ctx, p, view.against, taken, view);
 		return view;
 	};
@@ -970,11 +967,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const renderFooter = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
 		const model = ctx.model;
-		// What answered, named by the gateway: the countdown of its entry's lifetime (shown only; the timer is the extension's).
-		const shown = model ? shownCountdown(ctx, model) : undefined;
-		tickShown(shown?.countdown?.state === "warm");
-		const counting = shown ? shown.countdown : countdown;
-		const text = model ? formatFooter({ countdown: counting, keepWarm: keepWarmView(model), stopped: period?.stopped !== undefined && !running, ...modelView }, footerWidth(), (piece, tone) => ctx.ui.theme.fg(tone, piece)) : undefined;
+		const text = model ? formatFooter({ countdown, keepWarm: keepWarmView(model), stopped: period?.stopped !== undefined && !running, ...modelView }, footerWidth(), (piece, tone) => ctx.ui.theme.fg(tone, piece)) : undefined;
 		if (text === footerText) return;
 		footerText = text;
 		ctx.ui.setStatus(STATUS_KEY, text);
@@ -1068,9 +1061,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		return { ...model, promptCache };
 	};
 	// ---- What answered, by its providers.dev entry: shown, and nothing else.
-	// From a gateway that names the entry of each answer (Provimux, through pi-provimux), the footer's lifetime, countdown,
-	// tier in use and price, and /cache-keeper's "last answer", are that entry's, from the gateway's figures. Everything
-	// that decides what is sent, booked or written into models.json reads the same inputs as without it.
+	// From a gateway that names the entry of each answer (Provimux, through pi-provimux), the footer's cache lifetimes and
+	// price, and /cache-keeper's "last answer", are that entry's, from the gateway's figures. The countdown, keep-warm and
+	// everything that decides what is sent, booked or written into models.json are as without it.
 	interface NamedAnswer {
 		entry: string | null;
 		upstreams: Upstream[];
@@ -1081,7 +1074,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// The named answers of this process, by `provider/id timestamp`; and when each model's last answer ended.
 	const namedAnswers = new Map<string, NamedAnswer>();
 	const answerEnds = new Map<string, number>();
-	const gatewayOf = (provider: string): GatewayFigures | undefined => (config.modelData ? data.gateway?.[provider] : undefined);
+	// The figures each proxy extension last told (UPSTREAMS_EVENT), by pi provider: in memory only, told again at each start.
+	const figures = new Map<string, GatewayFigures>();
+	const gatewayOf = (provider: string): GatewayFigures | undefined => (config.modelData ? figures.get(provider) : undefined);
 	const lastAnswerOf = (entries: SessionEntry[], model: { provider: string; id: string }): { index: number; at: number } | undefined => {
 		for (let i = entries.length - 1; i >= 0; i--) {
 			const entry = entries[i];
@@ -1115,12 +1110,14 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		}
 		return undefined;
 	};
-	// The named answer the shown values follow for a model: while a run is out, its named report; else the model's own
-	// last answer on the branch, by its record. None where the gateway gives no figures (as without it).
+	// The named answer the shown values follow for a model: its named report while a run is out, or where it came after the
+	// model's last answer ended (a refresh) and is still the latest report the footer reads (`answered`); else the model's
+	// own last answer on the branch, by its record. None where the gateway gives no figures (as without it).
 	const namedFor = (ctx: ExtensionContext, model: { provider: string; id: string }): NamedAnswer | undefined => {
 		if (!gatewayOf(model.provider)) return undefined;
 		const key = `${model.provider}/${model.id}`;
-		if (running && liveNamed?.key === key) return liveNamed.named;
+		const latest = liveNamed?.key === key && answered?.upstreams === liveNamed.named.upstreams ? liveNamed : undefined;
+		if (latest && (running || latest.seq > (answerEnds.get(key) ?? -1))) return latest.named;
 		let branch: SessionEntry[];
 		try {
 			branch = ctx.sessionManager.getBranch();
@@ -1138,47 +1135,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const long = usableLifetime(found.facts.long);
 		const promptCache = short === undefined && long === undefined ? undefined : { ...(short === undefined ? {} : { short }), ...(long === undefined ? {} : { long }) };
 		return { model: { ...model, promptCache, cost: found.facts.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }, found };
-	};
-	// The model's own entries, from its last answer on: its cache and tier, never another model's answer after it.
-	const ownEntries = (entries: SessionEntry[], model: { provider: string; id: string }): SessionEntry[] => {
-		const last = lastAnswerOf(entries, model);
-		if (!last) return entries;
-		return entries.slice(last.index).filter((entry) => {
-			const other = (provider: unknown, id: unknown) => provider !== model.provider || id !== model.id;
-			if (entry.type === "message" && entry.message.role === "assistant") return !other(entry.message.provider, entry.message.model);
-			const usage = entry as SessionEntry & { type: string; provider?: unknown; model?: unknown };
-			return usage.type !== "usage" || !other(usage.provider, usage.model);
-		});
-	};
-	// The countdown the footer shows for a named answer: that entry's lifetime from that answer; undefined: as before.
-	const shownCountdown = (ctx: ExtensionContext, model: Model<Api>): { countdown: Countdown | undefined } | undefined => {
-		if (countdown?.state === "running" || countdown?.state === "refreshing") return undefined;
-		const named = namedFor(ctx, model);
-		if (!named) return undefined;
-		let entries: SessionEntry[];
-		try {
-			entries = ownEntries(ctx.sessionManager.getBranch(), model);
-		} catch {
-			return undefined;
-		}
-		const view = look(ctx, { model, entries, shown: shownModel(model, named).model });
-		if (view.sendBy === undefined) return { countdown: undefined };
-		const left = view.sendBy - Date.now();
-		return { countdown: left > 0 ? { state: "warm", ms: left } : { state: "cold" } };
-	};
-	// A redraw a second while a shown countdown runs: it reads only, and never touches the extension's own timer.
-	let shownTicker: ReturnType<typeof setInterval> | undefined;
-	const tickShown = (on: boolean) => {
-		if (on && !shownTicker) {
-			shownTicker = setInterval(() => {
-				const ctx = sessionCtx;
-				if (ctx) ifSessionAlive(() => renderFooter(ctx));
-			}, 1000);
-			shownTicker.unref?.();
-		} else if (!on && shownTicker) {
-			clearInterval(shownTicker);
-			shownTicker = undefined;
-		}
 	};
 	// After an answer: its named report kept with it (in memory, and once as a session entry after it, for a resume).
 	const keepNamed = (ctx: ExtensionContext) => {
@@ -1293,24 +1249,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		// has made no request yet, as after a switch and /reload, /resume or /fork): said beside it, so the two are not
 		// read as one.
 		const otherTier = !fixed && ((ownTier !== undefined && countdownTier !== ownTier) || latestAnswerIsOthers(entries, key)) ? countdownTier : undefined;
-		// What answered, named by the gateway: its entry's lifetimes, tier, price and data, from its own answer on.
-		const named = namedFor(ctx, model);
-		if (named) {
-			const shown = shownModel(model, named);
-			const own = ownEntries(entries, model);
-			const shownTier = !asked || bridge ? undefined : cacheTier(own, model);
-			const shownIn = shownTier === undefined ? undefined : shown.model.promptCache?.[shownTier];
-			const shownLifetimes = lifetimesView(shown.model.promptCache, { tier: shownTier, seconds: shownIn }, shown.found);
-			const shownSent = cache && shownTier ? sentView(cache, { tier: shownTier, ms: shownIn === undefined ? undefined : shownIn * 1000 }, shown.model.promptCache, retention) : undefined;
-			const shownVia = bridge ? undefined : accessVia({ upstreams: named.upstreams });
-			const shownRates = hasPrices(shown.model) ? priceAt(shown.model.cost, ctx.getContextUsage()?.tokens ?? undefined) : undefined;
-			const shownPrice: PriceView = { ...(shownVia ? { via: shownVia } : {}), ...(shownVia === "sub" ? { subscription: true } : {}), ...(shownRates ? { rates: shownRates } : {}) };
-			const shownData: DataView = { ...(dataView.fetch ? { fetch: dataView.fetch } : {}), ...(dataView.staleMs !== undefined ? { staleMs: dataView.staleMs } : {}) };
-			const answeredElsewhere = servedOtherwise(model, named.upstreams);
-			if (answeredElsewhere) shownData.served = servedView(answeredElsewhere);
-			if (shown.found.refs.length === 0) shownData.noData = [named.entry];
-			return { lifetimes: shownLifetimes, ...(shownSent ? { sent: shownSent } : {}), price: shownPrice, data: shownData };
-		}
 		return { lifetimes, ...(sent ? { sent } : {}), ...(otherTier ? { countdownTier: otherTier } : {}), price, data: dataView };
 	};
 	// Whether the answer the countdown counts from is another model's. Read as `cacheState` reads it where the extension
@@ -1328,10 +1266,46 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		}
 		return latest !== undefined && latest !== key;
 	};
+	// What answered, named by the gateway, over the model's own values (`own`, as 0.10.8 reads them): that entry's
+	// lifetimes and price, and "no data for <entry>" where the gateway has none for it; the values the entry replaces
+	// ("no data for this model", "shorter values") go. Everything else, among it the tier marked "(in use)", "sent" and
+	// "answered by", is `own`'s. It reads the session, the answers kept and the figures, and changes nothing.
+	const withNamed = (ctx: ExtensionContext, model: Model<Api>, own: NonNullable<typeof modelView>): NonNullable<typeof modelView> => {
+		const named = namedFor(ctx, model);
+		if (!named) return own;
+		const shown = shownModel(model, named);
+		const via = accessVia({ upstreams: named.upstreams });
+		const rates = hasPrices(shown.model) ? priceAt(shown.model.cost, ctx.getContextUsage()?.tokens ?? undefined) : undefined;
+		const { noEntry: _noEntry, guess: _guess, ...data } = own.data ?? {};
+		// "(in use)" only on the tier `own` shows it on: where `own` knows that tier's lifetime.
+		const inUse = own.lifetimes?.inUse;
+		const tier = inUse && own.lifetimes?.[inUse].seconds !== undefined ? inUse : undefined;
+		return {
+			...own,
+			lifetimes: lifetimesView(shown.model.promptCache, { tier }, shown.found),
+			price: { ...(via ? { via } : {}), ...(via === "sub" ? { subscription: true } : {}), ...(rates ? { rates } : {}) },
+			data: { ...data, ...(shown.found.refs.length === 0 ? { noData: [named.entry] } : {}) },
+		};
+	};
+	// The model's own values as last read, and the model they were read for: the figures alone change only what is shown.
+	let ownView: { model: Model<Api>; view: NonNullable<typeof modelView> } | undefined;
+	const viewOf = (ctx: ExtensionContext, model: Model<Api>) => {
+		const view = modelViewOf(ctx, model);
+		ownView = { model, view };
+		return withNamed(ctx, model, view);
+	};
 	const showData = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
 		const model = ctx.model;
-		modelView = model ? modelViewOf(ctx, model) : undefined;
+		if (!model) ownView = undefined;
+		modelView = model ? viewOf(ctx, model) : undefined;
+		renderFooter(ctx);
+	};
+	// The gateway's figures changed and the routes did not: the named values are read again over the values last read,
+	// and the footer drawn. Nothing reads the cache or the period here.
+	const showFigures = (ctx: ExtensionContext) => {
+		if (!ctx.hasUI || !ownView) return;
+		modelView = withNamed(ctx, ownView.model, ownView.view);
 		renderFooter(ctx);
 	};
 
@@ -2099,7 +2073,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (triedFor !== undefined) spentFor(first.answeredAt).add(triedFor);
 		timerRegime = first.regime;
 		if (first.regime === "period" && first.lifetime?.ms !== shownLifetimeMs) {
-			modelView = ctx.hasUI && ctx.model ? modelViewOf(ctx, ctx.model) : modelView;
+			modelView = ctx.hasUI && ctx.model ? viewOf(ctx, ctx.model) : modelView;
 		}
 		// As with keep-warm off: no expiry, no countdown.
 		if (first.regime !== "period" && first.sendBy === undefined) return renderFooter(ctx);
@@ -2365,16 +2339,12 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// A proxy extension says where its models come from (see the README): at its start, and when its list changes.
 	pi.events.on(UPSTREAMS_EVENT, (payload) => {
 		const event = parseUpstreamsEvent(payload);
-		// The gateway's figures, kept for what is shown (and saved with the routes, for the next start); they decide nothing.
-		if (event && JSON.stringify(data.gateway?.[event.provider]) !== JSON.stringify(event.figures)) {
-			const gateway = { ...data.gateway };
-			if (event.figures) gateway[event.provider] = event.figures;
-			else delete gateway[event.provider];
-			data = { ...data, gateway };
-			if (JSON.stringify(data.upstreams[event.provider]) === JSON.stringify(event.models)) {
-				saveStore(data);
-				if (sessionCtx) showData(sessionCtx);
-			}
+		// The gateway's figures, kept in memory for what is shown; they decide nothing. Where the routes are the same, only
+		// what is shown is drawn again.
+		if (event && JSON.stringify(figures.get(event.provider)) !== JSON.stringify(event.figures)) {
+			if (event.figures) figures.set(event.provider, event.figures);
+			else figures.delete(event.provider);
+			if (JSON.stringify(data.upstreams[event.provider]) === JSON.stringify(event.models) && sessionCtx) showFigures(sessionCtx);
 		}
 		if (!event || JSON.stringify(data.upstreams[event.provider]) === JSON.stringify(event.models)) return;
 		data = { ...data, upstreams: { ...data.upstreams, [event.provider]: event.models } };
@@ -2429,7 +2399,6 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		showData(ctx);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
-		tickShown(false);
 		sessionCtx = undefined;
 		if (sessionId !== undefined && lineWriters().get(sessionId) === ownWriter) lineWriters().delete(sessionId);
 		if (onResize) process.stdout.off("resize", onResize);
@@ -2896,7 +2865,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			const own = foundFor(ctx, ctx.model);
 			const configured = data.checkedAt === undefined ? `${describeFound(own)} (not fetched yet${failed}; /cache-keeper-refresh fetches it)` : `${describeFound(own)} (checked ${formatDuration(Date.now() - data.checkedAt)} ago${failed}; /cache-keeper-refresh fetches it again)`;
 			const last = named.entry === null ? "no data: Provimux has not named a providers.dev entry for it" : `${describeFound(shownModel(ctx.model, named).found)} (from Provimux; /provimux-refresh reads it again)`;
-			return `configured route: ${configured}; last answer, from ${servedText(servedView(named.upstreams, NOTE_ID_COLUMNS))}: ${last}. The footer's lifetime, countdown and price are the last answer's; keeping the cache warm and the values in ${modelsPathLabel()} go by the configured route's, as before`;
+			return `configured route: ${configured}; last answer, from ${servedText(servedView(named.upstreams, NOTE_ID_COLUMNS))}: ${last}. The footer's lifetimes and price are the last answer's. The countdown, keep-warm and the values in ${modelsPathLabel()} are what they would be without Provimux's figures`;
 		}
 		if (data.checkedAt === undefined) return `not fetched yet${failed}; /cache-keeper-refresh fetches it`;
 		const model = ctx.model;
