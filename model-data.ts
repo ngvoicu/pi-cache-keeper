@@ -80,6 +80,8 @@ export interface DataStore {
 	upstreams: Record<string, Record<string, Route>>;
 	/** pi provider id → model id → what this extension wrote into models.json. */
 	written: Record<string, Record<string, Written>>;
+	/** pi provider id → the figures the gateway behind it gave (Provimux), as its extension last told them. */
+	gateway?: Record<string, GatewayFigures>;
 }
 
 export const emptyStore = (): DataStore => ({ version: 1, providers: {}, upstreams: {}, written: {} });
@@ -273,6 +275,25 @@ export function mergeFacts(found: Facts[]): { facts: Facts; unsure: Field[]; ass
 export interface Lookup {
 	provider: string;
 	model: string;
+	/** An entry the gateway named: its values are the gateway's figures (null: none). Absent: providers.dev's data. */
+	entry?: string | null;
+}
+
+/** One entry of a gateway's figures, as this extension reads it: its values, and what they rest on. */
+export interface GatewayEntry {
+	facts: Facts;
+	/** Per cache profile: what the lifetime rests on (`measured_through_provimux`, `measured`, `documented`) and its date. */
+	basis: { short?: { basis: string; date?: string }; long?: { basis: string; date?: string } };
+	/** Whose price, and of what date. */
+	price?: { source?: string; date?: string; billing: string };
+}
+
+/** A gateway's figures (Provimux's `figures`, contract 1): its state and dataset, and its entries. */
+export interface GatewayFigures {
+	state: string;
+	datasetVersion?: string;
+	generatedAt?: string;
+	entries: Record<string, GatewayEntry>;
 }
 
  /**
@@ -289,6 +310,12 @@ export interface Upstream {
 	model?: string;
 	/** Reached with a subscription login (true) or an API key (false); absent when not known. */
 	subscription?: boolean;
+	/**
+	 * The providers.dev entry (`<provider>/<model>`) of what answered, or of what this route last answered as, as the
+	 * gateway named it (Provimux with figures). Its values are the gateway's figures and nothing is looked up for it;
+	 * null: the gateway named no entry, so there are no values. Absent: looked up from provider and model, as before.
+	 */
+	entry?: string | null;
 }
 
 /** What may serve a proxy model: one of `upstreams` (several: not known which), else, when they fail, one of `fallbacks`. */
@@ -333,9 +360,22 @@ export function lookupsFor(model: { provider: string; id: string }, access: Acce
 	if (!access.upstreams) return directLookups(model.provider, model.id, access.subscription === true);
 	const seen = new Set<string>();
 	return access.upstreams
-		.flatMap((upstream) => directLookups(upstream.provider, upstream.model ?? model.id, upstream.subscription))
-		.filter((lookup) => !seen.has(`${lookup.provider}\n${lookup.model}`) && seen.add(`${lookup.provider}\n${lookup.model}`));
+		.flatMap((upstream) => (upstream.entry !== undefined ? [entryLookup(upstream.entry)] : directLookups(upstream.provider, upstream.model ?? model.id, upstream.subscription)))
+		.filter((lookup) => {
+			const key = lookup.entry !== undefined ? `entry\n${lookup.entry ?? ""}` : `${lookup.provider}\n${lookup.model}`;
+			return !seen.has(key) && seen.add(key);
+		});
 }
+
+/** The lookup of an entry the gateway named: its provider ends at the first slash. None: a lookup that finds nothing. */
+function entryLookup(entry: string | null): Lookup {
+	const slash = entry ? entry.indexOf("/") : -1;
+	if (!entry || slash < 0) return { provider: "", model: entry ?? "", entry };
+	return { provider: entry.slice(0, slash), model: entry.slice(slash + 1), entry };
+}
+
+/** Whether every lookup is of an entry the gateway named: its values are then the gateway's alone. */
+export const allNamed = (lookups: Lookup[]): boolean => lookups.length > 0 && lookups.every((lookup) => lookup.entry !== undefined);
 
 /** How a model is reached: a subscription login ("sub"), an API key ("api"), or either (a proxy that does not say). */
 export type Via = "sub" | "api" | "sub or api";
@@ -356,20 +396,32 @@ export interface Found {
 	assumed: Field[];
 	/** The entries that were found, as `provider/model`. */
 	refs: string[];
+	/**
+	 * Where the gateway named the entries (Provimux with figures): each named entry (null: it named none), and the
+	 * figures they were read from. Absent: providers.dev's data was looked up.
+	 */
+	named?: { entries: Array<string | null>; figures?: GatewayFigures };
 }
 
-export function findFacts(lookups: Lookup[], providers: DataStore["providers"]): Found {
+export function findFacts(lookups: Lookup[], providers: DataStore["providers"], figures?: GatewayFigures): Found {
 	const refs: string[] = [];
 	const found: Facts[] = [];
+	const named: Array<string | null> = [];
 	for (const lookup of lookups) {
-		const facts = providers[lookup.provider]?.[lookup.model];
+		if (lookup.entry !== undefined) named.push(lookup.entry);
+		const facts =
+			lookup.entry !== undefined
+				? lookup.entry && figures && Object.hasOwn(figures.entries, lookup.entry)
+					? figures.entries[lookup.entry].facts
+					: undefined
+				: providers[lookup.provider]?.[lookup.model];
 		if (!facts) continue;
 		found.push(facts);
-		refs.push(`${lookup.provider}/${lookup.model}`);
+		refs.push(lookup.entry ?? `${lookup.provider}/${lookup.model}`);
 	}
 	// One of the possible entries is not in the data: what the others say may not hold for it, so nothing is sure.
 	if (found.length > 0 && found.length < lookups.length) found.push({});
-	return { ...mergeFacts(found), refs };
+	return { ...mergeFacts(found), refs, ...(named.length > 0 ? { named: { entries: named, ...(figures ? { figures } : {}) } } : {}) };
 }
 
 export type FieldState = "found" | "assumed" | "unsure" | "missing";
@@ -550,6 +602,7 @@ export function loadStore(): DataStore {
 			providers: part("providers") as DataStore["providers"],
 			upstreams: loadRoutes(parsed.upstreams),
 			written: part("written") as DataStore["written"],
+			...(isPlainObject(parsed.gateway) ? { gateway: loadGateway(parsed.gateway) } : {}),
 		};
 	} catch {
 		// Missing, cut short or from another version: start again; the next refresh fills it.
@@ -696,10 +749,13 @@ const parseUpstream = (value: unknown): Upstream | undefined => {
 	// upstream's own model.
 	const model = value.model === undefined ? undefined : cleanReportedId(value.model);
 	if (value.model !== undefined && !model) return undefined;
+	// An entry the gateway named: cleaned as any reported id; one that can't be read is no entry (no values).
+	const entry = value.entry === null ? null : typeof value.entry === "string" ? (cleanReportedId(value.entry) ?? null) : undefined;
 	return {
 		provider,
 		...(model ? { model } : {}),
 		...(typeof value.subscription === "boolean" ? { subscription: value.subscription } : {}),
+		...(entry !== undefined ? { entry } : {}),
 	};
 };
 
@@ -719,15 +775,125 @@ export function parseRoute(value: unknown): Route | undefined {
 	return { upstreams, ...(fallbacks && fallbacks.length > 0 ? { fallbacks } : {}) };
 }
 
-/** The UPSTREAMS_EVENT payload: `{ provider, models: { [modelId]: Route } }`, every model of that provider. */
-export function parseUpstreamsEvent(value: unknown): { provider: string; models: Record<string, Route> } | undefined {
+/**
+ * The UPSTREAMS_EVENT payload: `{ provider, models: { [modelId]: Route }, figures? }`, every model of that provider, and
+ * from a gateway that gives them (Provimux), its figures.
+ */
+export function parseUpstreamsEvent(value: unknown): { provider: string; models: Record<string, Route>; figures?: GatewayFigures } | undefined {
 	if (!isPlainObject(value) || typeof value.provider !== "string" || !value.provider || !isPlainObject(value.models)) return undefined;
 	const models: Record<string, Route> = {};
 	for (const [id, route] of Object.entries(value.models)) {
 		const parsed = parseRoute(route);
 		if (parsed) models[id] = parsed;
 	}
-	return { provider: value.provider, models };
+	const figures = parseGatewayFigures(value.figures);
+	return { provider: value.provider, models, ...(figures ? { figures } : {}) };
+}
+
+const tokensOf = (limit: unknown): { tokens?: number; atLeast?: boolean } => {
+	if (!isPlainObject(limit)) return {};
+	const tokens = positive(limit.tokens);
+	return tokens === undefined || !Number.isSafeInteger(tokens) ? {} : { tokens, atLeast: limit.at_least === true };
+};
+const day = (value: unknown) => (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : undefined);
+const BASES = new Set(["measured_through_provimux", "measured", "documented"]);
+
+/**
+ * One entry of a gateway's figures (Provimux's contract 1, `Entry`) as facts: the input window and output limit, the
+ * cache lifetime to rely on per profile (`rely_on_s`; null or an unknown basis: none), and the price, where it is
+ * charged per token or given for comparison (`per_use`, `reference`), as Pi's `cost`. A value not known is left out.
+ */
+export function gatewayEntryOf(value: unknown): GatewayEntry | undefined {
+	if (!isPlainObject(value)) return undefined;
+	const facts: Facts = {};
+	const basis: GatewayEntry["basis"] = {};
+	const window = tokensOf(value.input_window);
+	if (window.tokens !== undefined) {
+		facts.window = window.tokens;
+		if (window.atLeast) facts.windowAtLeast = true;
+	}
+	const output = tokensOf(value.max_output).tokens;
+	if (output !== undefined) facts.maxOutput = output;
+	const cache = isPlainObject(value.cache) ? value.cache : {};
+	for (const tier of ["short", "long"] as const) {
+		const lifetime = isPlainObject(cache[tier]) ? cache[tier] : undefined;
+		const seconds = atLeastZero(lifetime?.rely_on_s);
+		if (!lifetime || seconds === undefined || !BASES.has(lifetime.basis as string)) continue;
+		facts[tier] = seconds;
+		const date = day(lifetime.date);
+		basis[tier] = { basis: lifetime.basis as string, ...(date ? { date } : {}) };
+	}
+	const price = isPlainObject(value.price) ? value.price : undefined;
+	let priced: GatewayEntry["price"];
+	if (price && (price.billing === "per_use" || price.billing === "reference")) {
+		const input = atLeastZero(price.input);
+		const out = atLeastZero(price.output);
+		if (input !== undefined && out !== undefined) {
+			const writes = (Array.isArray(price.cache_write) ? price.cache_write : []).filter(isPlainObject).filter((item) => atLeastZero(item.price) !== undefined);
+			const unstated = writes.find((item) => item.lifetime_s === null || item.lifetime_s === undefined);
+			const timed = writes.filter((item) => positive(item.lifetime_s) !== undefined).sort((a, b) => (a.lifetime_s as number) - (b.lifetime_s as number));
+			const cost: Cost = { input, output: out, cacheRead: atLeastZero(price.cache_read) ?? 0, cacheWrite: atLeastZero((unstated ?? timed[0])?.price) ?? 0 };
+			const tiers: CostTier[] = [];
+			let previous: Omit<CostTier, "inputTokensAbove"> = cost;
+			const items = (Array.isArray(price.tiers) ? price.tiers : []).filter(isPlainObject).filter((tier) => Number.isSafeInteger(tier.input_tokens_above)).sort((a, b) => (a.input_tokens_above as number) - (b.input_tokens_above as number));
+			for (const tier of items) {
+				const next = {
+					input: atLeastZero(tier.input) ?? previous.input,
+					output: atLeastZero(tier.output) ?? previous.output,
+					cacheRead: atLeastZero(tier.cache_read) ?? previous.cacheRead,
+					cacheWrite: atLeastZero(tier.cache_write) ?? previous.cacheWrite,
+				};
+				tiers.push({ inputTokensAbove: tier.input_tokens_above as number, ...next });
+				previous = next;
+			}
+			if (tiers.length > 0) cost.tiers = tiers;
+			facts.cost = cost;
+			const date = day(price.date);
+			priced = { billing: price.billing, ...(typeof price.source === "string" ? { source: price.source } : {}), ...(date ? { date } : {}) };
+		}
+	}
+	return { facts, basis, ...(priced ? { price: priced } : {}) };
+}
+
+/**
+ * A gateway's figures as its extension tells them (`figures` of UPSTREAMS_EVENT: Provimux's object as it gave it).
+ * Entries are keyed by their cleaned id, as the entries upstreams name are. With the state other than `held`, none is
+ * used. Undefined when there is none.
+ */
+export function parseGatewayFigures(value: unknown): GatewayFigures | undefined {
+	if (!isPlainObject(value)) return undefined;
+	const state = typeof value.state === "string" ? value.state : "unknown";
+	const entries: Record<string, GatewayEntry> = {};
+	if (state === "held" && isPlainObject(value.entries)) {
+		for (const [ref, entry] of Object.entries(value.entries)) {
+			const id = cleanReportedId(ref);
+			const read = gatewayEntryOf(entry);
+			if (id && read) entries[id] = read;
+		}
+	}
+	const version = cleanReportedId(value.dataset_version);
+	const generated = typeof value.generated_at === "string" ? day(value.generated_at.slice(0, 10)) : undefined;
+	return { state, ...(version ? { datasetVersion: version } : {}), ...(generated ? { generatedAt: generated } : {}), entries };
+}
+
+/** Saved gateway figures, read back through the same parser as they were first read (their entries already as facts). */
+function loadGateway(value: unknown): DataStore["gateway"] {
+	const gateway: NonNullable<DataStore["gateway"]> = {};
+	if (!isPlainObject(value)) return gateway;
+	for (const [provider, figures] of Object.entries(value)) {
+		if (!isPlainObject(figures) || typeof figures.state !== "string" || !isPlainObject(figures.entries)) continue;
+		const entries: Record<string, GatewayEntry> = {};
+		for (const [ref, entry] of Object.entries(figures.entries)) {
+			if (isPlainObject(entry) && isPlainObject(entry.facts) && isPlainObject(entry.basis)) entries[ref] = entry as unknown as GatewayEntry;
+		}
+		gateway[provider] = {
+			state: figures.state,
+			...(typeof figures.datasetVersion === "string" ? { datasetVersion: figures.datasetVersion } : {}),
+			...(typeof figures.generatedAt === "string" ? { generatedAt: figures.generatedAt } : {}),
+			entries,
+		};
+	}
+	return gateway;
 }
 
 /**
@@ -758,15 +924,43 @@ export function parseAnsweredEvent(value: unknown): { provider: string; model: s
 const lifetimeLabel = (seconds: number): string => (seconds % 3600 === 0 ? `${seconds / 3600} h` : seconds % 60 === 0 ? `${seconds / 60} min` : `${seconds} s`);
 
 /** One part of `/cache-keeper`'s `model data from providers.dev:` line: which entry describes the model and what it gave. */
+/** What a lifetime from the gateway rests on, in words: "measured through Provimux with a coding agent, 2026-11-07". */
+const BASIS_WORDS: Record<string, string> = {
+	measured_through_provimux: "measured through Provimux with a coding agent",
+	measured: "measured",
+	documented: "documented, not measured",
+};
+
+/** "no data for openrouter/anthropic/claude-fable-5.2": what the gateway named, where it has no values for it. */
+export function namedText(entries: Array<string | null>): string {
+	if (entries.every((entry) => entry === null)) return "no data: Provimux has not named a providers.dev entry for it";
+	return `no data for ${entries.map((entry) => entry ?? "an answer without an entry").join(" or ")}`;
+}
+
 export function describeFound(found: Found): string {
+	// Entries the gateway named and has no values for: said, with nothing guessed.
+	if (found.named && found.refs.length === 0) return `${namedText(found.named.entries)}${found.named.entries.some((entry) => entry !== null) ? " (Provimux holds no providers.dev figures for it)" : ""}`;
 	// The line's label names providers.dev: "none" is its.
 	if (found.refs.length === 0) return "none for this model";
 	const { facts } = found;
+	// From the gateway: what each lifetime rests on, where there is one entry.
+	const one = found.named && found.refs.length === 1 ? found.named.figures?.entries[found.refs[0]] : undefined;
+	const rests = (tier: "short" | "long") => {
+		const said = one?.basis[tier];
+		return said ? ` (${BASIS_WORDS[said.basis] ?? said.basis}${said.date ? `, ${said.date}` : ""})` : "";
+	};
 	const parts = [
 		facts.window === undefined ? undefined : `window ${facts.windowAtLeast ? "at least " : ""}${facts.window.toLocaleString("en-US")}`,
-		...(["short", "long"] as const).map((tier) => (facts[tier] === undefined ? undefined : facts[tier] === 0 ? `no safe ${tier} cache lifetime` : `${tier} cache ${lifetimeLabel(facts[tier])}`)),
-		facts.cost ? `price $${facts.cost.input}/$${facts.cost.output} per million` : undefined,
+		...(["short", "long"] as const).map((tier) => (facts[tier] === undefined ? undefined : facts[tier] === 0 ? `no safe ${tier} cache lifetime${rests(tier)}` : `${tier} cache ${lifetimeLabel(facts[tier])}${rests(tier)}`)),
+		facts.cost ? `price $${facts.cost.input}/$${facts.cost.output} per million${one?.price?.billing === "reference" ? " (the API list price; this account is not billed per token)" : ""}` : undefined,
 	].filter((part) => part !== undefined);
+	if (found.named) {
+		const dataset = found.named.figures?.datasetVersion;
+		const from = `Provimux's copy of providers.dev's data${dataset ? `, dataset ${dataset.slice(0, 8)}${found.named.figures?.generatedAt ? ` of ${found.named.figures.generatedAt}` : ""}` : ""}`;
+		const unsure = found.unsure.length > 0 ? `; not used: ${found.unsure.map((field) => FIELD_LABELS[field]).join(", ")} (the entries that may answer differ)` : "";
+		const assumed = found.assumed.length > 0 ? `; ${found.assumed.map((field) => FIELD_LABELS[field]).join(", ")}: the smallest of the entries that may answer` : "";
+		return `${found.refs.join(" or ")} (${from}): ${parts.length > 0 ? parts.join(", ") : "nothing sure"}${assumed}${unsure}`;
+	}
 	const unsure = found.unsure.length > 0 ? `; not used: ${found.unsure.map((field) => FIELD_LABELS[field]).join(", ")} (it depends on whether a subscription login or an API key serves the model, which is not known)` : "";
 	const assumed = found.assumed.length > 0 ? `; ${found.assumed.map((field) => FIELD_LABELS[field]).join(", ")}: the smaller of the login's and the API key's, because which one serves the model is not known` : "";
 	return `${found.refs.join(" or ")}: ${parts.length > 0 ? parts.join(", ") : "nothing sure"}${assumed}${unsure}`;

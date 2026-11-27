@@ -135,6 +135,7 @@ import {
 	findFacts,
 	fieldStates,
 	accessVia,
+	allNamed,
 	parseAnsweredEvent,
 	parseUpstreamsEvent,
 	type Upstream,
@@ -153,6 +154,8 @@ import {
 	type DataStore,
 	type Fetch,
 	type Found,
+	type GatewayFigures,
+	type Lookup,
 } from "./model-data.ts";
 import { agentDirLabel, covers, firstSaid, noteMessage, readStop, rememberLoad, seenFor, stopPathLabel, writeStop, type StopRead } from "./stop-record.ts";
 import { answerToPi, end, leave, mayLeave, onAgainst, settle, WAITING, warmer, type Warmer, type WarmPhase } from "./warm-period.ts";
@@ -741,7 +744,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		}
 		// Owned or left alone, never in between: where one refresh costs as much as the miss it avoids, the gate would
 		// stop the first refresh, so the period is not taken from Pi at all.
-		if (state.answerPrompt !== undefined && !refreshCanPay(warmBudget(request.model, state.answerPrompt))) return no("a refresh costs a miss", "at this model's prices a refresh costs as much as a miss");
+		// At the prices of what served the answer, where the gateway named it (`routed`); otherwise the model's own.
+		if (state.answerPrompt !== undefined && !refreshCanPay(warmBudget(routed, state.answerPrompt))) return no("a refresh costs a miss", "at this model's prices a refresh costs as much as a miss");
 		return started;
 	};
 	// Pi is idle. After a run that brought a new real answer (or at a session's start) a new period starts; after one that
@@ -782,7 +786,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const clock = "clock" in took ? took.clock : undefined;
 		const request = clock ? answerRequest : undefined;
 		const onAtStart = warmMinutes(true) > 0;
-		const budget = request && state?.answerPrompt !== undefined ? warmBudget(request.model, state.answerPrompt) : undefined;
+		// Priced as what served the answer, where the gateway named it; otherwise at the model's own prices, as before.
+		const budget = request && state?.answerPrompt !== undefined ? warmBudget(route.upstreams ? servedModel(request.model, route.upstreams) : request.model, state.answerPrompt) : undefined;
 		const fixed = request && model && clock ? { model: `${model.provider}/${model.id}`, tier: requested, requested } : undefined;
 		period = {
 			warm: WAITING,
@@ -1023,7 +1028,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			return { subscription };
 		};
 	};
-	const foundFor = (ctx: ExtensionContext, model: Model<Api>, accessOf = accessReader(ctx)): Found => findFacts(lookupsFor(model, accessOf(model)), data.providers);
+	// Behind a gateway that names the providers.dev entry of what answers (Provimux), the figures it gave: an upstream
+	// that names an entry takes its values from them alone. With model data off, none.
+	const figuresOf = (provider: string): GatewayFigures | undefined => (config.modelData ? data.gateway?.[provider] : undefined);
+	const factsOf = (model: { provider: string }, lookups: Lookup[]): Found => findFacts(lookups, data.providers, figuresOf(model.provider));
+	const foundFor = (ctx: ExtensionContext, model: Model<Api>, accessOf = accessReader(ctx)): Found => factsOf(model, lookupsFor(model, accessOf(model)));
 
 	// What served the last request to a proxy model, as its extension said. The values in models.json are those of
 	// what may serve it; when something else answered (that failed or is cooling down, or several take turns), the
@@ -1031,7 +1040,11 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	let answered: { provider: string; id: string; upstreams: Upstream[] } | undefined;
 	const answeredFor = (model: Model<Api> | undefined): Upstream[] | undefined =>
 		model && answered && answered.provider === model.provider && answered.id === model.id ? answered.upstreams : undefined;
-	const lookupKeys = (model: Model<Api>, access: Access) => lookupsFor(model, access).map((one) => `${one.provider}/${one.model}`).sort().join(" ");
+	const lookupKeys = (model: Model<Api>, access: Access) =>
+		lookupsFor(model, access)
+			.map((one) => (one.entry !== undefined ? `entry:${one.entry ?? ""}` : `${one.provider}/${one.model}`))
+			.sort()
+			.join(" ");
 	// What answered (`upstreams`, by default the last answer reported for any model), when it is not what the values
 	// are for.
 	const servedOtherwise = (model: Model<Api> | undefined, upstreams = answeredFor(model)): Upstream[] | undefined => {
@@ -1042,13 +1055,21 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// The model with the lifetimes of what served it: `upstreams` where given (a taken period's own report), else the last
 	// answer reported for any model, as with keep-warm off.
 	const servedModel = (model: Model<Api>, served?: Upstream[]): Model<Api> => {
-		const upstreams = servedOtherwise(model, served ?? answeredFor(model));
+		const reported = served ?? answeredFor(model);
+		// Where the gateway named what answered (Provimux), that entry's values hold for the answer, also where the route
+		// names the same entry: models.json reaches the session's model only once Pi is idle again.
+		const named = reported && reported.length > 0 && allNamed(lookupsFor(model, { upstreams: reported })) ? reported : undefined;
+		const upstreams = named ?? servedOtherwise(model, reported);
 		if (!upstreams) return model;
-		const found = findFacts(lookupsFor(model, { upstreams }), data.providers);
+		const lookups = lookupsFor(model, { upstreams });
+		const found = factsOf(model, lookups);
 		const short = usableLifetime(found.facts.short);
 		const long = usableLifetime(found.facts.long);
 		const promptCache = short === undefined && long === undefined ? undefined : { ...(short === undefined ? {} : { short }), ...(long === undefined ? {} : { long }) };
-		return { ...model, promptCache };
+		// Where the gateway named what answered, its price too: the entry's, or none (no price is guessed). Otherwise Pi's
+		// price stays, as before.
+		if (!allNamed(lookups)) return { ...model, promptCache };
+		return { ...model, promptCache, cost: found.facts.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
 	};
 	// What served a request of each model (`provider/id`), as a proxy reported it (ANSWERED_EVENT): the latest report,
 	// whole, with when it arrived. A report for one model never stands for another, and a model switch keeps them. The
@@ -1087,7 +1108,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const via = bridge ? undefined : accessVia(lastAnswer ? { upstreams: lastAnswer } : access);
 		const fetched = data.checkedAt !== undefined;
 		// providers.dev's entries for the values in use: those of what answered, when that is not what the values are for.
-		const found = config.modelData && fetched ? findFacts(lookupsFor(model, otherwise ? { upstreams: otherwise } : access), data.providers) : undefined;
+		// Entries a gateway named need no download: their values came with the routes.
+		const lookups = lookupsFor(model, otherwise ? { upstreams: otherwise } : access);
+		const named = lookups.some((one) => one.entry !== undefined);
+		const found = config.modelData && (fetched || named) ? factsOf(model, lookups) : undefined;
 		const served = servedModel(model);
 		// The model's own tier in use, once it has made a request in this session (its answer on the branch, or a request
 		// the extension saw): as a period the extension took for this model fixed it (whoever warms it now), else the tier
@@ -1122,7 +1146,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const inUse = fixed ? counted && counted.ms / 1000 : (declared ?? (tier === countdownTier && counted && counted.source !== "declared by the model" ? counted.ms / 1000 : undefined));
 		const lifetimes = lifetimesView(served.promptCache, { tier, seconds: inUse }, found);
 		const sent = cache && tier ? sentView(cache, { tier, ms: inUse === undefined ? undefined : inUse * 1000 }, served.promptCache, retention) : undefined;
-		const rates = hasPrices(model) ? priceAt(model.cost, ctx.getContextUsage()?.tokens ?? undefined) : undefined;
+		// The price of what answered where the gateway named it (`served`), else Pi's own.
+		const rates = hasPrices(served) ? priceAt(served.cost, ctx.getContextUsage()?.tokens ?? undefined) : undefined;
 		const priceState = found && found.refs.length > 0 ? fieldStates(found).price : undefined;
 		const price: PriceView = {
 			...(via ? { via } : {}),
@@ -1136,7 +1161,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			if (!fetched && dataError !== undefined) dataView.fetch = "failed";
 			else if (!fetched && process.env.PI_OFFLINE) dataView.fetch = "offline";
 			if (fetched && dataError !== undefined) dataView.staleMs = Date.now() - (data.checkedAt as number);
-			if (found && found.refs.length === 0) dataView.noEntry = true;
+			if (found && found.refs.length === 0) {
+				if (found.named) dataView.noData = found.named.entries;
+				else dataView.noEntry = true;
+			}
 			if (otherwise) dataView.served = servedView(otherwise);
 			if (lifetimes.short.mark === "guess" || lifetimes.long.mark === "guess") dataView.guess = via === "sub" || via === "api" ? "login" : "access";
 		}
@@ -1219,13 +1247,15 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const neededProviders = (ctx: ExtensionContext): string[] => {
 		const needed = new Set<string>();
 		const accessOf = accessReader(ctx);
+		// An entry a gateway named is not fetched: its values came with the routes.
+		const add = (lookups: Lookup[]) => {
+			for (const lookup of lookups) if (lookup.entry === undefined) needed.add(lookup.provider);
+		};
 		for (const model of ctx.modelRegistry.getAvailable()) {
 			const access = accessOf(model);
-			for (const lookup of lookupsFor(model, access)) needed.add(lookup.provider);
+			add(lookupsFor(model, access));
 			// Whatever a proxy may fall back to, so its values are at hand when it answers.
-			for (const upstream of data.upstreams[model.provider]?.[model.id]?.fallbacks ?? []) {
-				for (const lookup of lookupsFor(model, { upstreams: [upstream] })) needed.add(lookup.provider);
-			}
+			for (const upstream of data.upstreams[model.provider]?.[model.id]?.fallbacks ?? []) add(lookupsFor(model, { upstreams: [upstream] }));
 		}
 		return [...needed].sort();
 	};
@@ -1300,7 +1330,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		ifSessionAlive(() => {
 			const missing = neededProviders(ctx).some((provider) => data.providers[provider] === undefined);
 			if (missing && ctx.hasUI && !process.env.PI_OFFLINE) void refreshAndReport(ctx, false, false);
-			else if (data.checkedAt !== undefined) void applyData(ctx).then(() => ifSessionAlive(() => showData(ctx)), () => {});
+			else if (data.checkedAt !== undefined || data.gateway !== undefined) void applyData(ctx).then(() => ifSessionAlive(() => showData(ctx)), () => {});
 		});
 	};
 
@@ -2188,8 +2218,14 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// A proxy extension says where its models come from (see the README): at its start, and when its list changes.
 	pi.events.on(UPSTREAMS_EVENT, (payload) => {
 		const event = parseUpstreamsEvent(payload);
-		if (!event || JSON.stringify(data.upstreams[event.provider]) === JSON.stringify(event.models)) return;
-		data = { ...data, upstreams: { ...data.upstreams, [event.provider]: event.models } };
+		if (!event) return;
+		// With the routes, the figures of a gateway that gives them (told again whenever its list is read again).
+		const sameFigures = JSON.stringify(data.gateway?.[event.provider]) === JSON.stringify(event.figures);
+		if (sameFigures && JSON.stringify(data.upstreams[event.provider]) === JSON.stringify(event.models)) return;
+		const gateway = { ...data.gateway };
+		if (event.figures) gateway[event.provider] = event.figures;
+		else delete gateway[event.provider];
+		data = { ...data, upstreams: { ...data.upstreams, [event.provider]: event.models }, ...(event.figures || data.gateway ? { gateway } : {}) };
 		saveStore(data);
 		if (sessionCtx) followUpstreams(sessionCtx);
 		// Before this extension's session started: done then.
@@ -2691,24 +2727,41 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const dataNote = (ctx: ExtensionContext): string => {
 		if (!config.modelData) return "off";
 		const failed = dataError ? `; the last refresh failed: ${dataError}` : "";
-		if (data.checkedAt === undefined) return `not fetched yet${failed}; /cache-keeper-refresh fetches it`;
 		const model = ctx.model;
-		const own = model ? foundFor(ctx, model) : undefined;
 		const otherwise = servedOtherwise(model);
+		// Entries a gateway named (Provimux) have their values from it: nothing to download for them.
+		// Values from the gateway: entries it named, one of them at least an entry (null alone gives nothing).
+		const fromIt = (lookups: Lookup[]) => allNamed(lookups) && lookups.some((one) => typeof one.entry === "string");
+		const ownLookups = model ? lookupsFor(model, accessReader(ctx)(model)) : [];
+		const otherLookups = model && otherwise ? lookupsFor(model, { upstreams: otherwise }) : [];
+		const ownNamed = fromIt(ownLookups);
+		const otherNamed = fromIt(otherLookups);
+		const named = allNamed(otherwise ? otherLookups : ownLookups);
+		if (data.checkedAt === undefined && !named) return `not fetched yet${failed}; /cache-keeper-refresh fetches it`;
+		const own = model ? foundFor(ctx, model) : undefined;
 		// "Pi's own values" only where no other route answered: then the footer may show that route's values.
 		let found = own ? `${describeFound(own)}${own.refs.length === 0 && !otherwise ? ", so Pi's own values are used" : ""}` : "no model";
 		const lastAnswer = answeredFor(model);
 		if (model && otherwise) {
 			// What answered, and the entries looked up for it where not all of them were found.
 			const lookups = lookupsFor(model, { upstreams: otherwise });
-			const facts = findFacts(lookups, data.providers);
-			const lookedUp = facts.refs.length < lookups.length ? `, looked up as ${lookupsText(lookups)}` : "";
+			const facts = factsOf(model, lookups);
+			// An entry the gateway named is said as it is, not as a lookup.
+			const lookedUp = facts.refs.length < lookups.length && !allNamed(lookups) ? `, looked up as ${lookupsText(lookups)}` : "";
 			found += `; the last answer came from ${servedText(servedView(otherwise, NOTE_ID_COLUMNS))}${lookedUp}: ${describeFound(facts)}`;
 		} else if (model && lastAnswer && lastAnswer.length > 0) {
 			// The expected route answered: what it was, each upstream the report names (several: not known which).
 			found += `; answered by: ${lastAnswer.map((upstream) => servedText(servedView([upstream], NOTE_ID_COLUMNS))).join(" or ")}`;
 		}
-		return `${found} (checked ${formatDuration(Date.now() - data.checkedAt)} ago${failed}; /cache-keeper-refresh fetches it again)`;
+		// The gateway's figures are read by the proxy's extension with its model list: its own refresh reads them again, not
+		// this extension's. Where both are in the line, each part says which refreshes it.
+		const fromGateway = "from Provimux; /provimux-refresh reads them again";
+		if (data.checkedAt === undefined) return ownNamed || otherNamed ? `${found} (${fromGateway})` : found;
+		if (ownNamed && (!otherwise || otherNamed)) return `${found} (${fromGateway})`;
+		const checked = `checked ${formatDuration(Date.now() - data.checkedAt)} ago${failed}; /cache-keeper-refresh fetches it again`;
+		if (otherNamed && !ownNamed) return `${found} (the values in use: ${checked}; the last answer's: ${fromGateway})`;
+		if (ownNamed && otherwise && !otherNamed) return `${found} (the values in use: ${fromGateway}; the last answer's: ${checked})`;
+		return `${found} (${checked})`;
 	};
 
 	// A session's own value, as the menu and the transcript say it.

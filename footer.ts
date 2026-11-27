@@ -220,6 +220,11 @@ export interface DataView {
 	fetch?: "failed" | "offline";
 	staleMs?: number;
 	noEntry?: boolean;
+	/**
+	 * Behind a gateway that names the providers.dev entry of what answered (Provimux): the entries it named and has no
+	 * values for (null: it named none). Shown in place of `noEntry`.
+	 */
+	noData?: Array<string | null>;
 	served?: ServedView;
 	guess?: "access" | "login";
 }
@@ -487,7 +492,12 @@ export function footerParts(view: FooterView): Part[] {
 		parts.push(plainPart(PRIORITY.guess, [`⚠ ${why}: shorter values`, "⚠ shorter values"], "warning"));
 	}
 	if (data?.fetch === "offline") parts.push(plainPart(PRIORITY.offline, ["providers.dev: no data (PI_OFFLINE)", "PI_OFFLINE"], "muted"));
-	if (data?.noEntry) parts.push(plainPart(PRIORITY.noEntry, ["providers.dev: no data for this model"], "dim"));
+	if (data?.noData) {
+		const named = data.noData.filter((entry): entry is string => entry !== null);
+		const wide = named.length === 0 ? "no data: no providers.dev entry named" : `providers.dev: no data for ${named.map((entry) => outsideText(entry, NOTE_ID_COLUMNS)).join(" or ")}`;
+		const narrow = named.length === 1 ? `no data for ${outsideText(named[0], FOOTER_ID_COLUMNS)}` : "no data";
+		parts.push(plainPart(PRIORITY.noEntry, [wide, narrow, "no data"], "dim"));
+	} else if (data?.noEntry) parts.push(plainPart(PRIORITY.noEntry, ["providers.dev: no data for this model"], "dim"));
 	return parts;
 }
 
