@@ -311,15 +311,10 @@ export interface Upstream {
 	/** Reached with a subscription login (true) or an API key (false); absent when not known. */
 	subscription?: boolean;
 	/**
-	 * The providers.dev entry (`<provider>/<model>`) of what answered, or of what this route last answered as, as the
-	 * gateway named it (Provimux with figures). Its values are the gateway's figures and nothing is looked up for it;
-	 * null: the gateway named no entry, so there are no values. Absent: looked up from provider and model, as before.
+	 * Only on what answered, as shown (never in a route or a report as read): the providers.dev entry the gateway named
+	 * (ENTRY_EVENT). Its values are the gateway's figures; null: the gateway named no entry, so there are no values.
 	 */
 	entry?: string | null;
-	/** In a route: the gateway's markers of the accounts this upstream stands for (Provimux). */
-	accounts?: string[];
-	/** On what answered: the gateway's marker of the account that answered (Provimux). */
-	account?: string;
 }
 
 /** What may serve a proxy model: one of `upstreams` (several: not known which), else, when they fail, one of `fallbacks`. */
@@ -755,17 +750,12 @@ const parseUpstream = (value: unknown): Upstream | undefined => {
 	// upstream's own model.
 	const model = value.model === undefined ? undefined : cleanReportedId(value.model);
 	if (value.model !== undefined && !model) return undefined;
-	// An entry the gateway named, whole (it is a key); one that can't be read is no entry (no values).
-	const entry = value.entry === null ? null : typeof value.entry === "string" ? (cleanEntryId(value.entry) ?? null) : undefined;
-	const accounts = Array.isArray(value.accounts) ? value.accounts.map(cleanReportedId).filter((one): one is string => one !== undefined) : undefined;
-	const account = cleanReportedId(value.account);
+	// Only what an upstream was before entries: an entry a route or a report carries is never part of what decides
+	// anything here (see ENTRY_EVENT for what answered, which is shown only).
 	return {
 		provider,
 		...(model ? { model } : {}),
 		...(typeof value.subscription === "boolean" ? { subscription: value.subscription } : {}),
-		...(entry !== undefined ? { entry } : {}),
-		...(accounts ? { accounts } : {}),
-		...(account ? { account } : {}),
 	};
 };
 

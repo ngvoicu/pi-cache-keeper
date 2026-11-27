@@ -157,8 +157,6 @@ export type KeepWarmView =
 	| { fallback: true }
 	| { ended: { stop: WarmStop; limit: string; amounts: string } }
 	| { leftToPi: string }
-	/** The gateway fell back to another account: shown, not kept warm (pi-cache-keeper's choice, whatever the setting). */
-	| { notKept: true }
 	| { pending: true }
 	| { goal: WarmGoal };
 
@@ -366,7 +364,6 @@ function keepWarmPart(view: KeepWarmView): Part {
 		// The budget and the time limit are the rule at work; the others are something gone wrong.
 		return tiny ? plainPart(PRIORITY.warmAlert, [`⚠ ${wide}`, `⚠ ${mid}`, `⚠ ${tiny}`, ALERT], "warning") : plainPart(PRIORITY.warmNote, [wide, mid], "muted");
 	}
-	if ("notKept" in view) return plainPart(PRIORITY.warmNote, ["not kept warm"], "muted");
 	if ("leftToPi" in view) return plainPart(PRIORITY.warmNote, [`keep-warm: Pi's (${view.leftToPi})`, "keep-warm: Pi's"], "muted");
 	if ("goal" in view) return goalPart(view.goal, true);
 	return plainPart(PRIORITY.warmNote, ["keep-warm: from your next message", "keep-warm: next message"], "muted");
