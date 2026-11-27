@@ -1,0 +1,157 @@
+{
+ "note": "Four rows of providers.dev's published dataset (GET /api/v1/entries, 2026-11-27), reduced to the reference and the base text prices: entries that share their first 64 characters, each with its own price.",
+ "entries": [
+  {
+   "ref": "fireworks-ai/accounts/fireworks/routers/deepseek-v4p1-flash-1017-flex",
+   "pricing": {
+    "billing": "per_use",
+    "rules": [
+     {
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 0.15,
+      "when": null,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.003,
+      "when": null,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 0.6,
+      "when": null,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     }
+    ]
+   }
+  },
+  {
+   "ref": "fireworks-ai/accounts/fireworks/routers/deepseek-v4p1-flash-1017-spot",
+   "pricing": {
+    "billing": "per_use",
+    "rules": [
+     {
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 0.15,
+      "when": null,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.003,
+      "when": null,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 0.6,
+      "when": null,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     }
+    ]
+   }
+  },
+  {
+   "ref": "fireworks-ai/accounts/fireworks/routers/deepseek-v4p1-flash-1017-ultrafast",
+   "pricing": {
+    "billing": "per_use",
+    "rules": [
+     {
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 1.2,
+      "when": null,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.024,
+      "when": null,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 4.8,
+      "when": null,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     }
+    ]
+   }
+  },
+  {
+   "ref": "fireworks-ai/accounts/fireworks/routers/deepseek-v4p1-flash-1017-us",
+   "pricing": {
+    "billing": "per_use",
+    "rules": [
+     {
+      "meter": "text.input",
+      "operation": "set",
+      "amount": 0.45,
+      "when": null,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "meter": "text.cache_read",
+      "operation": "set",
+      "amount": 0.009,
+      "when": null,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     },
+     {
+      "meter": "text.output",
+      "operation": "set",
+      "amount": 1.8,
+      "when": null,
+      "unit": {
+       "name": "token",
+       "quantity": 1000000
+      }
+     }
+    ]
+   }
+  }
+ ]
+}

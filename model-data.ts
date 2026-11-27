@@ -316,6 +316,10 @@ export interface Upstream {
 	 * null: the gateway named no entry, so there are no values. Absent: looked up from provider and model, as before.
 	 */
 	entry?: string | null;
+	/** In a route: the gateway's markers of the accounts this upstream stands for (Provimux). */
+	accounts?: string[];
+	/** On what answered: the gateway's marker of the account that answered (Provimux). */
+	account?: string;
 }
 
 /** What may serve a proxy model: one of `upstreams` (several: not known which), else, when they fail, one of `fallbacks`. */
@@ -328,6 +332,8 @@ export interface Route {
 export const REQUEST_EVENT = "model-upstreams:request";
 export const UPSTREAMS_EVENT = "model-upstreams";
 export const ANSWERED_EVENT = "model-upstreams:answered";
+/** What answered, named further, just before ANSWERED_EVENT: `{ provider, model, entry, account? }` (pi-provimux). */
+export const ENTRY_EVENT = "model-upstreams:answered-entry";
 
 export interface Access {
 	/** The login in use is a subscription (pi marks its own OAuth logins as one or not). */
@@ -749,15 +755,49 @@ const parseUpstream = (value: unknown): Upstream | undefined => {
 	// upstream's own model.
 	const model = value.model === undefined ? undefined : cleanReportedId(value.model);
 	if (value.model !== undefined && !model) return undefined;
-	// An entry the gateway named: cleaned as any reported id; one that can't be read is no entry (no values).
-	const entry = value.entry === null ? null : typeof value.entry === "string" ? (cleanReportedId(value.entry) ?? null) : undefined;
+	// An entry the gateway named, whole (it is a key); one that can't be read is no entry (no values).
+	const entry = value.entry === null ? null : typeof value.entry === "string" ? (cleanEntryId(value.entry) ?? null) : undefined;
+	const accounts = Array.isArray(value.accounts) ? value.accounts.map(cleanReportedId).filter((one): one is string => one !== undefined) : undefined;
+	const account = cleanReportedId(value.account);
 	return {
 		provider,
 		...(model ? { model } : {}),
 		...(typeof value.subscription === "boolean" ? { subscription: value.subscription } : {}),
 		...(entry !== undefined ? { entry } : {}),
+		...(accounts ? { accounts } : {}),
+		...(account ? { account } : {}),
 	};
 };
+
+/** The most code units an entry keeps; a longer one can't be read. Entries are keys: never cut, only refused. */
+const ENTRY_ID_CODE_UNITS = 512;
+
+/**
+ * An entry a gateway named (`<provider>/<model>`), as a key: whole, with control and format characters (which no
+ * entry has) as a space. Undefined for what is not a string, nothing once cleaned, or longer than any entry. It is cut
+ * only where it is shown.
+ */
+export function cleanEntryId(value: unknown): string | undefined {
+	if (typeof value !== "string" || value.length > ENTRY_ID_CODE_UNITS) return undefined;
+	const plain = value.replace(/[\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Zl}\p{Zp}\s]+/gu, " ").trim();
+	return plain || undefined;
+}
+
+/** An entry as `/cache-keeper` shows it: whole up to a line's width, else its start and its end. */
+export function shownEntry(entry: string, columns = 120): string {
+	if (entry.length <= columns) return entry;
+	const half = Math.floor((columns - 1) / 2);
+	return `${entry.slice(0, half)}…${entry.slice(-half)}`;
+}
+
+/** ENTRY_EVENT's payload: the entry an answer named (null: none) and its account. */
+export function parseEntryEvent(value: unknown): { provider: string; model: string; entry: string | null; account?: string } | undefined {
+	if (!isPlainObject(value) || typeof value.provider !== "string" || typeof value.model !== "string") return undefined;
+	const entry = value.entry === null ? null : cleanEntryId(value.entry);
+	if (entry === undefined && value.entry !== null) return { provider: value.provider, model: value.model, entry: null };
+	const account = cleanReportedId(value.account);
+	return { provider: value.provider, model: value.model, entry: entry ?? null, ...(account ? { account } : {}) };
+}
 
 const parseUpstreams = (value: unknown): Upstream[] | undefined => {
 	if (!Array.isArray(value)) return undefined;
@@ -866,7 +906,7 @@ export function parseGatewayFigures(value: unknown): GatewayFigures | undefined 
 	const entries: Record<string, GatewayEntry> = {};
 	if (state === "held" && isPlainObject(value.entries)) {
 		for (const [ref, entry] of Object.entries(value.entries)) {
-			const id = cleanReportedId(ref);
+			const id = cleanEntryId(ref);
 			const read = gatewayEntryOf(entry);
 			if (id && read) entries[id] = read;
 		}
@@ -934,7 +974,7 @@ const BASIS_WORDS: Record<string, string> = {
 /** "no data for openrouter/anthropic/claude-fable-5.2": what the gateway named, where it has no values for it. */
 export function namedText(entries: Array<string | null>): string {
 	if (entries.every((entry) => entry === null)) return "no data: Provimux has not named a providers.dev entry for it";
-	return `no data for ${entries.map((entry) => entry ?? "an answer without an entry").join(" or ")}`;
+	return `no data for ${entries.map((entry) => (entry === null ? "an answer without an entry" : shownEntry(entry))).join(" or ")}`;
 }
 
 export function describeFound(found: Found): string {
@@ -959,7 +999,7 @@ export function describeFound(found: Found): string {
 		const from = `Provimux's copy of providers.dev's data${dataset ? `, dataset ${dataset.slice(0, 8)}${found.named.figures?.generatedAt ? ` of ${found.named.figures.generatedAt}` : ""}` : ""}`;
 		const unsure = found.unsure.length > 0 ? `; not used: ${found.unsure.map((field) => FIELD_LABELS[field]).join(", ")} (the entries that may answer differ)` : "";
 		const assumed = found.assumed.length > 0 ? `; ${found.assumed.map((field) => FIELD_LABELS[field]).join(", ")}: the smallest of the entries that may answer` : "";
-		return `${found.refs.join(" or ")} (${from}): ${parts.length > 0 ? parts.join(", ") : "nothing sure"}${assumed}${unsure}`;
+		return `${found.refs.map((ref) => shownEntry(ref)).join(" or ")} (${from}): ${parts.length > 0 ? parts.join(", ") : "nothing sure"}${assumed}${unsure}`;
 	}
 	const unsure = found.unsure.length > 0 ? `; not used: ${found.unsure.map((field) => FIELD_LABELS[field]).join(", ")} (it depends on whether a subscription login or an API key serves the model, which is not known)` : "";
 	const assumed = found.assumed.length > 0 ? `; ${found.assumed.map((field) => FIELD_LABELS[field]).join(", ")}: the smaller of the login's and the API key's, because which one serves the model is not known` : "";

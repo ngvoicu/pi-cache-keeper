@@ -137,9 +137,11 @@ import {
 	accessVia,
 	allNamed,
 	parseAnsweredEvent,
+	parseEntryEvent,
 	parseUpstreamsEvent,
 	type Upstream,
 	ANSWERED_EVENT,
+	ENTRY_EVENT,
 	REQUEST_EVENT,
 	UPSTREAMS_EVENT,
 	usableLifetime,
@@ -221,6 +223,14 @@ const MIN_OWNED_LIFETIME_MS = 60_000;
 // not the request the extension saw first. Such a period is left to Pi. Later requests of the session are built without
 // strict tools from the start, so they carry no such note and are captured as sent.
 const RESENT_DIAGNOSTICS = new Set(["anthropic_strict_tools_fallback"]);
+/**
+ * The session entry that keeps a named route with the answer it served (`{ model, at, upstreams }`, `at` the answer's
+ * timestamp), written after the answer where a gateway named its providers.dev entry: what the extension shows after a
+ * resume, a model switch or `/tree` follows that answer. Never drawn, never sent to a model.
+ */
+const ANSWER_ROUTE_TYPE = "cache-keeper-answered";
+/** The footer's words for a period not kept warm because the gateway fell back to another account. */
+const NOT_KEPT_WARM = "not kept warm";
 
 /**
  * R9: per model (provider/id), how many refreshes in a row did not show a hit (a miss, or a refresh that settled without
@@ -289,6 +299,8 @@ const ASSUMED_LIFETIMES: Record<string, RegExp | undefined> = {
  */
 interface WarmPeriod {
 	answeredAt?: number;
+	/** Where the gateway named what answered: the model at that entry's prices, at which each refresh is booked. */
+	pricedAs?: Model<Api>;
 	/** When Pi went idle after the period's answer; the time limit counts from here. */
 	idleSince: number;
 	notOwned?: string;
@@ -621,7 +633,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	const look = (ctx: ExtensionContext, at: { model?: Model<Api>; entries?: SessionEntry[] } = {}, taken?: (handed: Handed) => void): CacheView => {
 		const model = at.model ?? ctx.model;
 		if (!model) return { regime: "plain", cached: false, replied: false };
-		const entries = at.entries ?? ctx.sessionManager.getBranch();
+		const entries = ownEntries(model, at.entries ?? ctx.sessionManager.getBranch());
 		const key = `${model.provider}/${model.id}`;
 		const p = period;
 		// A taken period's model is read with what served it since its run started (its own report), else as configured.
@@ -683,6 +695,15 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	};
 	// Why the extension cannot take a period, from facts that last for the period, with what the footer says of it in a
 	// few words; else the clock of the period's cache.
+	// Whether a named answer came from an account below the route's first: its account is none of the accounts the
+	// route's first upstreams stand for (pi-provimux gives each upstream its accounts' markers).
+	const belowFirst = (model: { provider: string; id: string }, upstreams: Upstream[]): boolean => {
+		if (!isNamed(upstreams)) return false;
+		const first = new Set((data.upstreams[model.provider]?.[model.id]?.upstreams ?? []).flatMap((one) => one.accounts ?? []));
+		return !upstreams.every((one) => one.account !== undefined && first.has(one.account));
+	};
+	const notKeptReason = (upstreams: Upstream[]) =>
+		`the last answer came from ${servedText(servedView(upstreams, NOTE_ID_COLUMNS))}, not an account your server tries first, so this extension does not keep that cache warm: you did not choose that account, and it may be paid by the token. It keeps the cache warm again once an answer comes from the first account (your server sends the conversation back to it when it is free, where it is set to do so)`;
 	const whyNotOwned = (
 		state: StartFacts | undefined,
 		model: Model<Api> | undefined,
@@ -695,6 +716,9 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		if (state?.answeredAt === undefined) return no(undefined, "no answer has read or written the prompt cache yet");
 		// Before the lifetime: an unnamed route has no data of its own, and that is not why the period is Pi's.
 		if (route.changed === "unnamed") return no("the route is unknown", "the proxy did not name the route that served the last answer, so which route's cache it wrote is not known");
+		// An answer from an account below the route's first (the gateway fell back to it): shown, never kept warm. You did
+		// not pick that account and it may be paid by the token.
+		if (model && route.upstreams && belowFirst(model, route.upstreams)) return no(NOT_KEPT_WARM, notKeptReason(route.upstreams));
 		if (!state.lifetime) return no("no cache lifetime", "the cache lifetime is unknown");
 		if (state.lifetime.ms < MIN_OWNED_LIFETIME_MS) return no("lifetime under a minute", `the cache lifetime (${formatDuration(state.lifetime.ms)}) is under a minute`);
 		// The same state the countdown reads: without a cached answer there is no expiry to keep warm.
@@ -766,8 +790,12 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const inWindow = ofModel.filter((r) => r.seq > sentSeq && r.seq < answeredSeq);
 		const reported = inWindow[0];
 		const later = ofModel.filter((r) => r.seq > answeredSeq);
+		// The route kept with the model's last answer goes into the session, for a resume. Where no report came (a resume, a
+		// model switch and back), that kept route stands for the route.
+		if (model) keepRoute(ctx, model);
+		const kept = !reported && model ? branchRoute(model) : undefined;
 		const route = {
-			identity: reported?.identity ?? (model ? standIn(model) : "none reported"),
+			identity: reported?.identity ?? (kept && model ? canonical({ provider: model.provider, model: model.id, upstreams: kept.upstreams }) : model ? standIn(model) : "none reported"),
 			// An answer whose report names no route (`upstreams: []`) has an unknown route: nothing is warmed on a guess.
 			changed: reported?.upstreams.length === 0
 				? ("unnamed" as const)
@@ -776,9 +804,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 				: later.some((r) => reported === undefined || r.identity !== reported.identity)
 					? ("after the answer" as const)
 					: undefined,
-			...(reported ? { upstreams: reported.upstreams } : {}),
+			...(reported ? { upstreams: reported.upstreams } : kept ? { upstreams: kept.upstreams } : {}),
 		};
-		const state = model ? startFacts(reported ? servedModel(model, reported.upstreams) : model, ctx.sessionManager.getBranch(), requested) : undefined;
+		const routeUpstreams = reported?.upstreams ?? kept?.upstreams;
+		const state = model ? startFacts(routeUpstreams ? servedModel(model, routeUpstreams) : model, ownEntries(model, ctx.sessionManager.getBranch()), requested) : undefined;
 		const answeredAt = state?.answeredAt;
 		if (!fresh && period && (answeredAt === undefined || answeredAt === period.answeredAt)) return;
 		const took = whyNotOwned(state, answerRequest?.model ?? ctx.model, route);
@@ -786,8 +815,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const clock = "clock" in took ? took.clock : undefined;
 		const request = clock ? answerRequest : undefined;
 		const onAtStart = warmMinutes(true) > 0;
-		// Priced as what served the answer, where the gateway named it; otherwise at the model's own prices, as before.
-		const budget = request && state?.answerPrompt !== undefined ? warmBudget(route.upstreams ? servedModel(request.model, route.upstreams) : request.model, state.answerPrompt) : undefined;
+		// Priced as what served the answer, where the gateway named it (and each refresh is booked at those prices);
+		// otherwise at the model's own prices, as before.
+		const pricedAs = request && route.upstreams && isNamed(route.upstreams) ? servedModel(request.model, route.upstreams) : undefined;
+		const budget = request && state?.answerPrompt !== undefined ? warmBudget(pricedAs ?? (route.upstreams ? servedModel(request.model, route.upstreams) : request.model), state.answerPrompt) : undefined;
 		const fixed = request && model && clock ? { model: `${model.provider}/${model.id}`, tier: requested, requested } : undefined;
 		period = {
 			warm: WAITING,
@@ -809,6 +840,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			budget,
 			spending: { spent: 0, refreshes: 0 },
 			fixed,
+			...(pricedAs ? { pricedAs } : {}),
 		};
 	};
 	// Who warms the period (warm-period.ts): the extension, nobody (warming ended, Pi's stays stopped), or Pi.
@@ -957,6 +989,7 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			return { goal: { minutes, until: p.idleSince + minutes * 60_000, budget } };
 		}
 		if (!p.onAtStart) return { pending: true };
+		if (p.notOwnedLabel === NOT_KEPT_WARM) return { notKept: true };
 		return p.notOwnedLabel ? { leftToPi: p.notOwnedLabel } : { goal: { minutes } };
 	};
 	const renderFooter = (ctx: ExtensionContext) => {
@@ -1037,9 +1070,85 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// What served the last request to a proxy model, as its extension said. The values in models.json are those of
 	// what may serve it; when something else answered (that failed or is cooling down, or several take turns), the
 	// lifetime of what answered is the one that holds.
-	let answered: { provider: string; id: string; upstreams: Upstream[] } | undefined;
-	const answeredFor = (model: Model<Api> | undefined): Upstream[] | undefined =>
-		model && answered && answered.provider === model.provider && answered.id === model.id ? answered.upstreams : undefined;
+	let answered: { provider: string; id: string; upstreams: Upstream[]; at: number } | undefined;
+	// Where the gateway named what answered (an upstream with `entry`, from pi-provimux and Provimux), the route of each
+	// answer is kept with the answer: in memory, and as an entry of the session after it (ANSWER_ROUTE_TYPE), so that
+	// what is shown follows the model's last answer on the branch you are on, after a model switch, `/tree` or a resume.
+	// Without a named route nothing is kept, and everything is as before.
+	const answerRoutes = new Map<string, Upstream[]>();
+	const isNamed = (upstreams: Upstream[] | undefined) => !!upstreams && upstreams.length > 0 && upstreams.some((one) => one.entry !== undefined);
+	const lastAnswerOf = (entries: SessionEntry[], model: { provider: string; id: string }): { index: number; at: number } | undefined => {
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const entry = entries[i];
+			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+			const { provider, model: id, stopReason, timestamp } = entry.message;
+			if (provider !== model.provider || id !== model.id || stopReason === "error" || stopReason === "aborted") continue;
+			return { index: i, at: timestamp };
+		}
+		return undefined;
+	};
+	const recordedRoute = (entries: SessionEntry[], key: string, at: number): Upstream[] | undefined => {
+		const kept = answerRoutes.get(`${key} ${at}`);
+		if (kept) return kept;
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const entry = entries[i] as SessionEntry & { customType?: string; data?: { model?: unknown; at?: unknown; upstreams?: unknown } };
+			if (entry.type !== "custom" || entry.customType !== ANSWER_ROUTE_TYPE || entry.data?.model !== key || entry.data.at !== at) continue;
+			const [provider, ...id] = key.split("/");
+			const parsed = parseAnsweredEvent({ provider, model: id.join("/"), upstreams: entry.data.upstreams });
+			if (parsed && isNamed(parsed.upstreams)) return parsed.upstreams;
+		}
+		return undefined;
+	};
+	// The named route of the model's last answer on the branch, where one is kept.
+	const branchRoute = (model: { provider: string; id: string }, entries?: SessionEntry[]): { upstreams: Upstream[]; at: number; index: number } | undefined => {
+		const ctx = sessionCtx;
+		let branch = entries;
+		try {
+			branch ??= ctx?.sessionManager.getBranch();
+		} catch {
+			return undefined;
+		}
+		if (!branch) return undefined;
+		const last = lastAnswerOf(branch, model);
+		if (!last) return undefined;
+		const upstreams = recordedRoute(branch, `${model.provider}/${model.id}`, last.at);
+		return upstreams ? { upstreams, at: last.at, index: last.index } : undefined;
+	};
+	// When each model's last answer ended, in the order of events: a report after it is for a later answer.
+	const answerEnds = new Map<string, number>();
+	// Writes the route kept with the model's last answer on the branch into the session, after it, once.
+	const keepRoute = (ctx: ExtensionContext, model: { provider: string; id: string }) => {
+		try {
+			const branch = ctx.sessionManager.getBranch();
+			const last = lastAnswerOf(branch, model);
+			const key = `${model.provider}/${model.id}`;
+			const upstreams = last && answerRoutes.get(`${key} ${last.at}`);
+			if (!last || !upstreams) return;
+			const written = branch.slice(last.index).some((entry) => {
+				const custom = entry as SessionEntry & { customType?: string; data?: { model?: unknown; at?: unknown } };
+				return custom.type === "custom" && custom.customType === ANSWER_ROUTE_TYPE && custom.data?.model === key && custom.data.at === last.at;
+			});
+			if (!written) pi.appendEntry<{ model: string; at: number; upstreams: Upstream[] }>(ANSWER_ROUTE_TYPE, { model: key, at: last.at, upstreams });
+		} catch {
+			// A session that is gone keeps nothing.
+		}
+	};
+	// What answered the model, as the values in the footer follow it: while a request is out, a report newer than the
+	// model's last answer on the branch; else that answer's kept route; else the last report heard, as before.
+	const answeredFor = (model: Model<Api> | undefined): Upstream[] | undefined => {
+		if (!model) return undefined;
+		const live = answered && answered.provider === model.provider && answered.id === model.id ? answered : undefined;
+		const kept = branchRoute(model);
+		if (kept && (!running || !live || live.at <= kept.at)) return kept.upstreams;
+		return live?.upstreams;
+	};
+	// The branch's entries from the model's last answer on, where its route is a named one: its tier and its cache are its
+	// own, never an earlier answer's on another route. Otherwise the whole branch, as before.
+	const ownEntries = (model: { provider: string; id: string } | undefined, entries: SessionEntry[]): SessionEntry[] => {
+		if (!model) return entries;
+		const kept = branchRoute(model, entries);
+		return kept ? entries.slice(kept.index) : entries;
+	};
 	const lookupKeys = (model: Model<Api>, access: Access) =>
 		lookupsFor(model, access)
 			.map((one) => (one.entry !== undefined ? `entry:${one.entry ?? ""}` : `${one.provider}/${one.model}`))
@@ -1126,10 +1235,10 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const request = captured && captured.model.provider === model.provider && captured.model.id === model.id ? captured : undefined;
 		const asked = request !== undefined || entries.some((e) => e.type === "message" && e.message.role === "assistant" && e.message.provider === model.provider && e.message.model === model.id);
 		// The model's own tier as the answer's write bucket names it (the countdown's, where it is this model's).
-		const ownTier = !asked || bridge ? undefined : fixed ? fixed.tier : cacheTier(entries, model);
+		const ownTier = !asked || bridge ? undefined : fixed ? fixed.tier : cacheTier(ownEntries(model, entries), model);
 		// The tier the countdown runs on: with keep-warm off, the latest tier any model's answer reported, which after a
 		// model switch can be another model's.
-		const countdownTier = fixed ? fixed.tier : cacheTier(entries);
+		const countdownTier = fixed ? fixed.tier : cacheTier(ownEntries(model, entries));
 		const counted = view.lifetime;
 		const cache = request?.payload && MARKERS_READ.has(model.api) ? (request.cache ?? requestCache(request.payload)) : undefined;
 		const retention = process.env.PI_CACHE_RETENTION === "long" ? "long" : "short";
@@ -1831,13 +1940,15 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 			// What the refresh reported it cost replaces the reserve, where its usage shows a prompt; without that (an error or
 			// abort before any usage, usage omitted or output only, a model without prices) what it cost is unknown and the
 			// reserve stays.
-			const reportedPrompt = response?.usage ? response.usage.input + response.usage.cacheRead + response.usage.cacheWrite : 0;
-			const reported = out && budget.priced && reportedPrompt > 0 ? (response?.usage?.cost?.total ?? 0) : 0;
+			// Booked at the prices of what served the period's answer where the gateway named it (Pi counted it at the
+			// model's own); otherwise as Pi counted it.
+			const used = response?.usage && p.pricedAs ? { ...response.usage, cost: calculateCost(p.pricedAs, { ...response.usage, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }) } : response?.usage;
+			const reportedPrompt = used ? used.input + used.cacheRead + used.cacheWrite : 0;
+			const reported = out && budget.priced && reportedPrompt > 0 ? (used?.cost?.total ?? 0) : 0;
 			if (reported > 0) {
 				spending.spent += reported - reserved;
 				spending.last = reported;
 			}
-			const used = response?.usage;
 			const usage = out && used && used.input + used.cacheRead + used.cacheWrite + used.output > 0 ? traceUsage(used) : undefined;
 			const seconds = (Date.now() - started) / 1000;
 			const aborted = controller.signal.aborted || response?.stopReason === "aborted";
@@ -2087,6 +2198,15 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 	// Which answer the captured request got, so a keep-warm period knows the request of its real answer.
 	pi.on("message_end", (event) => {
 		const message = event.message;
+		// A named route is kept with the answer it served: the latest report of the answer's model since its previous
+		// answer, which is the attempt that answered (a report comes with an attempt's first byte).
+		if (message.role === "assistant" && message.stopReason !== "error" && message.stopReason !== "aborted") {
+			const key = `${message.provider}/${message.model}`;
+			const since = answerEnds.get(key) ?? -1;
+			answerEnds.set(key, order);
+			const report = [...runLog].reverse().find((one) => one.key === key && one.seq > since);
+			if (report && isNamed(report.upstreams)) answerRoutes.set(`${key} ${message.timestamp}`, report.upstreams);
+		}
 		if (message.role !== "assistant" || !captured || captured.answeredAt !== undefined) return;
 		if (message.usage.cacheRead + message.usage.cacheWrite <= 0) return;
 		captured.answeredAt = message.timestamp;
@@ -2232,18 +2352,29 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		else upstreamsChanged = true;
 	});
 	// And what served a request.
+	// The providers.dev entry and the account of an answer, said just before its report (pi-provimux, from a Provimux that
+	// names them): joined to that report.
+	let namedNext: ReturnType<typeof parseEntryEvent>;
+	pi.events.on(ENTRY_EVENT, (payload) => {
+		namedNext = parseEntryEvent(payload);
+	});
 	pi.events.on(ANSWERED_EVENT, (payload) => {
 		const event = parseAnsweredEvent(payload);
+		const named = namedNext && event && namedNext.provider === event.provider && namedNext.model === event.model ? namedNext : undefined;
+		namedNext = undefined;
 		const ctx = sessionCtx;
 		if (!event) return;
+		if (named && event.upstreams.length === 1) event.upstreams = [{ ...event.upstreams[0], entry: named.entry, ...(named.account ? { account: named.account } : {}) }];
 		// An answer whose route the proxy did not name: the values in the footer are again those of what may serve the model,
 		// as before any report; for a period it is a route of its own, unlike any other (below).
 		const unnamed = event.upstreams.length === 0;
-		answered = unnamed ? undefined : { provider: event.provider, id: event.model, upstreams: event.upstreams };
-		// Kept per model, whole, with when it came; and among the current run's reports.
+		answered = unnamed ? undefined : { provider: event.provider, id: event.model, upstreams: event.upstreams, at: Date.now() };
+		// Kept per model, whole, with when it came; and among the current run's reports. A named route is the report with
+		// its entry and account.
 		const key = `${event.provider}/${event.model}`;
 		const seq = ++order;
-		const report: RouteReport = { at: Date.now(), seq, key, identity: unnamed ? `a route the proxy did not name (#${seq})` : canonical(payload), upstreams: event.upstreams };
+		const identity = unnamed ? `a route the proxy did not name (#${seq})` : isNamed(event.upstreams) ? canonical({ provider: event.provider, model: event.model, upstreams: event.upstreams }) : canonical(payload);
+		const report: RouteReport = { at: Date.now(), seq, key, identity, upstreams: event.upstreams };
 		reports.set(key, report);
 		runLog.push(report);
 		// The period's clock is told the route that served its model, also where nothing reads it before it changes again;
@@ -2258,6 +2389,8 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		showData(ctx);
 	});
 	pi.on("session_tree", (_event, ctx) => {
+		// A named report heard on the branch left behind is that branch's: the branch now shown has its own answers.
+		if (answered && isNamed(answered.upstreams)) answered = undefined;
 		// Another branch may hold other settings of the session's own: the latest entry on the branch now decides, from here
 		// on as a change made in the menu would.
 		readOwn(ctx);
@@ -2729,39 +2862,45 @@ export default function cacheKeeper(pi: ExtensionAPI) {
 		const failed = dataError ? `; the last refresh failed: ${dataError}` : "";
 		const model = ctx.model;
 		const otherwise = servedOtherwise(model);
-		// Entries a gateway named (Provimux) have their values from it: nothing to download for them.
-		// Values from the gateway: entries it named, one of them at least an entry (null alone gives nothing).
-		const fromIt = (lookups: Lookup[]) => allNamed(lookups) && lookups.some((one) => typeof one.entry === "string");
+		const lastAnswer = answeredFor(model);
 		const ownLookups = model ? lookupsFor(model, accessReader(ctx)(model)) : [];
 		const otherLookups = model && otherwise ? lookupsFor(model, { upstreams: otherwise }) : [];
-		const ownNamed = fromIt(ownLookups);
-		const otherNamed = fromIt(otherLookups);
-		const named = allNamed(otherwise ? otherLookups : ownLookups);
-		if (data.checkedAt === undefined && !named) return `not fetched yet${failed}; /cache-keeper-refresh fetches it`;
+		const checked = () => `checked ${formatDuration(Date.now() - (data.checkedAt as number))} ago${failed}; /cache-keeper-refresh fetches it again`;
+		// Through a gateway that names the providers.dev entry of what answers (pi-provimux with Provimux): the two sets are
+		// named, the configured route and the last answer, each with what reads it again.
+		const named = (lookups: Lookup[]) => lookups.some((one) => one.entry !== undefined);
+		if (model && (named(ownLookups) || named(otherLookups) || isNamed(lastAnswer))) {
+			const part = (lookups: Lookup[], found: Found): string => {
+				// Provimux named no entry: nothing to fetch, so no command is offered.
+				if (lookups.length > 0 && lookups.every((one) => one.entry === null)) return describeFound(found);
+				if (lookups.some((one) => typeof one.entry === "string")) return `${describeFound(found)} (from Provimux; /provimux-refresh reads it again)`;
+				return data.checkedAt === undefined ? `${describeFound(found)} (not fetched yet${failed}; /cache-keeper-refresh fetches it)` : `${describeFound(found)} (${checked()})`;
+			};
+			let line = `configured route: ${part(ownLookups, foundFor(ctx, model))}`;
+			if (otherwise) {
+				const facts = factsOf(model, otherLookups);
+				const lookedUp = facts.refs.length < otherLookups.length && !allNamed(otherLookups) ? `, looked up as ${lookupsText(otherLookups)}` : "";
+				line += `; last answer, from ${servedText(servedView(otherwise, NOTE_ID_COLUMNS))}${lookedUp}: ${part(otherLookups, facts)}`;
+			} else if (lastAnswer && lastAnswer.length > 0) {
+				line += `; last answer: from ${lastAnswer.map((upstream) => servedText(servedView([upstream], NOTE_ID_COLUMNS))).join(" or ")}, the configured route`;
+			}
+			return line;
+		}
+		if (data.checkedAt === undefined) return `not fetched yet${failed}; /cache-keeper-refresh fetches it`;
 		const own = model ? foundFor(ctx, model) : undefined;
 		// "Pi's own values" only where no other route answered: then the footer may show that route's values.
 		let found = own ? `${describeFound(own)}${own.refs.length === 0 && !otherwise ? ", so Pi's own values are used" : ""}` : "no model";
-		const lastAnswer = answeredFor(model);
 		if (model && otherwise) {
 			// What answered, and the entries looked up for it where not all of them were found.
 			const lookups = lookupsFor(model, { upstreams: otherwise });
 			const facts = factsOf(model, lookups);
-			// An entry the gateway named is said as it is, not as a lookup.
-			const lookedUp = facts.refs.length < lookups.length && !allNamed(lookups) ? `, looked up as ${lookupsText(lookups)}` : "";
+			const lookedUp = facts.refs.length < lookups.length ? `, looked up as ${lookupsText(lookups)}` : "";
 			found += `; the last answer came from ${servedText(servedView(otherwise, NOTE_ID_COLUMNS))}${lookedUp}: ${describeFound(facts)}`;
 		} else if (model && lastAnswer && lastAnswer.length > 0) {
 			// The expected route answered: what it was, each upstream the report names (several: not known which).
 			found += `; answered by: ${lastAnswer.map((upstream) => servedText(servedView([upstream], NOTE_ID_COLUMNS))).join(" or ")}`;
 		}
-		// The gateway's figures are read by the proxy's extension with its model list: its own refresh reads them again, not
-		// this extension's. Where both are in the line, each part says which refreshes it.
-		const fromGateway = "from Provimux; /provimux-refresh reads them again";
-		if (data.checkedAt === undefined) return ownNamed || otherNamed ? `${found} (${fromGateway})` : found;
-		if (ownNamed && (!otherwise || otherNamed)) return `${found} (${fromGateway})`;
-		const checked = `checked ${formatDuration(Date.now() - data.checkedAt)} ago${failed}; /cache-keeper-refresh fetches it again`;
-		if (otherNamed && !ownNamed) return `${found} (the values in use: ${checked}; the last answer's: ${fromGateway})`;
-		if (ownNamed && otherwise && !otherNamed) return `${found} (the values in use: ${fromGateway}; the last answer's: ${checked})`;
-		return `${found} (${checked})`;
+		return `${found} (${checked()})`;
 	};
 
 	// A session's own value, as the menu and the transcript say it.
