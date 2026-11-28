@@ -93,6 +93,31 @@ model data from providers.dev: claude-subscription/claude-opus-5-5: window 1,000
 
 That reads: the values are for a Claude login, but the proxy reported that the last answer came from a Devin login. The extension looked for providers.dev's entry `devin/claude-fable-5-2` and found none, so it has no providers.dev values for what answered. In this example the footer shows `⚠ answered by devin (login)` and no countdown; with a lifetime from elsewhere (Pi's model, or the cache write the answer reports) it would count down. When the proxy reports the route the values are for, the line names it instead, before the checked age: `answered by: anthropic (login)`. Where a value is a guess, the line says which values are the smaller of the login's and the API key's, and which were not used. [Through a proxy](#through-a-proxy) has the details.
 
+Through Provimux, the line names two sets of values: the **configured route** and the **last answer**. Each says what
+reads it again. In the case [below](#through-provimux-the-price-and-cache-lifetime-of-what-answered), keep-warm on, after OpenRouter answered `claude-fable-5-2`:
+
+Old (0.10.8):
+
+```text
+model data from providers.dev: claude-subscription/claude-fable-5-2: window 1,000,000, short cache 55 min, long cache 1 h, price $8/$40 per million; the last answer came from openrouter (API key), looked up as openrouter/claude-fable-5-2: none for this model (checked 30 s ago; /cache-keeper-refresh fetches it again)
+```
+
+New:
+
+```text
+model data from providers.dev: configured route: claude-subscription/claude-fable-5-2: window 1,000,000, short cache 55 min, long cache 1 h, price $8/$40 per million (checked 29 s ago; /cache-keeper-refresh fetches it again); last answer, from openrouter (API key): openrouter/anthropic/claude-fable-5.2 (Provimux's copy of providers.dev's data, dataset standin0 of 2026-11-27): window 1,000,000, short cache 5 min (measured, 2026-11-17), long cache 1 h (measured, 2026-11-17), price $10/$50 per million (from Provimux; /provimux-refresh reads it again). The footer's lifetimes and price are the last answer's. The countdown, keep-warm and the values in ~/.pi/agent/models.json are what they would be without Provimux's figures
+```
+
+For `opus`, a name you set, after its answer:
+
+Old: `model data from providers.dev: none for this model, so Pi's own values are used; answered by: anthropic (login) (checked 7 min ago; /cache-keeper-refresh fetches it again)`
+
+New: `model data from providers.dev: configured route: none for this model (checked 7 min ago; /cache-keeper-refresh fetches it again); last answer, from anthropic (login): claude-subscription/claude-opus-5-5 (Provimux's copy of providers.dev's data, dataset standin0 of 2026-11-27): window 1,000,000, short cache 1 h (measured, 2026-11-16), long cache 1 h (measured, 2026-11-16), price $4/$20 per million (the API list price; this account is not billed per token) (from Provimux; /provimux-refresh reads it again). The footer's lifetimes and price are the last answer's. The countdown, keep-warm and the values in ~/.pi/agent/models.json are what they would be without Provimux's figures`
+
+When the answer named no entry: `…; last answer, from llm.example.com (API key): no data: Provimux has not named a providers.dev entry for it. The footer's …`
+
+The `keep warm while you are away:` line is unchanged.
+
 **What it changes, and for how long.** It sends nothing, fetches nothing and compacts nothing. Like every window, it reads the shared stop record first, so a `/cache-keeper-stop` given in another window takes effect here.
 
 **What it does not do.** It does not refresh the cache, fetch model data or compact. The footer shows a short form of the cache's state and values, without the settings or the log, and drops parts in a narrow terminal ([The footer](#the-footer)).
@@ -622,6 +647,59 @@ A model is then looked up like the same model used directly. When several upstre
 
 [pi-provimux](https://github.com/ngvoicu/pi-provimux) answers for [Provimux](https://github.com/ngvoicu/provimux) and [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
 
+### Through Provimux: the price and cache lifetime of what answered
+
+After a fallback, the footer names the cache lifetime and the price of what really answered, instead of "unknown".
+
+Say your Claude login is overloaded and your Provimux sends the request on to an OpenRouter key. Before, the footer
+said:
+
+```text
+⚠ answered by openrouter (API key) · keep-warm: Pi's (no cache lifetime) · cache lifetime unknown · api $8/$40 · providers.dev: no data for this model
+```
+
+Now it says:
+
+```text
+⚠ answered by openrouter (API key) · keep-warm: Pi's (no cache lifetime) · short 5m · long 1h · api $10/$50 per M
+```
+
+A name you set yourself gets them too, once it has answered. For `opus`, before:
+`cache lifetime unknown · sub, no per-token price · providers.dev: no data for this model`. Now:
+`short 1h · long 1h · sub, counted at $4/$20 per M`. (The prices here are those of a test setup.)
+
+`/cache-keeper` shows the same values in its "last answer" part, with where they come from. Its price is the one the
+footer states: with a long context, the price of the tier above its threshold (`price $4/$15 per million above 272k`).
+
+**What this release does not do.**
+
+- It shows no countdown for what answered yet. The countdown (`cache warm · … left`, `cache cold`) is the same as before.
+- It does not change when the cache is kept warm. The keep-warm line, what a refresh costs and what this extension
+  writes into `models.json` are the same as before (in a narrow terminal the keep-warm words may be shortened; see
+  Limitations).
+- Pi's own total for a turn still uses the model's listed price.
+
+**How it works.** From Provimux 8.1.7-pmx.5 on, each answer from Provimux names its providers.dev entry (except
+through an account it reaches over an upstream WebSocket; see Limitations). That is the model it really sent, at the
+provider it really sent it to: behind your name `claude-fable-5-2` it can be `openrouter/anthropic/claude-fable-5.2`. Provimux also gives the price and cache lifetimes of each entry.
+[pi-provimux](https://github.com/ngvoicu/pi-provimux) hands both on. The footer then shows that entry's values, as
+Provimux gives them. Nothing is looked up by the model's name, and nothing is guessed.
+
+- **The values follow the answer.** They are those of the model's own last answer on the branch you are on, also after
+  a switch to another model and back, after `/tree` and after a resume, with two exceptions listed under Limitations
+  (a keep-warm refresh that another account answered; a turn whose accounts changed between a tool call and the final
+  answer). The extension keeps each answer's entry in the session, next to the answer. Pi does not show that entry and
+  does not send it to the model.
+- **An entry Provimux has no values for** shows `providers.dev: no data for <entry>`, with no lifetime and no price.
+- **An answer that names its account but no entry** shows `no data: no providers.dev entry named`.
+- **An entry without a cache read price** shows no price. It is never shown as a free cache read.
+
+**When nothing changes.** With pi-provimux 105.0.8, everything is as before. With an older Provimux or CLIProxyAPI,
+everything is as before too, except after a Codex WebSocket replay: the footer then names the account that answered,
+not the attempt that failed. An entry kept in a session is not shown when pi-provimux gives no values. With "Model data from providers.dev" off, Provimux's
+values are not shown either. `/provimux-refresh` reads Provimux's values again; `/cache-keeper-refresh` fetches
+providers.dev's own data, as before.
+
 ### Fetching, privacy, turning it off
 
 **When it fetches.** At the start of an interactive session, when the saved data is a day old, was read by an earlier version of the extension, or Pi can use a provider there is no data for. One small request asks whether the dataset changed; if it did, the providers you can use are downloaded (a few dozen kilobytes). They are also downloaded if a provider is missing or the saved data was read by an earlier version, even when the dataset is unchanged. A failed fetch keeps the saved data, and [the footer](#the-footer) says so. Until a first fetch works, Pi has no cache lifetime from here, so a model whose lifetime only providers.dev gives (through a proxy, most of them) gets no countdown and is not compacted before expiry; compacting when full still works. Nothing is fetched on its own in print or JSON mode or with `PI_OFFLINE` set. `/cache-keeper-refresh` fetches now.
@@ -757,6 +835,21 @@ The extension is built and checked for Pi with this extension and a provider ext
 - The footer says nothing about the fallback compaction model; `/cache-keeper` does.
 - A summary your session's model refuses is not told from any other failed summary request: the card shows the provider's words, not "quota".
 - When Pi's own compaction fails for size and no fallback compaction model is set, nothing suggests picking one.
+- Before a name's first answer, the footer shows the same values as before, looked up by the name.
+- The countdown is the one from before. It can count with another lifetime than the one shown: after the login
+  answers, the footer can say `cache warm · 5m left` next to `short 1h`, when Pi has 5 minutes registered for the name.
+- When pi-provimux could not read Provimux's list when Pi started, no values of what answered are shown until
+  `/provimux-refresh` or a new session.
+- When Provimux's values could not be read yet, an answer that names its account but no entry shows the same values
+  as before, not `no data`.
+- An account that Provimux reaches over an upstream WebSocket (a Codex or xAI account with `websockets: true`) names no
+  entry, so its answers show no values of their own.
+- When a keep-warm refresh is answered by another account than the turn before it, a model switch away and back, a
+  resume or `/tree` can show the other of the two accounts as the last answer, until the next answer.
+- When one account answers a tool call and another the final answer of the same turn, only the final answer's entry is
+  kept. After a resume, selecting the earlier message in the session tree shows the values as before this release.
+- In a narrow terminal (about 100 columns), the footer may shorten `keep-warm: Pi's (no cache lifetime)` to
+  `keep-warm: Pi's` to make room for the lifetimes and the price.
 
 ## Origins and credit
 

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.10.9] - 2026-11-28
+
+**You see the price and cache lifetimes of what really answered.** Through Provimux, after a fallback to another account, the footer and `/cache-keeper` now show that account's cache lifetimes and price where 0.10.8 said "unknown", and so does a name you set yourself once it has answered. It needs Provimux 8.1.7-pmx.5 and pi-provimux 105.0.9. Display only: what is sent, counted down, kept warm and written into `models.json` is as in 0.10.8.
+
+### Added
+- **Through Provimux, the price and cache lifetime of what answered** — After a fallback, the footer names the cache lifetime and the price of what really answered, instead of "unknown": `⚠ answered by openrouter (API key) · … · short 5m · long 1h · api $10/$50 per M`, where it said `cache lifetime unknown` and `no data for this model`. A name you set (`opus`) shows `short 1h · long 1h · sub, counted at $4/$20 per M`. `/cache-keeper` shows them as the "last answer", with where they come from, at the price the footer states (a higher price tier included). They follow the model's own last answer on your branch, also after a model switch, `/tree` or a resume, except after a keep-warm refresh that another account answered, or a turn whose tool call and final answer came from different accounts (see Limitations). An entry without values says `no data for <entry>`; nothing is guessed. This release shows no countdown for what answered yet: the countdown is the same as before. It does not change when the cache is kept warm, what a refresh costs or what is written into `models.json`. Pi's own total still uses the model's listed price. With pi-provimux 105.0.8, nothing changes; with a gateway that names no entry, nothing changes except pi-provimux's replay fix.
+
 ## [0.10.8] - 2026-11-27
 
 **You can see who answered, and every command says what it does.** Through a proxy, the footer and `/cache-keeper` now name the upstream that answered your request (`⚠ answered by devin (login)` where it said `⚠ answered by a login`), and where providers.dev has no entry for the model, `/cache-keeper` says which entries it looked up. Every command's description, its messages and `/cache-keeper`'s lines are in plain words, and the README has one Commands section. Names a proxy reports are cleaned before they are shown. No command, setting or default changed.
